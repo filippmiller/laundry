@@ -318,13 +318,60 @@ function CourierView({ demo, notify }: { demo: DemoConfig | null; notify: (notic
 function OpsView({ notify }: { notify: (notice: Notice) => void }) {
   const [report, setReport] = useState<unknown>(null);
   const [claims, setClaims] = useState<Array<{ id: string; state: string; claimType: string }>>([]);
+  const [queue, setQueue] = useState<Array<{ orderId: string; publicNumber: string }>>([]);
+  const [receipts, setReceipts] = useState<Array<{ manifestId: string; orderId: string; weightGrams: number }>>([]);
+  const [selectedOrder, setSelectedOrder] = useState("");
+  const [selectedManifest, setSelectedManifest] = useState("");
+  const [shiftId, setShiftId] = useState("");
+  const [seal, setSeal] = useState("DEMO-SEAL-001");
+  const [busy, setBusy] = useState(false);
+
   async function load() {
     try {
       setReport(await api("/dispatch/capacity-reconciliation"));
       setClaims(await api<Array<{ id: string; state: string; claimType: string }>>("/claims"));
+      setQueue(await api<Array<{ orderId: string; publicNumber: string }>>("/dispatch/pickup-queue"));
+      setReceipts(await api<Array<{ manifestId: string; orderId: string; weightGrams: number }>>("/partner/expected-receipts"));
+      const demo = await api<{ shiftId?: string }>("/dev/seed", { method: "POST", body: {} });
+      setShiftId(demo.shiftId ?? "");
+      setSelectedOrder(prev => prev || queue[0]?.orderId || "");
+      setSelectedManifest(prev => prev || receipts[0]?.manifestId || "");
     } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
   }
   useEffect(() => { void load(); }, []);
+
+  async function assign() {
+    if (!selectedOrder || !shiftId) return notify({ kind: "error", text: "Нет заказа или активной смены" });
+    setBusy(true);
+    try {
+      await api("/dispatch/pickups/assign", {
+        method: "POST", key: newKey(), body: { orderId: selectedOrder, shiftId },
+      });
+      notify({ kind: "ok", text: "Курьер назначен" });
+      await load();
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+    finally { setBusy(false); }
+  }
+
+  async function receive() {
+    if (!selectedManifest) return notify({ kind: "error", text: "Нет ожидаемой поставки" });
+    setBusy(true);
+    try {
+      const result = await api<{ status: string; incidentId?: string }>("/partner/receipts", {
+        method: "POST", key: newKey(), body: {
+          orderId: receipts.find(receipt => receipt.manifestId === selectedManifest)?.orderId,
+          manifestId: selectedManifest,
+          actual: [{ containerCode: `BAG-${selectedManifest.slice(0, 8)}`, sealSerial: seal, actualWeightGrams: 1_000 }],
+        },
+      });
+      notify(result.status === "accepted"
+        ? { kind: "ok", text: "Партия принята" }
+        : { kind: "error", text: `Расхождение: инцидент ${result.incidentId}` });
+      await load();
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+    finally { setBusy(false); }
+  }
+
   return (
     <section className="panel">
       <div className="panel-head"><div><h2>Операционная сводка</h2><p className="muted">Ёмкость, претензии, финансы</p></div></div>
@@ -333,6 +380,32 @@ function OpsView({ notify }: { notify: (notice: Notice) => void }) {
         <div className="stat"><span>Расхождения ёмкости</span><strong>{Array.isArray(report) ? report.length : "—"}</strong></div>
         <div className="stat"><span>Открытые претензии</span><strong>{claims.filter(claim => !["resolved", "denied_with_reason"].includes(claim.state)).length}</strong></div>
       </div>
+
+      <h3>Назначение забора</h3>
+      {queue.length === 0 ? <p className="empty">Нет заказов, ожидающих назначения.</p> : (
+        <div className="field">
+          <label>Заказ</label>
+          <select value={selectedOrder} onChange={event => setSelectedOrder(event.target.value)}>
+            {queue.map(item => <option key={item.orderId} value={item.orderId}>{item.publicNumber}</option>)}
+          </select>
+        </div>
+      )}
+      <button disabled={busy || !selectedOrder || !shiftId} onClick={assign}>Назначить курьера</button>
+
+      <h3>Ожидаемые поставки прачечной</h3>
+      {receipts.length === 0 ? <p className="empty">Ожидаемых поставок нет.</p> : (
+        <div className="grid two">
+          <div className="field">
+            <label>Манифест</label>
+            <select value={selectedManifest} onChange={event => setSelectedManifest(event.target.value)}>
+              {receipts.map(item => <option key={item.manifestId} value={item.manifestId}>{item.orderId.slice(0, 8)} · {item.weightGrams} г</option>)}
+            </select>
+          </div>
+          <div className="field"><label>Пломма</label><input value={seal} onChange={event => setSeal(event.target.value)} /></div>
+        </div>
+      )}
+      <button className="secondary" disabled={busy || !selectedManifest} onClick={receive}>Принять партию</button>
+
       {claims.length > 0 && (
         <ul className="timeline">
           {claims.map(claim => <li key={claim.id}><code>{claim.claimType}</code><span>{claim.state}</span></li>)}

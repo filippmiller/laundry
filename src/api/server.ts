@@ -24,8 +24,8 @@ import {
 } from "../services/finance.js";
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
 import { seedDemo } from "../services/seed.js";
-import { eq, sql } from "drizzle-orm";
-import { claims, fiscalReceipts, orders, routeStops } from "../db/schema.js";
+import { and, eq, sql } from "drizzle-orm";
+import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
 
 const SESSION_COOKIE = "laundry_session";
 
@@ -495,6 +495,26 @@ export function buildApp(db: Db) {
       `);
       return result.rows[0];
     },
+  });
+  add({
+    method: "GET", path: "/dispatch/pickup-queue", summary: "Scheduled orders awaiting courier assignment", tags: ["Dispatch"],
+    handler: async ctx => db.select({
+      orderId: orders.id, publicNumber: orders.publicNumber, state: orders.lifecycleState,
+      createdAt: orders.createdAt,
+    }).from(orders)
+      .where(and(eq(orders.organizationId, ctx.principal.organizationId), eq(orders.lifecycleState, "scheduled")))
+      .limit(50),
+  });
+  add({
+    method: "GET", path: "/partner/expected-receipts", summary: "Manifests awaiting partner receipt", tags: ["Partner"],
+    handler: async ctx => db.select({
+      manifestId: intakeManifests.id, orderId: intakeManifests.orderId,
+      weightGrams: intakeManifests.weightGrams, state: intakeManifests.state,
+      createdAt: intakeManifests.createdAt,
+    }).from(intakeManifests)
+      .where(eq(intakeManifests.organizationId, ctx.principal.organizationId))
+      .orderBy(intakeManifests.createdAt)
+      .limit(50),
   });
   add({
     method: "GET", path: "/finance/fiscal-receipts", summary: "Fiscal adapter state (never a replacement for a cash receipt)", tags: ["Finance"],
