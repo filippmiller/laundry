@@ -54,6 +54,7 @@ export const slotReservations = pgTable("slot_reservations", {
   state: reservationState("state").notNull().default("held"),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
+  requestHash: text("request_hash").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [uniqueIndex("reservation_window_idempotency_unique").on(t.windowId,t.idempotencyKey)]);
 export const containers = pgTable("containers", {
