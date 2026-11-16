@@ -1,49 +1,74 @@
 name: CI
+
 on:
   pull_request:
   push:
     branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  unit:
+  quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install --no-audit --no-fund
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm test
-      - run: npm run db:generate
-      - name: Check generated migrations
-        run: test -n "$(find drizzle -maxdepth 1 -name '*.sql' -print -quit)"
-  postgres-integration:
+      - run: npm run web:build
+      - run: npm audit --omit=dev
+      - name: Migration drift check
+        run: |
+          npm run db:generate
+          git diff --exit-code -- drizzle || (echo "Generated migrations are not checked in" && exit 1)
+
+  smoke:
+    needs: quality
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: laundry
           POSTGRES_PASSWORD: laundry_test_only
-          POSTGRES_DB: laundry_test
-        ports:
-          - 5432:5432
+          POSTGRES_DB: laundry
+        ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U laundry -d laundry_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd "pg_isready -U laundry -d laundry"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      DATABASE_URL: postgres://laundry:laundry_test_only@localhost:5432/laundry_test
-      TEST_DATABASE_URL: postgres://laundry:laundry_test_only@localhost:5432/laundry_test
+      DATABASE_URL: postgres://laundry:laundry_test_only@127.0.0.1:5432/laundry
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install --no-audit --no-fund
-      - run: npm run db:generate
-      - run: npm run db:migrate
-      - run: npx vitest run test/slot-postgres.integration.test.ts
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: npm run web:build
+      - name: Start API with disposable PostgreSQL
+        run: |
+          npm run db:migrate
+          npm run start:api > /tmp/laundry-api.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/api/v1/health > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "API did not start" && exit 1
+      - name: Smoke test
+        run: npm run smoke
+        env:
+          SMOKE_BASE_URL: http://127.0.0.1:3000
+      - name: API log
+        if: failure()
+        run: cat /tmp/laundry-api.log

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.pgdata/
+.pgdata-test/
+*.log
+*.err
+.DS_Store
+.beads.gate.lock

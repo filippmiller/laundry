@@ -1,0 +1,165 @@
+import { and, eq, inArray } from "drizzle-orm";
+import type { Db } from "../db/client.js";
+import { customerAddresses, priceRules, quotes, services, serviceWindows } from "../db/schema.js";
+import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { AppError, errors } from "../core/errors.js";
+import { appendEvent } from "../core/events.js";
+import { hashRequest, withIdempotency } from "../core/idempotency.js";
+import { calculateQuote, type QuoteInput, type ServiceLineInput } from "../domain/pricing.js";
+import { activeTariff, resolveAddress } from "./catalog.js";
+
+export type QuoteLineInput = {
+  serviceId: string;
+  tier: "economy" | "protected";
+  quantity: number;
+  unit: "piece" | "gram";
+};
+export type CreateQuoteInput = {
+  organizationId?: string;
+  customerId?: string;
+  buildingId: string;
+  tariffVersionId?: string;
+  lines: QuoteLineInput[];
+  pickupWindowId: string;
+  deliveryWindowId: string;
+  offSchedulePickup?: boolean;
+  offScheduleDelivery?: boolean;
+  key: string;
+  now?: Date;
+};
+
+export async function createQuote(db: Db, principal: Principal, input: CreateQuoteInput) {
+  assertRole(principal, ...ROLE_GROUPS.customer, ...ROLE_GROUPS.dispatcher);
+  const customerId = hasRole(principal, "customer") ? principal.userId : input.customerId;
+  if (!customerId) throw errors.forbidden();
+  const now = input.now ?? new Date();
+  const requestHash = hashRequest({ ...input, customerId, principalId: principal.userId });
+
+  const result = await withIdempotency(db, {
+    organizationId: principal.organizationId,
+    scope: "quote:create",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash,
+  }, async tx => {
+    await resolveAddress(tx as Db, principal, input.buildingId);
+    const [address] = await tx.select({ id: customerAddresses.id }).from(customerAddresses).where(and(
+      eq(customerAddresses.organizationId, principal.organizationId),
+      eq(customerAddresses.customerId, customerId),
+      eq(customerAddresses.buildingId, input.buildingId),
+    )).limit(1);
+    if (!address) throw new AppError("VALIDATION_ERROR", "CUSTOMER_ADDRESS_REQUIRED");
+    const tariff = await activeTariff(tx as Db, principal, input.tariffVersionId, now);
+    const [pickupWindow] = await tx.select().from(serviceWindows).where(and(
+      eq(serviceWindows.id, input.pickupWindowId),
+      eq(serviceWindows.organizationId, principal.organizationId),
+      eq(serviceWindows.buildingId, input.buildingId),
+      eq(serviceWindows.kind, "pickup"),
+      eq(serviceWindows.status, "open"),
+    )).limit(1);
+    const [deliveryWindow] = await tx.select().from(serviceWindows).where(and(
+      eq(serviceWindows.id, input.deliveryWindowId),
+      eq(serviceWindows.organizationId, principal.organizationId),
+      eq(serviceWindows.buildingId, input.buildingId),
+      eq(serviceWindows.kind, "delivery"),
+      eq(serviceWindows.status, "open"),
+    )).limit(1);
+    if (!pickupWindow || !deliveryWindow) throw errors.notFound("window");
+
+    const serviceIds = input.lines.map(line => line.serviceId);
+    const serviceRows = await tx.select().from(services).where(and(
+      eq(services.organizationId, principal.organizationId),
+      inArray(services.id, serviceIds),
+    ));
+    const ruleRows = await tx.select().from(priceRules).where(eq(priceRules.tariffVersionId, tariff.id));
+    const priced: ServiceLineInput[] = input.lines.map(line => {
+      const service = serviceRows.find(row => row.id === line.serviceId);
+      const rule = ruleRows.find(row => row.serviceId === line.serviceId && row.tier === line.tier && row.active);
+      if (!service || !rule) throw new AppError("VALIDATION_ERROR", "SERVICE_NOT_AVAILABLE", { serviceId: line.serviceId });
+      if (line.unit === "gram" && service.unit !== "gram") {
+        throw new AppError("VALIDATION_ERROR", "UNIT_MISMATCH", { serviceId: line.serviceId });
+      }
+      return {
+        serviceId: line.serviceId,
+        tier: line.tier,
+        quantity: line.quantity,
+        unit: service.unit as "piece" | "gram",
+        unitPriceKopeks: rule.unitPriceKopeks,
+        minQuantity: rule.minQuantity,
+        roundingRule: rule.roundingRule as "exact" | "gram_up_to_100",
+      };
+    });
+
+    const expiresAt = new Date(now.getTime() + tariff.quoteTtlMinutes * 60_000);
+    const pricingInput: QuoteInput = {
+      organizationId: principal.organizationId,
+      customerId,
+      addressId: address.id,
+      tariffVersionId: tariff.id,
+      termsVersion: tariff.termsVersion,
+      lines: priced,
+      pickupShared: !input.offSchedulePickup && pickupWindow.isShared,
+      deliveryShared: !input.offScheduleDelivery && deliveryWindow.isShared,
+      offSchedulePickupKopeks: tariff.offSchedulePickupKopeks,
+      offScheduleDeliveryKopeks: tariff.offScheduleDeliveryKopeks,
+      sharedPickupFeeKopeks: tariff.sharedPickupFeeKopeks,
+      sharedDeliveryFeeKopeks: tariff.sharedDeliveryFeeKopeks,
+      expiresAt: expiresAt.toISOString(),
+    };
+    const pricedQuote = calculateQuote(pricingInput);
+    const [quote] = await tx.insert(quotes).values({
+      organizationId: principal.organizationId,
+      customerId,
+      tariffVersionId: tariff.id,
+      state: "active",
+      snapshotJson: pricedQuote.snapshot,
+      quoteHash: pricedQuote.quoteHash,
+      totalKopeks: pricedQuote.totalKopeks,
+      expiresAt,
+    }).returning();
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "quote",
+      aggregateId: quote.id,
+      eventType: "quote.created",
+      payload: { totalKopeks: quote.totalKopeks, quoteHash: quote.quoteHash },
+    });
+    return {
+      id: quote.id,
+      organizationId: quote.organizationId,
+      customerId: quote.customerId,
+      tariffVersionId: tariff.id,
+      expiresAt: quote.expiresAt.toISOString(),
+      quoteHash: quote.quoteHash,
+      totalKopeks: quote.totalKopeks,
+      lines: pricedQuote.lines,
+      snapshot: pricedQuote.snapshot,
+    };
+  });
+  return { ...result.value, replayed: result.replayed };
+}
+
+export async function getQuote(db: Db, principal: Principal, quoteId: string) {
+  assertRole(principal, ...ROLE_GROUPS.customer, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance);
+  const [quote] = await db.select().from(quotes).where(and(
+    eq(quotes.id, quoteId),
+    eq(quotes.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!quote) throw errors.notFound("quote");
+  if (hasRole(principal, "customer") && quote.customerId !== principal.userId) throw errors.notFound("quote");
+  return quote;
+}
+
+export async function assertAcceptableQuote(
+  db: Db,
+  principal: Principal,
+  quoteId: string,
+  acceptedHash: string,
+  now = new Date(),
+) {
+  const quote = await getQuote(db, principal, quoteId);
+  if (quote.state !== "active") throw new AppError("CONFLICT_VERSION", "QUOTE_NOT_ACTIVE");
+  if (quote.quoteHash !== acceptedHash) throw new AppError("CONFLICT_VERSION", "QUOTE_HASH_MISMATCH");
+  if (quote.expiresAt <= now) throw new AppError("QUOTE_EXPIRED");
+  return quote;
+}
