@@ -75,7 +75,8 @@ export async function seedWindow(
   const [building] = await db.insert(buildings).values({
     organizationId: org.id, cityId: city.id, address: `ул. Тестовая, ${Math.random().toString(36).slice(2)}`,
   }).returning();
-  const [customer] = await db.insert(users).values({ phone: `+79${Math.floor(Math.random() * 1e9).toString().padStart(9, "0")}` }).returning();
+  const customerPhone = `+79${Math.floor(Math.random() * 1e9).toString().padStart(9, "0")}`;
+  const [customer] = await db.insert(users).values({ phone: customerPhone }).returning();
   const [window] = await db.insert(serviceWindows).values({
     organizationId: org.id,
     buildingId: building.id,
@@ -85,7 +86,10 @@ export async function seedWindow(
     capacityOrders: options.capacity ?? 1,
     feeKopeks: options.feeKopeks ?? 0,
   }).returning();
-  return { organizationId: org.id, cityId: city.id, buildingId: building.id, userId: customer.id, windowId: window.id };
+  return {
+    organizationId: org.id, cityId: city.id, buildingId: building.id,
+    userId: customer.id, phone: customerPhone, windowId: window.id,
+  };
 }
 
 export async function seedDeliveryWindow(db: Db, seed: { organizationId: string; buildingId: string }, capacity = 5) {

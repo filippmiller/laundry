@@ -9,6 +9,69 @@ import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 import { nextState, type OrderState } from "../domain/order-state.js";
 
+export async function assignPickup(
+  db: Db,
+  principal: Principal,
+  input: { orderId: string; shiftId: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.dispatcher);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "pickup:assign", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest(input),
+  }, async tx => {
+    const [order] = await tx.select().from(orders).where(and(
+      eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!order) throw errors.notFound("order");
+    const [shift] = await tx.select().from(courierShifts).where(and(
+      eq(courierShifts.id, input.shiftId), eq(courierShifts.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!shift || shift.state !== "active") throw errors.notFound("shift");
+    const [route] = await tx.insert(routes).values({
+      organizationId: principal.organizationId,
+      shiftId: shift.id,
+      kind: "pickup",
+      plannedStart: shift.startsAt,
+      plannedEnd: shift.endsAt,
+    }).returning();
+    const [stop] = await tx.insert(routeStops).values({
+      organizationId: principal.organizationId,
+      routeId: route.id,
+      orderId: order.id,
+      kind: "pickup",
+      sequence: 1,
+      assignedCourierId: shift.courierId,
+    }).returning();
+    const to = nextState(order.lifecycleState as "scheduled", "assign_pickup", principal);
+    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    await appendEvent(tx, {
+      principal, aggregateType: "order", aggregateId: order.id,
+      eventType: "order.assign_pickup", payload: { stopId: stop.id, courierId: shift.courierId },
+    });
+    return { orderId: order.id, stopId: stop.id, courierId: shift.courierId, state: to };
+  });
+}
+
+export async function currentCourierStops(db: Db, principal: Principal) {
+  assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
+  return db.select({
+    stopId: routeStops.id,
+    orderId: routeStops.orderId,
+    kind: routeStops.kind,
+    state: routeStops.state,
+    sequence: routeStops.sequence,
+    windowStart: routeStops.windowStart,
+    windowEnd: routeStops.windowEnd,
+  }).from(routeStops)
+    .where(and(
+      eq(routeStops.organizationId, principal.organizationId),
+      eq(routeStops.assignedCourierId, principal.userId),
+    ))
+    .orderBy(routeStops.sequence)
+    .limit(50);
+}
+
 export async function assignDelivery(
   db: Db,
   principal: Principal,

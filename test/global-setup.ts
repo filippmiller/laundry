@@ -4,7 +4,7 @@ import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { runMigrations } from "../src/db/migrate.js";
 
-const url = process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres_test_only@127.0.0.1:55432/laundry_test";
+const url = process.env.TEST_DATABASE_URL ?? "postgres://postgres:postgres_test_only@127.0.0.1:55433/laundry_test";
 let server: EmbeddedPostgres | undefined;
 
 async function reachable() {
@@ -31,11 +31,17 @@ export async function setup() {
       databaseDir: dataDir,
       user: "postgres",
       password: "postgres_test_only",
-      port: 55432,
+      port: 55433,
       persistent: true,
       autoRehydrateSymlinks: true,
       initdbFlags: ["--encoding=UTF8", "--locale=C"],
       onLog: () => undefined,
+      onError: message => {
+        const text = String(message);
+        if (!text.includes("ECONNRESET") && !text.includes("Connection terminated unexpectedly")) {
+          console.error(text);
+        }
+      },
     });
     if (fresh) await server.initialise();
     await server.start();
