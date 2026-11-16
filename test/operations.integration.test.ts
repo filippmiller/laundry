@@ -103,7 +103,9 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
     const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-d03" });
     await arriveStop(db, f.courier, { stopId: assigned.stopId, key: "arrive-d03" });
     const attempt = await recordDeliveryAttempt(db, f.courier, {
-      stopId: assigned.stopId, outcome: "partial", deliveredGarmentIds: [], reason: "part of order withheld", key: "attempt-d03",
+      stopId: assigned.stopId, outcome: "partial", deliveredGarmentIds: [],
+      recipientProof: { method: "code", value: "1234" },
+      reason: "part of order withheld", key: "attempt-d03",
     });
     expect(attempt.outcome).toBe("partial");
     expect((await db.select().from(orders).where(eq(orders.id, f.orderId)))[0].lifecycleState).toBe("out_for_delivery");

@@ -185,6 +185,10 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
       ));
       if (owned.length !== new Set(deliveredIds).size) throw errors.notFound("garment");
     }
+    const needsProof = input.outcome === "delivered" || input.outcome === "partial";
+    if (needsProof && Object.keys(input.recipientProof ?? {}).length === 0) {
+      throw new AppError("EVIDENCE_REQUIRED", "RECIPIENT_PROOF_REQUIRED");
+    }
     const [attempt] = await tx.insert(deliveryAttempts).values({
       organizationId: principal.organizationId,
       stopId: stop.id,

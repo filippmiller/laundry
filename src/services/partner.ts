@@ -30,8 +30,15 @@ export async function receiveHandoff(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    if (order.assignedPartnerId && order.assignedPartnerId !== principal.partnerId) {
+      throw errors.notFound("order");
+    }
     if (!["picked_up", "at_hub"].includes(order.lifecycleState)) {
       throw new AppError("INVALID_TRANSITION", "ORDER_NOT_AWAITING_RECEIPT", { state: order.lifecycleState });
+    }
+    if (!order.assignedPartnerId) {
+      await tx.update(orders).set({ assignedPartnerId: principal.partnerId })
+        .where(eq(orders.id, order.id));
     }
     const [manifest] = await tx.select().from(intakeManifests).where(and(
       eq(intakeManifests.id, input.manifestId),
@@ -91,6 +98,9 @@ export async function receiveHandoff(
       const expectedBag = expected.find(row => row.containerCode === bag.containerCode);
       const [container] = await tx.select().from(containers).where(eq(containers.code, bag.containerCode)).limit(1);
       const [seal] = await tx.select().from(seals).where(eq(seals.serialNumber, bag.sealSerial)).limit(1);
+      if (!seal || seal.state !== "assigned") {
+        throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_INTACT", { serial: bag.sealSerial, state: seal?.state ?? "unknown" });
+      }
       await tx.insert(partnerReceiptLines).values({
         receiptId: receipt.id,
         containerId: container.id,
@@ -140,6 +150,42 @@ export async function receiveHandoff(
     return { status: "accepted" as const, incidentId: null, receiptId: receipt.id };
   });
   return { ...result.value, replayed: result.replayed };
+}
+
+export async function reportSealBroken(
+  db: Db,
+  principal: Principal,
+  input: { orderId: string; sealSerial: string; reason: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.partner, "hub_worker", ...ROLE_GROUPS.dispatcher);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "custody:seal_broken",
+    key: input.key, actorId: principal.userId, requestHash: hashRequest(input),
+  }, async tx => {
+    const [seal] = await tx.select().from(seals).where(and(
+      eq(seals.serialNumber, input.sealSerial),
+      eq(seals.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!seal) throw errors.notFound("seal");
+    const [order] = await tx.select().from(orders).where(and(
+      eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!order) throw errors.notFound("order");
+    await tx.update(seals).set({ state: "broken" }).where(eq(seals.id, seal.id));
+    const [incident] = await tx.insert(custodyDiscrepancies).values({
+      organizationId: principal.organizationId,
+      orderId: order.id,
+      kind: "seal_broken",
+      detailsJson: { sealSerial: input.sealSerial },
+      openedBy: principal.userId,
+    }).returning();
+    await appendEvent(tx, {
+      principal, aggregateType: "order", aggregateId: order.id,
+      eventType: "custody.seal_broken", reason: input.reason,
+      payload: { incidentId: incident.id, sealSerial: input.sealSerial },
+    });
+    return { incidentId: incident.id, state: "broken" as const };
+  });
 }
 
 export async function startInspection(db: Db, principal: Principal, input: { orderId: string; key: string }) {

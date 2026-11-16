@@ -205,7 +205,7 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
       )).limit(1);
       if (!stop) reason = "ORDER_NOT_ASSIGNED";
     }
-    await db.insert(scanEvents).values({
+    const inserted = await db.insert(scanEvents).values({
       organizationId: principal.organizationId,
       deviceId: event.deviceId,
       clientEventId: event.clientEventId,
@@ -216,9 +216,14 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
       capturedAt: new Date(event.capturedAt),
       payloadHash: event.payloadHash,
       syncStatus: reason ? "rejected" : "accepted",
-    }).onConflictDoNothing();
-    if (reason) rejected.push({ clientEventId: event.clientEventId, reason });
-    else accepted.push(event.clientEventId);
+    }).onConflictDoNothing().returning({ id: scanEvents.id });
+    if (!inserted.length) {
+      duplicate.push(event.clientEventId);
+    } else if (reason) {
+      rejected.push({ clientEventId: event.clientEventId, reason });
+    } else {
+      accepted.push(event.clientEventId);
+    }
   }
   return { accepted, duplicate, rejected };
 }

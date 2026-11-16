@@ -1,5 +1,5 @@
 import { pgTable, uuid, text, bigint, integer, timestamp, jsonb, uniqueIndex, index } from "drizzle-orm/pg-core";
-import { organizations, users } from "./01-identity.js";
+import { organizations, partners, users } from "./01-identity.js";
 import { customerAddresses } from "./02-geography.js";
 import { tariffVersions, services } from "./03-catalog.js";
 import { orderState, quoteState, tierEnum, adjustmentState } from "./enums.js";
@@ -28,6 +28,7 @@ export const orders = pgTable("orders", {
   version: integer("version").notNull().default(1),
   termsVersion: text("terms_version").notNull(),
   acceptedQuoteHash: text("accepted_quote_hash").notNull(),
+  assignedPartnerId: uuid("assigned_partner_id").references(() => partners.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [
   uniqueIndex("orders_org_public_unique").on(t.organizationId, t.publicNumber),

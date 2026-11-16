@@ -14,7 +14,8 @@ import { createQuote } from "../services/quotes.js";
 import { createOrder, getOrderTimeline, loadOrder, scheduleOrder } from "../services/orders.js";
 import { recordIntake, syncScanEvents } from "../services/intake.js";
 import {
-  decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
+  decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
+  startInspection, startProcessing,
 } from "../services/partner.js";
 import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt } from "../services/delivery.js";
 import { decideClaim, openClaim, reopenClaim } from "../services/claims.js";
@@ -24,7 +25,7 @@ import {
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
 import { seedDemo } from "../services/seed.js";
 import { eq, sql } from "drizzle-orm";
-import { claims, orders, routeStops } from "../db/schema.js";
+import { claims, fiscalReceipts, orders, routeStops } from "../db/schema.js";
 
 const SESSION_COOKIE = "laundry_session";
 
@@ -368,6 +369,11 @@ export function buildApp(db: Db) {
     handler: ctx => receiveHandoff(db, ctx.principal, { ...ctx.body, key: idempotencyKey(ctx) }),
   });
   add({
+    method: "POST", path: "/custody/seals/broken", summary: "Report a broken seal and open an incident", tags: ["Partner", "Hub"],
+    body: z.object({ orderId: z.uuid(), sealSerial: z.string().min(2), reason: z.string().min(3), key: z.string().optional() }),
+    handler: ctx => reportSealBroken(db, ctx.principal, { ...ctx.body, key: idempotencyKey(ctx) }),
+  });
+  add({
     method: "POST", path: "/partner/orders/:id/inspection", summary: "Open inspection", tags: ["Partner"],
     params: idSchema, body: keyed.partial(),
     handler: ctx => startInspection(db, ctx.principal, { orderId: ctx.params.id, key: idempotencyKey(ctx) }),
@@ -489,6 +495,11 @@ export function buildApp(db: Db) {
       `);
       return result.rows[0];
     },
+  });
+  add({
+    method: "GET", path: "/finance/fiscal-receipts", summary: "Fiscal adapter state (never a replacement for a cash receipt)", tags: ["Finance"],
+    handler: async ctx => db.select().from(fiscalReceipts)
+      .where(eq(fiscalReceipts.organizationId, ctx.principal.organizationId)).limit(50),
   });
   add({
     method: "GET", path: "/orders", summary: "Scoped orders", tags: ["Customer", "Dispatch"],

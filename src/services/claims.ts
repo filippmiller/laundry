@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, orders,
@@ -27,12 +27,17 @@ export async function openClaim(
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
 
+    const orderEvidence = await tx.select().from(evidenceAssets).where(and(
+      eq(evidenceAssets.organizationId, principal.organizationId),
+      eq(evidenceAssets.ownerId, order.id),
+      or(eq(evidenceAssets.status, "verified"), eq(evidenceAssets.status, "legal_hold")),
+    ));
     const evidence = input.evidenceIds?.length
       ? await tx.select().from(evidenceAssets).where(and(
         eq(evidenceAssets.organizationId, principal.organizationId),
         inArray(evidenceAssets.id, input.evidenceIds),
       ))
-      : [];
+      : orderEvidence;
     if (input.evidenceIds?.length && evidence.length !== new Set(input.evidenceIds).size) {
       throw errors.notFound("evidence asset");
     }
@@ -57,6 +62,8 @@ export async function openClaim(
         reason: `claim:${claim.id}`,
         placedBy: principal.userId,
       });
+      await tx.update(evidenceAssets).set({ status: "legal_hold" })
+        .where(eq(evidenceAssets.id, asset.id));
     }
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.opened",
