@@ -1,0 +1,13 @@
+scenario_id,title,status,role_paths_covered,api_service_evidence,browser_evidence,commit,remaining_gap
+E2E-001,Economy + shared free pickup/delivery,PARTIAL,customer→dispatcher→courier→partner→courier,tests in order-flow/operations/security cover quote→order→schedule→intake→receipt→QC→delivery→bag handover,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No single browser journey; no screenshot/trace attached
+E2E-002,Paid off-schedule pickup,PARTIAL,customer,order-flow test asserts the 500 RUB line,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No end-to-end payment for the exception fee
+E2E-003,Paid off-schedule delivery,PARTIAL,customer,order-flow test asserts the 500 RUB line,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,Same as E2E-002
+E2E-004,Both exceptions + duplicate request,PARTIAL,customer,order-flow asserts both fee lines and idempotent quote replay,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No duplicate-request browser flow
+E2E-005,Protected item + Economy bag,NOT_RUN,customer→courier→partner,Intake supports mixed mode; no mixed-order journey test,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,Mixed order has no combined reconciliation test
+E2E-006,Offline courier handoff,PARTIAL,courier,Scan replay dedupe tests; device ownership/payloadHash not verified,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No durable IndexedDB queue or browser offline test
+E2E-007,Broken seal at partner,PASS,partner→support,Broken-seal blocks receipt and opens an incident (gaps test),None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No operator UI
+E2E-008,Price increase declined,PARTIAL,customer→partner,Decline returns to inspection; no revised invoice/consent,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No customer decline/return flow
+E2E-009,Lost garment, partial delivery,PASS,courier→finance,Exact-set guard, recovery stop and close guard tested,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No recovery-stop dispatch UI
+E2E-010,Partner settlement dispute,PASS,partner_finance→platform_finance,Ownership-scoped dispute test + partner invoice accrual test,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No finance UI
+E2E-011,Duplicate refund webhook and chargeback,PARTIAL,platform_finance,Concurrent refund test + signed webhook duplicate test,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No chargeback model; inbox not processed by a worker
+E2E-012,Cross-partner access,PASS,partner A vs partner B,Custody, inspection, processing and finance dispute scoped by partner,None,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,No partner UI to demonstrate the denial
