@@ -1,16 +1,27 @@
 import { useEffect, useState } from "react";
 import { api, money, newKey, type DemoConfig } from "./api";
+import { enqueueScan, localDeviceId, queuedCount, queuedScans, removeScans, scanHash } from "./offline";
 import "./styles.css";
 
 type Me = { userId: string; organizationId: string; roles: string[] };
 type Quote = { id: string; quoteHash: string; totalKopeks: number; lines: Array<{ kind: string; description: string; amountKopeks: number }> };
 type Order = { id: string; publicNumber: string; state: string; totalKopeks: number };
-type Stop = { stopId: string; orderId: string; kind: string; state: string };
+type Stop = { stopId: string; orderId: string; kind: string; state: string; publicNumber?: string };
+type Finance = {
+  orderId: string;
+  orderState: string;
+  invoice: { number: string; totalKopeks: number; state: string } | null;
+  payments: Array<{ amountKopeks: number; state: string; provider: string }>;
+  refunds: Array<{ amountKopeks: number; reason: string }>;
+  fiscalReceipts: Array<{ state: string }>;
+  providerMode: string;
+};
 type Notice = { kind: "ok" | "error"; text: string } | null;
 
 const ROLE_LABELS: Record<string, string> = {
   customer: "Клиент", courier: "Курьер", dispatcher: "Диспетчер",
   laundry_operator: "Прачечная", platform_finance: "Финансы", claims_approver: "Претензии",
+  customer_support: "Поддержка", platform_admin: "Администратор", security_auditor: "Аудит",
 };
 
 function App() {
@@ -92,6 +103,12 @@ function App() {
           {(me.roles.includes("dispatcher") || me.roles.includes("platform_finance") || me.roles.includes("claims_approver")) && (
             <OpsView notify={setNotice} />
           )}
+          {me.roles.some(item => ["customer_support", "claims_investigator", "claims_approver", "platform_admin"].includes(item)) && (
+            <SupportView notify={setNotice} />
+          )}
+          {me.roles.some(item => ["platform_admin", "security_auditor"].includes(item)) && (
+            <AdminView notify={setNotice} />
+          )}
         </main>
       )}
       <footer className="footer">Суммы указаны в копейках на сервере · тарифы демонстрационные · юридические гейты не пройдены</footer>
@@ -108,6 +125,11 @@ function CustomerView({ demo, notify }: { demo: DemoConfig; notify: (notice: Not
   const [quote, setQuote] = useState<Quote | null>(null);
   const [order, setOrder] = useState<Order | null>(null);
   const [timeline, setTimeline] = useState<Array<{ event_type: string; created_at: string }>>([]);
+  const [finance, setFinance] = useState<Finance | null>(null);
+  const [rating, setRating] = useState(5);
+  const [reviewText, setReviewText] = useState("");
+  const [threadSubject, setThreadSubject] = useState("");
+  const [threadBody, setThreadBody] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function requestQuote() {
@@ -145,19 +167,72 @@ function CustomerView({ demo, notify }: { demo: DemoConfig; notify: (notice: Not
   }
 
   async function bookSlot() {
-    if (!order || !demo.pickupWindowId) return;
+    if (!order) return;
     setBusy(true);
     try {
-      const hold = await api<{ reservationId: string }>("/slots/holds", {
+      const pickup = await api<{ reservationId: string }>("/slots/holds", {
         method: "POST", key: newKey(),
         body: { windowId: demo.pickupWindowId, ttlMinutes: 10 },
       });
+      const delivery = await api<{ reservationId: string }>("/slots/holds", {
+        method: "POST", key: newKey(),
+        body: { windowId: demo.deliveryWindowId, ttlMinutes: 10 },
+      });
       await api("/orders/" + order.id + "/schedule", {
         method: "POST", key: newKey(),
-        body: { pickupReservationId: hold.reservationId },
+        body: { pickupReservationId: pickup.reservationId, deliveryReservationId: delivery.reservationId },
       });
       await refreshTimeline(order.id);
-      notify({ kind: "ok", text: "Слот забронирован" });
+      notify({ kind: "ok", text: "Забор и доставка забронированы" });
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+    finally { setBusy(false); }
+  }
+
+  async function cancelOrder() {
+    if (!order) return;
+    setBusy(true);
+    try {
+      await api(`/orders/${order.id}/cancel`, {
+        method: "POST", key: newKey(), body: { reason: "Отмена клиентом" },
+      });
+      await refreshTimeline(order.id);
+      notify({ kind: "ok", text: "Заказ отменён, слоты освобождены" });
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+    finally { setBusy(false); }
+  }
+
+  async function loadFinance() {
+    if (!order) return;
+    try {
+      setFinance(await api<Finance>(`/orders/${order.id}/finance`));
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  async function submitReview() {
+    if (!order) return;
+    setBusy(true);
+    try {
+      await api("/reviews", {
+        method: "POST", key: newKey(),
+        body: { orderId: order.id, rating, body: reviewText },
+      });
+      notify({ kind: "ok", text: "Спасибо за отзыв" });
+      setReviewText("");
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+    finally { setBusy(false); }
+  }
+
+  async function contactSupport() {
+    if (!order) return;
+    if (threadBody.trim().length < 3) return notify({ kind: "error", text: "Опишите вопрос" });
+    setBusy(true);
+    try {
+      await api("/support/threads", {
+        method: "POST", key: newKey(),
+        body: { orderId: order.id, subject: threadSubject || "Вопрос по заказу", body: threadBody },
+      });
+      notify({ kind: "ok", text: "Обращение отправлено в поддержку" });
+      setThreadBody("");
     } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
     finally { setBusy(false); }
   }
@@ -240,6 +315,50 @@ function CustomerView({ demo, notify }: { demo: DemoConfig; notify: (notice: Not
               ))}
             </ul>
           )}
+          <div className="button-row">
+            <button className="ghost" disabled={busy} onClick={cancelOrder}>Отменить заказ</button>
+            <button className="ghost" onClick={loadFinance}>Платежи и чек</button>
+          </div>
+          {finance && (
+            <div className="result">
+              <h4>Деньги по заказу</h4>
+              <p className="muted small">Провайдер: {finance.providerMode === "fake" ? "демонстрационный (не реальные деньги)" : finance.providerMode}</p>
+              {finance.invoice ? (
+                <div className="line"><span>Счёт {finance.invoice.number}</span><strong>{money(finance.invoice.totalKopeks)}</strong></div>
+              ) : <p className="empty">Счёт ещё не выставлен.</p>}
+              {finance.payments.map((payment, index) => (
+                <div className="line" key={index}><span>Платёж · {payment.provider}</span><strong>{payment.state} · {money(payment.amountKopeks)}</strong></div>
+              ))}
+              {finance.refunds.map((refund, index) => (
+                <div className="line" key={index}><span>Возврат · {refund.reason}</span><strong>{money(refund.amountKopeks)}</strong></div>
+              ))}
+              {finance.fiscalReceipts.map((receipt, index) => (
+                <div className="line" key={index}><span>Фискальный статус</span><strong>{receipt.state}</strong></div>
+              ))}
+            </div>
+          )}
+          <div className="result">
+            <h4>Отзыв о заказе</h4>
+            <div className="grid two">
+              <div className="field">
+                <label>Оценка</label>
+                <select value={rating} onChange={event => setRating(Number(event.target.value))}>
+                  {[5, 4, 3, 2, 1].map(value => <option key={value} value={value}>{value} из 5</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Комментарий</label>
+                <input value={reviewText} onChange={event => setReviewText(event.target.value)} placeholder="Как всё прошло" />
+              </div>
+            </div>
+            <button className="secondary" disabled={busy} onClick={submitReview}>Отправить отзыв</button>
+          </div>
+          <div className="result">
+            <h4>Поддержка</h4>
+            <div className="field"><label>Тема</label><input value={threadSubject} onChange={event => setThreadSubject(event.target.value)} /></div>
+            <div className="field"><label>Вопрос</label><input value={threadBody} onChange={event => setThreadBody(event.target.value)} /></div>
+            <button className="secondary" disabled={busy} onClick={contactSupport}>Написать в поддержку</button>
+          </div>
         </div>
       )}
     </section>
@@ -253,6 +372,9 @@ function CourierView({ demo, notify }: { demo: DemoConfig | null; notify: (notic
   const [weight, setWeight] = useState(2_000);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [deviceId] = useState(() => localDeviceId());
+  const [queued, setQueued] = useState(0);
+  const [lastError, setLastError] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -261,7 +383,48 @@ function CourierView({ demo, notify }: { demo: DemoConfig | null; notify: (notic
       setSelected(rows[0]?.stopId ?? "");
     } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
   }
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+    void queuedCount().then(setQueued).catch(() => undefined);
+  }, []);
+
+  async function flushQueue() {
+    const events = await queuedScans();
+    if (!events.length) { setQueued(0); return; }
+    if (!navigator.onLine) {
+      setQueued(events.length);
+      notify({ kind: "error", text: `Нет сети. Сканы сохранены локально: ${events.length}` });
+      return;
+    }
+    try {
+      const result = await api<{
+        accepted: string[]; duplicate: string[]; rejected: Array<{ clientEventId: string; reason: string }>;
+      }>("/courier/scan-events/sync", { method: "POST", body: { events } });
+      await removeScans([...result.accepted, ...result.duplicate]);
+      setQueued((await queuedScans()).length);
+      setLastError(result.rejected[0]?.reason ?? null);
+      notify({
+        kind: result.rejected.length ? "error" : "ok",
+        text: `Сканы: принято ${result.accepted.length}, дублей ${result.duplicate.length}, отклонено ${result.rejected.length}`,
+      });
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  async function scanSelected() {
+    const stop = stops.find(row => row.stopId === selected);
+    if (!stop) return notify({ kind: "error", text: "Выберите остановку" });
+    const event = {
+      clientEventId: crypto.randomUUID(),
+      deviceId,
+      scannedType: "order" as const,
+      scannedId: stop.orderId,
+      capturedAt: new Date().toISOString(),
+      context: { stopId: selected },
+    };
+    await enqueueScan({ ...event, payloadHash: await scanHash(event) });
+    setQueued(await queuedCount());
+    await flushQueue();
+  }
 
   async function arrive() {
     await api(`/courier/stops/${selected}/arrive`, { method: "POST", key: newKey(), body: {} });
@@ -309,6 +472,17 @@ function CourierView({ demo, notify }: { demo: DemoConfig | null; notify: (notic
       <div className="button-row">
         <button className="ghost" disabled={!selected} onClick={arrive}>Прибыл</button>
         <button disabled={busy || !selected} onClick={submitIntake}>Зафиксировать приёмку</button>
+      </div>
+      <div className="result">
+        <h4>Офлайн-сканирование</h4>
+        <p className="muted small">
+          Устройство {deviceId.slice(0, 8)} · в очереди: {queued}
+          {lastError ? ` · последний отказ: ${lastError}` : ""}
+        </p>
+        <div className="button-row">
+          <button className="secondary" disabled={!selected} onClick={scanSelected}>Сканировать заказ</button>
+          <button className="ghost" onClick={flushQueue}>Синхронизировать</button>
+        </div>
       </div>
       <p className="muted small">Организация: {demo?.organizationId.slice(0, 8) ?? "—"}</p>
     </section>
@@ -419,6 +593,141 @@ function OpsView({ notify }: { notify: (notice: Notice) => void }) {
           {claims.map(claim => <li key={claim.id}><code>{claim.claimType}</code><span>{claim.state}</span></li>)}
         </ul>
       )}
+    </section>
+  );
+}
+
+type Thread = { id: string; subject: string; state: string; orderId: string | null; createdAt: string };
+type ThreadDetail = { thread: Thread; messages: Array<{ id: string; body: string; isMine: boolean }> };
+
+function SupportView({ notify }: { notify: (notice: Notice) => void }) {
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const [selected, setSelected] = useState("");
+  const [detail, setDetail] = useState<ThreadDetail | null>(null);
+  const [reply, setReply] = useState("");
+
+  async function load() {
+    try {
+      const rows = await api<Thread[]>("/support/threads");
+      setThreads(rows);
+      setSelected(rows[0]?.id ?? "");
+      if (rows[0]) setDetail(await api<ThreadDetail>(`/support/threads/${rows[0].id}`));
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function open(threadId: string) {
+    setSelected(threadId);
+    setDetail(await api<ThreadDetail>(`/support/threads/${threadId}`));
+  }
+
+  async function send() {
+    if (!selected || !reply.trim()) return notify({ kind: "error", text: "Введите ответ" });
+    try {
+      await api(`/support/threads/${selected}/messages`, {
+        method: "POST", key: newKey(), body: { body: reply },
+      });
+      setReply("");
+      await open(selected);
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  async function close() {
+    if (!selected) return;
+    try {
+      await api(`/support/threads/${selected}/close`, {
+        method: "POST", key: newKey(), body: { reason: "Решено поддержкой" },
+      });
+      notify({ kind: "ok", text: "Обращение закрыто" });
+      await load();
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-head"><div><h2>Поддержка</h2><p className="muted">Обращения клиентов по заказам</p></div></div>
+      <button className="secondary" onClick={load}>Обновить</button>
+      {threads.length === 0 ? <p className="empty">Обращений нет.</p> : (
+        <div className="field">
+          <label>Обращение</label>
+          <select value={selected} onChange={event => { void open(event.target.value); }}>
+            {threads.map(thread => (
+              <option key={thread.id} value={thread.id}>{thread.state} · {thread.subject}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {detail && (
+        <div className="result">
+          <h4>{detail.thread.subject}</h4>
+          <ul className="timeline">
+            {detail.messages.map(message => (
+              <li key={message.id}><code>{message.isMine ? "вы" : "клиент"}</code><span>{message.body}</span></li>
+            ))}
+          </ul>
+          <div className="field"><label>Ответ</label><input value={reply} onChange={event => setReply(event.target.value)} /></div>
+          <div className="button-row">
+            <button disabled={!reply.trim()} onClick={send}>Ответить</button>
+            <button className="ghost" onClick={close}>Закрыть обращение</button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+type Member = { userId: string; phone: string; displayName: string | null; state: string; roles: string[] };
+type FraudSignal = { kind: string; severity: string; subjectType: string; subjectId: string; recommendation: string };
+type AuditEvent = { action: string; resourceType: string; occurredAt: string };
+
+function AdminView({ notify }: { notify: (notice: Notice) => void }) {
+  const [members, setMembers] = useState<Member[]>([]);
+  const [signals, setSignals] = useState<FraudSignal[]>([]);
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
+
+  async function load() {
+    try {
+      const [nextMembers, nextSignals, nextAudit] = await Promise.all([
+        api<Member[]>("/admin/members").catch(() => []),
+        api<FraudSignal[]>("/admin/fraud/signals").catch(() => []),
+        api<AuditEvent[]>("/admin/audit-events").catch(() => []),
+      ]);
+      setMembers(nextMembers);
+      setSignals(nextSignals);
+      setAudit(nextAudit);
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+  useEffect(() => { void load(); }, []);
+
+  return (
+    <section className="panel">
+      <div className="panel-head"><div><h2>Администрирование</h2><p className="muted">Роли, аудит и очередь рисков</p></div></div>
+      <button className="secondary" onClick={load}>Обновить</button>
+      <div className="stat-row">
+        <div className="stat"><span>Участники</span><strong>{members.length}</strong></div>
+        <div className="stat"><span>Сигналы</span><strong>{signals.length}</strong></div>
+        <div className="stat"><span>События аудита</span><strong>{audit.length}</strong></div>
+      </div>
+      <h3>Очередь рисков</h3>
+      {signals.length === 0 ? <p className="empty">Сигналов нет.</p> : (
+        <ul className="timeline">
+          {signals.slice(0, 10).map((signal, index) => (
+            <li key={index}><code>{signal.kind}</code><span>{signal.severity} · {signal.subjectType} · {signal.recommendation}</span></li>
+          ))}
+        </ul>
+      )}
+      <h3>Участники</h3>
+      <ul className="timeline">
+        {members.slice(0, 10).map(member => (
+          <li key={member.userId}><code>{member.phone}</code><span>{member.roles.join(", ") || "без роли"} · {member.state}</span></li>
+        ))}
+      </ul>
+      <h3>Аудит</h3>
+      <ul className="timeline">
+        {audit.slice(0, 10).map((event, index) => (
+          <li key={index}><code>{event.action}</code><span>{new Date(event.occurredAt).toLocaleString("ru-RU")}</span></li>
+        ))}
+      </ul>
     </section>
   );
 }
