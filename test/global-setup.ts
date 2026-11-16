@@ -20,35 +20,58 @@ async function reachable() {
   }
 }
 
+function withTimeout<T>(work: Promise<T>, ms: number, label: string) {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(label)), ms);
+    timer.unref();
+  });
+  return Promise.race([work, deadline]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function boot(dataDir: string, reset: boolean) {
+  if (reset) rmSync(dataDir, { recursive: true, force: true });
+  if (existsSync(dataDir) && !existsSync(resolve(dataDir, "PG_VERSION"))) {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+  const fresh = !existsSync(resolve(dataDir, "PG_VERSION"));
+  server = new EmbeddedPostgres({
+    databaseDir: dataDir,
+    user: "postgres",
+    password: "postgres_test_only",
+    port: 55433,
+    persistent: true,
+    autoRehydrateSymlinks: true,
+    initdbFlags: ["--encoding=UTF8", "--locale=C"],
+    onLog: () => undefined,
+    onError: message => {
+      const text = String(message);
+      if (!text.includes("ECONNRESET") && !text.includes("Connection terminated unexpectedly")) {
+        console.error(text);
+      }
+    },
+  });
+  if (fresh) await server.initialise();
+  // A data directory left behind by a killed run can hang forever: fail fast, then rebuild it.
+  await withTimeout(server.start(), 45_000, "embedded postgres did not start within 45s");
+  try {
+    await server.createDatabase("laundry_test");
+  } catch (error) {
+    if (!String(error).includes("already exists")) throw error;
+  }
+}
+
 export async function setup() {
   if (!(await reachable())) {
     const dataDir = ".pgdata-test";
-    if (existsSync(dataDir) && !existsSync(resolve(dataDir, "PG_VERSION"))) {
-      rmSync(dataDir, { recursive: true, force: true });
-    }
-    const fresh = !existsSync(resolve(dataDir, "PG_VERSION"));
-    server = new EmbeddedPostgres({
-      databaseDir: dataDir,
-      user: "postgres",
-      password: "postgres_test_only",
-      port: 55433,
-      persistent: true,
-      autoRehydrateSymlinks: true,
-      initdbFlags: ["--encoding=UTF8", "--locale=C"],
-      onLog: () => undefined,
-      onError: message => {
-        const text = String(message);
-        if (!text.includes("ECONNRESET") && !text.includes("Connection terminated unexpectedly")) {
-          console.error(text);
-        }
-      },
-    });
-    if (fresh) await server.initialise();
-    await server.start();
     try {
-      await server.createDatabase("laundry_test");
+      await boot(dataDir, false);
     } catch (error) {
-      if (!String(error).includes("already exists")) throw error;
+      console.error("embedded postgres failed to start, retrying with a fresh data directory:", error);
+      await server?.stop().catch(() => undefined);
+      await boot(dataDir, true);
     }
   }
   await runMigrations(url, "./drizzle");

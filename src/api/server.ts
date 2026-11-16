@@ -2,6 +2,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import rateLimit from "@fastify/rate-limit";
 import { existsSync } from "node:fs";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
@@ -29,6 +30,8 @@ import {
   grantRole, listAuditEvents, listMembers, memberRoles, revokeRole, revokeSession,
 } from "../services/admin.js";
 import { fraudSignals } from "../services/fraud.js";
+import { closeThread, getThread, listThreads, openThread, postMessage } from "../services/support.js";
+import { createReview, hideReview, likeReview, listReviews, unlikeReview } from "../services/reviews.js";
 import { seedDemo } from "../services/seed.js";
 import { and, eq, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
@@ -74,6 +77,8 @@ type RouteDef = {
   summary: string;
   tags: string[];
   roles?: Role[];
+  /** Per-route abuse limit; falls back to the global limiter. */
+  rateLimit?: { max: number; timeWindow: string };
   public?: boolean;
   body?: z.ZodType;
   query?: z.ZodType;
@@ -97,6 +102,8 @@ export function buildApp(db: Db) {
   const openapiPaths: Record<string, Record<string, unknown>> = {};
 
   app.register(cookie);
+  // External, maintained abuse control (MIT): baseline per-IP limit, stricter overrides below.
+  app.register(rateLimit, { global: true, max: 600, timeWindow: "1 minute" });
   app.register(cors, { origin: process.env.WEB_ORIGIN ?? false, credentials: true });
   const webDir = resolve(process.cwd(), "dist/web");
   if (existsSync(webDir)) {
@@ -139,6 +146,7 @@ export function buildApp(db: Db) {
     app.route({
       method: def.method,
       url: `/api/v1${def.path}`,
+      config: def.rateLimit ? { rateLimit: def.rateLimit } : undefined,
       preHandler: def.public ? undefined : authHook,
       handler: async (request, reply) => {
         const principal = (request as FastifyRequest & { principal?: Principal }).principal;
@@ -216,6 +224,7 @@ export function buildApp(db: Db) {
   });
   add({
     method: "POST", path: "/auth/demo-login", summary: "Local demo login (disabled in production)", tags: ["Auth"], public: true,
+    rateLimit: { max: 20, timeWindow: "1 minute" },
     body: z.object({
       organizationId: z.uuid(), phone: z.string().min(6), displayName: z.string().optional(),
       roles: z.array(z.enum([
@@ -361,14 +370,80 @@ export function buildApp(db: Db) {
     },
   });
   add({
-    method: "POST", path: "/orders/:id/claims", summary: "Open a claim", tags: ["Customer", "Support"],
-    params: idSchema,
+    method: "POST", path: "/orders/:id/claims", summary: "Open a claim", tags: ["Customer", "Support"],    params: idSchema,
     body: z.object({
       claimType: z.string().min(2), description: z.string().min(5),
       garmentIds: z.array(z.uuid()).optional(), evidenceIds: z.array(z.uuid()).optional(), key: z.string().optional(),
     }),
     handler: ctx => openClaim(db, ctx.principal, {
       orderId: ctx.params.id, ...ctx.body, key: idempotencyKey(ctx),
+    }),
+  });
+
+  add({
+    method: "POST", path: "/support/threads", summary: "Open a support thread", tags: ["Support", "Customer"],
+    body: z.object({
+      orderId: z.uuid().optional(), subject: z.string().min(3), body: z.string().min(3), key: z.string().optional(),
+    }),
+    handler: ctx => openThread(db, ctx.principal, {
+      orderId: ctx.body.orderId, subject: ctx.body.subject, body: ctx.body.body, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/support/threads", summary: "Scoped support threads", tags: ["Support"],
+    query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }),
+    handler: ctx => listThreads(db, ctx.principal, { limit: ctx.query.limit as number | undefined }),
+  });
+  add({
+    method: "GET", path: "/support/threads/:id", summary: "Thread with messages", tags: ["Support"],
+    params: idSchema,
+    handler: ctx => getThread(db, ctx.principal, ctx.params.id),
+  });
+  add({
+    method: "POST", path: "/support/threads/:id/messages", summary: "Reply in a thread", tags: ["Support", "Customer"],
+    params: idSchema,
+    body: z.object({ body: z.string().min(1), key: z.string().optional() }),
+    handler: ctx => postMessage(db, ctx.principal, {
+      threadId: ctx.params.id, body: ctx.body.body, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/support/threads/:id/close", summary: "Close a support thread", tags: ["Support"],
+    params: idSchema,
+    body: z.object({ reason: z.string().min(3), key: z.string().optional() }),
+    handler: ctx => closeThread(db, ctx.principal, {
+      threadId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+
+  add({
+    method: "POST", path: "/reviews", summary: "Review a completed order", tags: ["Customer"],
+    body: z.object({ orderId: z.uuid(), rating: z.number().int().min(1).max(5), body: z.string().max(2_000).default(""), key: z.string().optional() }),
+    handler: ctx => createReview(db, ctx.principal, {
+      orderId: ctx.body.orderId, rating: ctx.body.rating, body: ctx.body.body, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/reviews", summary: "Published reviews with likes", tags: ["Customer"],
+    query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }),
+    handler: ctx => listReviews(db, ctx.principal, { limit: ctx.query.limit as number | undefined }),
+  });
+  add({
+    method: "POST", path: "/reviews/:id/like", summary: "Like a review", tags: ["Customer"],
+    params: idSchema, body: keyed.partial(),
+    handler: ctx => likeReview(db, ctx.principal, { reviewId: ctx.params.id, key: idempotencyKey(ctx) }),
+  });
+  add({
+    method: "DELETE", path: "/reviews/:id/like", summary: "Remove a like", tags: ["Customer"],
+    params: idSchema,
+    handler: ctx => unlikeReview(db, ctx.principal, { reviewId: ctx.params.id }),
+  });
+  add({
+    method: "POST", path: "/reviews/:id/hide", summary: "Hide a review with an audit reason", tags: ["Support"],
+    params: idSchema,
+    body: z.object({ reason: z.string().min(5), key: z.string().optional() }),
+    handler: ctx => hideReview(db, ctx.principal, {
+      reviewId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
     }),
   });
 
@@ -593,6 +668,7 @@ export function buildApp(db: Db) {
   });
   add({
     method: "POST", path: "/webhooks/payments/:provider", summary: "Signature-verified provider webhook inbox", tags: ["Integrations"], public: true,
+    rateLimit: { max: 120, timeWindow: "1 minute" },
     body: z.object({ eventId: z.string().min(1), eventType: z.string().min(1), payload: z.record(z.string(), z.unknown()) }),
     params: z.object({ provider: z.string().min(1) }),
     handler: ctx => {
