@@ -111,3 +111,12 @@ Shipped and tested:
 Environment trap found and fixed: a killed test run left `.pgdata-test` in a state where embedded PostgreSQL hung, and Vitest reported it as "No test files found / Unknown Error: undefined". `test/global-setup.ts` now fails fast after 45s, rebuilds the disposable cluster and retries; the trap is recorded here because it will recur on any interrupted run.
 
 Still open after Wave 2: customer-facing UI for cancel/reschedule/support/reviews, partner/support/finance workspaces, outbox worker, payment inbox processor, custody proof model, populated-DB upgrade/restore, and the independent reviewer verdict.
+
+## 6. Wave 3 (same day) — UI, payment inbox, custody proof
+
+**Commits:** `339366a` (web), `9b395fb` (payment inbox/chargeback/drift), `8bbbffb` (custody proof). Suite: **92 tests / 14 files**, lint/typecheck/build clean, migrations `0015`–`0016` generated with no drift.
+
+* **W4 UI** — customer: two-leg booking fix (the old screen scheduled with a pickup hold only and was broken by P0-05), cancel, finance panel, review form, support thread. Courier: IndexedDB queue with canonical client hash, pending counter, flush and rejection reason. Support workspace: threads, detail, reply, close. Admin workspace: members, fraud queue, audit feed. No browser test/trace was executed for these screens; that remains a gap.
+* **W2 money** — `payment_events` gains `state/attempts/processed_at/error` (`0015`); `processPaymentInbox` claims rows with `FOR UPDATE SKIP LOCKED`, applies captured/refunded/chargeback, and marks failures with a reason; `requeueFailedPaymentEvents` re-arms them; the worker drains the inbox each cycle. `markChargeback` moves a capture to `disputed` and refunds stop; `paymentDrift` reports intent-vs-refund disagreement.
+* **W3 custody** — `courier_devices` (`0016`), `registerCourierDevice`, server-side canonical hash recomputation, device ownership per courier, and container/seal scans must belong to an order assigned to that courier. Tests: unregistered device, tampered hash, foreign seal, device sharing, cross-courier binding.
+
