@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   customerAddresses, documentVersions, orderLines, orders, quotes, routeStops, serviceWindows, slotReservations,
@@ -7,9 +7,9 @@ import {
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
-import { hashRequest, withIdempotency } from "../core/idempotency.js";
+import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idempotency.js";
 import { nextState, type OrderState } from "../domain/order-state.js";
-import { confirmSlot } from "../domain/slot-reservation.js";
+import { confirmSlot, releaseSlot } from "../domain/slot-reservation.js";
 import { assertAcceptableQuote } from "./quotes.js";
 
 type QuoteSnapshot = {
@@ -114,34 +114,8 @@ export async function scheduleOrder(
     if (!address) throw errors.notFound("address");
 
     // Each leg must be the order customer's own held capacity for the order's building and kind.
-    const legs = [
-      { reservationId: input.pickupReservationId, kind: "pickup" as const },
-      { reservationId: input.deliveryReservationId, kind: "delivery" as const },
-    ];
-    for (const leg of legs) {
-      const [reservation] = await tx.select().from(slotReservations).where(and(
-        eq(slotReservations.id, leg.reservationId),
-        eq(slotReservations.organizationId, principal.organizationId),
-      )).limit(1);
-      if (!reservation) throw errors.notFound("reservation");
-      if (reservation.orderId && reservation.orderId !== order.id) throw errors.notFound("reservation");
-      if (reservation.quoteId && reservation.quoteId !== order.quoteId) throw errors.notFound("reservation");
-      if (reservation.principalId !== order.customerId) throw errors.notFound("reservation");
-      if (reservation.state !== "held") {
-        throw new AppError("INVALID_TRANSITION", "RESERVATION_NOT_CONFIRMABLE", { state: reservation.state });
-      }
-      const [window] = await tx.select().from(serviceWindows).where(and(
-        eq(serviceWindows.id, reservation.windowId),
-        eq(serviceWindows.organizationId, principal.organizationId),
-        eq(serviceWindows.buildingId, address.buildingId),
-        eq(serviceWindows.kind, leg.kind),
-      )).limit(1);
-      if (!window) throw errors.notFound("window");
-      await confirmSlot(tx as Db, {
-        principal, reservationId: leg.reservationId, key: `schedule-${input.key}-${leg.reservationId}`, now: input.now,
-      });
-      await tx.update(slotReservations).set({ orderId: order.id }).where(eq(slotReservations.id, leg.reservationId));
-    }
+    await confirmLeg(tx as Db, principal, order, address.buildingId, input.pickupReservationId, "pickup", input.key, input.now);
+    await confirmLeg(tx as Db, principal, order, address.buildingId, input.deliveryReservationId, "delivery", input.key, input.now);
     await tx.update(orders).set({
       lifecycleState: "scheduled",
       version: sql`${orders.version} + 1`,
@@ -153,6 +127,124 @@ export async function scheduleOrder(
     return { id: order.id, state: "scheduled" as const };
   });
   return { ...result.value, replayed: result.replayed };
+}
+
+type OrderRow = Awaited<ReturnType<typeof loadOrder>>;
+
+async function confirmLeg(
+  tx: Db,
+  principal: Principal,
+  order: OrderRow,
+  buildingId: string,
+  reservationId: string,
+  kind: "pickup" | "delivery",
+  key: string,
+  now?: Date,
+) {
+  const [reservation] = await tx.select().from(slotReservations).where(and(
+    eq(slotReservations.id, reservationId),
+    eq(slotReservations.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!reservation) throw errors.notFound("reservation");
+  if (reservation.orderId && reservation.orderId !== order.id) throw errors.notFound("reservation");
+  if (reservation.quoteId && reservation.quoteId !== order.quoteId) throw errors.notFound("reservation");
+  if (reservation.principalId !== order.customerId) throw errors.notFound("reservation");
+  if (reservation.state !== "held") {
+    throw new AppError("INVALID_TRANSITION", "RESERVATION_NOT_CONFIRMABLE", { state: reservation.state });
+  }
+  const [window] = await tx.select().from(serviceWindows).where(and(
+    eq(serviceWindows.id, reservation.windowId),
+    eq(serviceWindows.organizationId, principal.organizationId),
+    eq(serviceWindows.buildingId, buildingId),
+    eq(serviceWindows.kind, kind),
+  )).limit(1);
+  if (!window) throw errors.notFound("window");
+  await confirmSlot(tx, {
+    principal, reservationId, key: `schedule-${key}-${reservationId}`, now,
+  });
+  await tx.update(slotReservations).set({ orderId: order.id }).where(eq(slotReservations.id, reservationId));
+}
+
+async function orderBuildingId(tx: Db, principal: Principal, order: OrderRow) {
+  const [address] = await tx.select({ buildingId: customerAddresses.buildingId }).from(customerAddresses).where(and(
+    eq(customerAddresses.id, order.addressId),
+    eq(customerAddresses.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!address) throw errors.notFound("address");
+  return address.buildingId;
+}
+
+/** Releases every live hold of the order so a cancel/reschedule cannot strand capacity. */
+async function releaseOrderReservations(tx: Db, principal: Principal, orderId: string, reason: string, key: string) {
+  const live = await tx.select({ id: slotReservations.id }).from(slotReservations).where(and(
+    eq(slotReservations.organizationId, principal.organizationId),
+    eq(slotReservations.orderId, orderId),
+    inArray(slotReservations.state, ["held", "confirmed"]),
+  ));
+  for (const reservation of live) {
+    await releaseSlot(tx, {
+      principal, reservationId: reservation.id, reason, key: `${key}-${reservation.id}`,
+    });
+  }
+  return live.length;
+}
+
+export async function cancelOrder(
+  db: Db,
+  principal: Principal,
+  input: { orderId: string; reason: string; key: string },
+) {
+  assertRole(principal, "customer", ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.admin);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "order:cancel", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+    replayGuard: async tx => { await loadOrder(tx as Db, principal, input.orderId); },
+  }, async tx => {
+    const order = await loadOrder(tx, principal, input.orderId);
+    if (order.lifecycleState === "cancelled") {
+      return { orderId: order.id, state: "cancelled" as const, releasedReservations: 0 };
+    }
+    // nextState enforces both the lifecycle edge and the role allowed to take it.
+    nextState(order.lifecycleState as OrderState, "cancel", principal);
+    const released = await releaseOrderReservations(tx, principal, order.id, input.reason, input.key);
+    await tx.update(orders).set({
+      lifecycleState: "cancelled", version: sql`${orders.version} + 1`,
+    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    await appendEvent(tx, {
+      principal, aggregateType: "order", aggregateId: order.id, eventType: "order.cancelled",
+      payload: { from: order.lifecycleState, releasedReservations: released }, reason: input.reason,
+    });
+    return { orderId: order.id, state: "cancelled" as const, releasedReservations: released };
+  });
+}
+
+export async function rescheduleOrder(
+  db: Db,
+  principal: Principal,
+  input: { orderId: string; pickupReservationId: string; deliveryReservationId: string; key: string; now?: Date },
+) {
+  assertRole(principal, "customer", ...ROLE_GROUPS.dispatcher);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "order:reschedule", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+    replayGuard: async tx => { await loadOrder(tx as Db, principal, input.orderId); },
+  }, async tx => {
+    const order = await loadOrder(tx, principal, input.orderId);
+    if (order.lifecycleState !== "scheduled") {
+      throw new AppError("INVALID_TRANSITION", "ORDER_NOT_RESCHEDULABLE", { state: order.lifecycleState });
+    }
+    const buildingId = await orderBuildingId(tx, principal, order);
+    await releaseOrderReservations(tx, principal, order.id, "reschedule", `reschedule-${input.key}`);
+    await confirmLeg(tx, principal, order, buildingId, input.pickupReservationId, "pickup", input.key, input.now);
+    await confirmLeg(tx, principal, order, buildingId, input.deliveryReservationId, "delivery", input.key, input.now);
+    await tx.update(orders).set({ version: sql`${orders.version} + 1` })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    await appendEvent(tx, {
+      principal, aggregateType: "order", aggregateId: order.id, eventType: "order.rescheduled",
+      payload: { pickupReservationId: input.pickupReservationId, deliveryReservationId: input.deliveryReservationId },
+    });
+    return { orderId: order.id, state: "scheduled" as const };
+  });
 }
 
 export async function loadOrder(db: Db, principal: Principal, orderId: string) {
@@ -232,8 +324,7 @@ export async function transitionOrder(
   return { ...result.value, replayed: result.replayed };
 }
 
-export async function getOrderTimeline(db: Db, principal: Principal, orderId: string) {
-  await loadOrder(db, principal, orderId);
+export async function getOrderTimeline(db: Db, principal: Principal, orderId: string) {  await loadOrder(db, principal, orderId);
   const rows = await db.execute(sql`
     SELECT event_type, payload_json, created_at FROM outbox_events
     WHERE organization_id = ${principal.organizationId} AND aggregate_type = 'order'

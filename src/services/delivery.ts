@@ -58,18 +58,46 @@ export async function currentCourierStops(db: Db, principal: Principal) {
   return db.select({
     stopId: routeStops.id,
     orderId: routeStops.orderId,
+    publicNumber: orders.publicNumber,
+    orderState: orders.lifecycleState,
     kind: routeStops.kind,
     state: routeStops.state,
     sequence: routeStops.sequence,
     windowStart: routeStops.windowStart,
     windowEnd: routeStops.windowEnd,
   }).from(routeStops)
+    .innerJoin(orders, eq(orders.id, routeStops.orderId))
     .where(and(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.assignedCourierId, principal.userId),
+      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
     ))
     .orderBy(routeStops.sequence)
     .limit(50);
+}
+
+export async function startStop(db: Db, principal: Principal, input: { stopId: string; key: string }) {
+  assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "delivery:start", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const [stop] = await tx.select().from(routeStops).where(and(
+      eq(routeStops.id, input.stopId), eq(routeStops.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!stop) throw errors.notFound("stop");
+    if (stop.assignedCourierId !== principal.userId && !principal.roles.includes("dispatcher")) {
+      throw errors.forbidden("courier is not assigned to this stop");
+    }
+    if (stop.state !== "pending") throw errors.transition(stop.state, "start");
+    await tx.update(routeStops).set({ state: "en_route", version: stop.version + 1 })
+      .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
+    await appendEvent(tx, {
+      principal, aggregateType: "route_stop", aggregateId: stop.id,
+      eventType: "delivery.en_route", payload: { orderId: stop.orderId },
+    });
+    return { stopId: stop.id, state: "en_route" as const };
+  });
 }
 
 export async function assignDelivery(

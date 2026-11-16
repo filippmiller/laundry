@@ -12,14 +12,14 @@ import { AppError } from "../core/errors.js";
 import { hashRequest } from "../core/idempotency.js";
 import { demoLogin, logout, principalFromToken } from "../services/auth.js";
 import { listServices, listWindows, resolveAddress } from "../services/catalog.js";
-import { createQuote } from "../services/quotes.js";
-import { createOrder, getOrderTimeline, loadOrderView, scheduleOrder } from "../services/orders.js";
+import { createQuote, getQuote } from "../services/quotes.js";
+import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, rescheduleOrder, scheduleOrder } from "../services/orders.js";
 import { recordIntake, syncScanEvents } from "../services/intake.js";
 import {
   assignOrderToPartner, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
   startInspection, startProcessing,
 } from "../services/partner.js";
-import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt } from "../services/delivery.js";
+import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt, startStop } from "../services/delivery.js";
 import { decideClaim, openClaim, reopenClaim } from "../services/claims.js";
 import {
   capturePayment, createCustomerInvoice, createPartnerInvoice, disputePartnerLine, handlePaymentWebhook, refundPayment,
@@ -295,10 +295,35 @@ export function buildApp(db: Db) {
     handler: ctx => createOrder(db, ctx.principal, { ...ctx.body, key: idempotencyKey(ctx) }),
   });
   add({
+    method: "GET", path: "/quotes/:id", summary: "Read an immutable quote", tags: ["Customer"],
+    params: idSchema,
+    roles: ["customer", ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance],
+    handler: ctx => getQuote(db, ctx.principal, ctx.params.id),
+  });
+  add({
     method: "POST", path: "/orders/:id/schedule", summary: "Attach capacity reservations", tags: ["Customer"],
     params: idSchema,
     body: z.object({ pickupReservationId: z.uuid().optional(), deliveryReservationId: z.uuid().optional(), key: z.string().optional() }),
     handler: ctx => scheduleOrder(db, ctx.principal, {
+      orderId: ctx.params.id, pickupReservationId: ctx.body.pickupReservationId,
+      deliveryReservationId: ctx.body.deliveryReservationId, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/orders/:id/cancel", summary: "Cancel an order and release its capacity", tags: ["Customer"],
+    params: idSchema,
+    body: z.object({ reason: z.string().min(3), key: z.string().optional() }),
+    handler: ctx => cancelOrder(db, ctx.principal, {
+      orderId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/orders/:id/reschedule", summary: "Swap both capacity reservations atomically", tags: ["Customer"],
+    params: idSchema,
+    body: z.object({
+      pickupReservationId: z.uuid(), deliveryReservationId: z.uuid(), key: z.string().optional(),
+    }),
+    handler: ctx => rescheduleOrder(db, ctx.principal, {
       orderId: ctx.params.id, pickupReservationId: ctx.body.pickupReservationId,
       deliveryReservationId: ctx.body.deliveryReservationId, key: idempotencyKey(ctx),
     }),
@@ -352,6 +377,11 @@ export function buildApp(db: Db) {
       })).max(500),
     }),
     handler: ctx => syncScanEvents(db, ctx.principal, ctx.body.events),
+  });
+  add({
+    method: "POST", path: "/courier/stops/:id/start", summary: "Start a stop (en route)", tags: ["Courier"],
+    params: idSchema, body: keyed.partial(),
+    handler: ctx => startStop(db, ctx.principal, { stopId: ctx.params.id, key: idempotencyKey(ctx) }),
   });
   add({
     method: "POST", path: "/courier/stops/:id/arrive", summary: "Arrive at stop", tags: ["Courier"],
