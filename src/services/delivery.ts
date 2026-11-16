@@ -273,7 +273,16 @@ export async function closeOrder(db: Db, principal: Principal, input: { orderId:
       eq(claims.orderId, order.id),
       inArray(claims.state, ["opened", "triage", "investigating", "decision_pending", "escalated", "reopened"]),
     )).limit(1);
-    // An open claim does not block closure, but must be visible as an exception.
+    const partialAttempt = await tx.select({ id: deliveryAttempts.id }).from(deliveryAttempts)
+      .where(and(
+        eq(deliveryAttempts.organizationId, principal.organizationId),
+        eq(deliveryAttempts.orderId, order.id),
+        eq(deliveryAttempts.outcome, "partial"),
+      )).limit(1);
+    if (partialAttempt.length && !openClaims.length) {
+      throw new AppError("CUSTODY_CONFLICT", "PARTIAL_DELIVERY_REQUIRES_EXCEPTION", { attemptId: partialAttempt[0].id });
+    }
+    // An open claim does not block closure, but is required to explain a partial delivery.
     const to = nextState(order.lifecycleState as "delivered", "close", principal);
     await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));

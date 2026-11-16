@@ -2,14 +2,16 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { createDb, type Db } from "../src/db/client.js";
-import { custodyEvents, ledgerAccounts, ledgerEntries, ledgerJournals } from "../src/db/schema.js";
+import { custodyEvents, ledgerAccounts, ledgerEntries, ledgerJournals, orders, tariffVersions } from "../src/db/schema.js";
 import { and, inArray } from "drizzle-orm";
 
+import { makePrincipal, seedUser } from "./fixtures.js";
 import { COURIER_DEVICE, seedFullOrder, seedPartner, seedSeal } from "./operations-fixtures.js";
 import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import { receiveHandoff, reportSealBroken, startInspection, startProcessing, recordQualityCheck } from "../src/services/partner.js";
-import { arriveStop, assignDelivery, recordDeliveryAttempt } from "../src/services/delivery.js";
+import { arriveStop, assignDelivery, closeOrder, recordDeliveryAttempt } from "../src/services/delivery.js";
 import { ensureLedgerAccounts, postJournal } from "../src/services/finance.js";
+import { createQuote } from "../src/services/quotes.js";
 
 describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => {
   let db: Db;
@@ -114,6 +116,43 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
     ]);
     expect(results.flatMap(result => result.accepted)).toHaveLength(1);
     expect(results.flatMap(result => result.duplicate)).toHaveLength(1);
+  });
+
+  it("A02: a tariff version past its effective window cannot produce a new quote", async () => {
+    const f = await seedFullOrder(db, { state: "pickup_assigned" });
+    await db.update(tariffVersions).set({ effectiveTo: new Date("2026-02-01T00:00:00Z") })
+      .where(eq(tariffVersions.id, f.catalog.tariffVersionId));
+    await expect(createQuote(db, f.principal, {
+      buildingId: f.buildingId,
+      pickupWindowId: f.windowId,
+      deliveryWindowId: f.deliveryWindowId,
+      tariffVersionId: f.catalog.tariffVersionId,
+      key: "quote-expired-tariff",
+      lines: [{ serviceId: f.catalog.serviceId, tier: "economy", quantity: 1_000, unit: "gram" }],
+    })).rejects.toThrow("NOT_FOUND");
+  });
+
+  it("V2-01: partial delivery without an exception record cannot be closed away", async () => {
+    const f = await intakeFixture();
+    const partner = await seedPartner(db, f.organizationId);
+    await receiveHandoff(db, partner.principal, {
+      orderId: f.orderId, manifestId: f.intake.manifestId,
+      actual: [{ containerCode: f.bag, sealSerial: f.seal.serial, actualWeightGrams: 1_000 }],
+      key: "receipt-close",
+    });
+    await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-close" });
+    await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-close" });
+    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: "qc-close" });
+    const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-close" });
+    await arriveStop(db, f.courier, { stopId: assigned.stopId, key: "arrive-close" });
+    await recordDeliveryAttempt(db, f.courier, {
+      stopId: assigned.stopId, outcome: "partial", deliveredGarmentIds: [],
+      recipientProof: { method: "code", value: "9999" }, key: "attempt-close",
+    });
+    await db.update(orders).set({ lifecycleState: "delivered" }).where(eq(orders.id, f.orderId));
+    const finance = makePrincipal(f.organizationId, await seedUser(db, f.organizationId), ["platform_finance"]);
+    await expect(closeOrder(db, finance, { orderId: f.orderId, key: "close-guard" }))
+      .rejects.toThrow("PARTIAL_DELIVERY_REQUIRES_EXCEPTION");
   });
 
   it("D02: delivery with proof missing is rejected before any attempt is recorded", async () => {

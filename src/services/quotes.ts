@@ -49,7 +49,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       eq(customerAddresses.buildingId, input.buildingId),
     )).limit(1);
     if (!address) throw new AppError("VALIDATION_ERROR", "CUSTOMER_ADDRESS_REQUIRED");
-    const tariff = await activeTariff(tx as Db, principal, input.tariffVersionId);
+    const tariff = await activeTariff(tx as Db, principal, input.tariffVersionId, now);
     const [pickupWindow] = await tx.select().from(serviceWindows).where(and(
       eq(serviceWindows.id, input.pickupWindowId),
       eq(serviceWindows.organizationId, principal.organizationId),

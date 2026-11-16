@@ -1,4 +1,4 @@
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gt, gte, isNull, lte, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { buildings, cities, serviceWindows, services, tariffPlans, tariffVersions } from "../db/schema.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -47,10 +47,12 @@ export async function listWindows(
   return db.select().from(serviceWindows).where(and(...conditions));
 }
 
-export async function activeTariff(db: Db, principal: Principal, tariffVersionId?: string) {
+export async function activeTariff(db: Db, principal: Principal, tariffVersionId?: string, now = new Date()) {
   const conditions = [
     eq(tariffVersions.published, true),
     eq(tariffPlans.organizationId, principal.organizationId),
+    lte(tariffVersions.effectiveFrom, now),
+    or(isNull(tariffVersions.effectiveTo), gt(tariffVersions.effectiveTo, now)),
   ];
   if (tariffVersionId) conditions.push(eq(tariffVersions.id, tariffVersionId));
   const [version] = await db.select({ version: tariffVersions })
