@@ -7,5 +7,6 @@ coverage/
 .pgdata/
 .pgdata-test/
 *.log
+*.err
 .DS_Store
 .beads.gate.lock
