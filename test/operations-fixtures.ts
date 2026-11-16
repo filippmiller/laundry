@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { Db } from "../src/db/client.js";
 import {
-  courierShifts, routes, routeStops, seals, evidenceAssets, orders,
+  courierShifts, courierDevices, routes, routeStops, seals, evidenceAssets, orders,
   memberships, membershipRoles, partnerContracts, partners,
 } from "../src/db/schema.js";
 import { eq } from "drizzle-orm";
@@ -12,7 +13,6 @@ import { holdSlot } from "../src/domain/slot-reservation.js";
 import type { Principal } from "../src/core/context.js";
 
 export const COURIER_DEVICE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-
 export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pickup_assigned" } = {}) {
   const seed = await seedWindow(db, { capacity: 3 });
   const deliveryWindowId = await seedDeliveryWindow(db, seed);
@@ -21,7 +21,14 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
   const principal: Principal = makePrincipal(seed.organizationId, seed.userId, ["customer"]);
   const dispatcher: Principal = makePrincipal(seed.organizationId, await seedUser(db, seed.organizationId), ["dispatcher"]);
   const courierId = await seedUser(db, seed.organizationId);
-  const courier: Principal = makePrincipal(seed.organizationId, courierId, ["courier"], { deviceId: COURIER_DEVICE });
+  const deviceIdForFixture = randomUUID();
+  const courier: Principal = makePrincipal(seed.organizationId, courierId, ["courier"], { deviceId: deviceIdForFixture });
+  await db.insert(courierDevices).values({
+    id: deviceIdForFixture,
+    organizationId: seed.organizationId,
+    courierId,
+    label: "test courier device",
+  }).onConflictDoNothing();
 
   const quote = await createQuote(db, principal, {
     buildingId: seed.buildingId,
@@ -83,6 +90,7 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
   return {
     ...seed, deliveryWindowId, catalog, principal, dispatcher, courier,
     orderId: order.id, quoteId: quote.id, courierId, shiftId: shift.id, routeId: route.id, stopId: stop.id,
+    deviceId: deviceIdForFixture,
   };
 }
 

@@ -6,12 +6,13 @@ import { custodyEvents, ledgerAccounts, ledgerEntries, ledgerJournals, orders, t
 import { and, inArray } from "drizzle-orm";
 
 import { makePrincipal, seedUser } from "./fixtures.js";
-import { COURIER_DEVICE, seedFullOrder, seedPartner, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
+import { seedFullOrder, seedPartner, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
 import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import { receiveHandoff, reportSealBroken, startInspection, startProcessing, recordQualityCheck } from "../src/services/partner.js";
 import { arriveStop, assignDelivery, closeOrder, recordDeliveryAttempt } from "../src/services/delivery.js";
 import { ensureLedgerAccounts, postJournal } from "../src/services/finance.js";
 import { createQuote } from "../src/services/quotes.js";
+import { canonicalScanHash } from "../src/core/scan-hash.js";
 
 describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => {
   let db: Db;
@@ -106,10 +107,11 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
 
   it("B05: concurrent offline replays of one client event are accepted exactly once", async () => {
     const f = await intakeFixture();
-    const event = {
-      clientEventId: randomUUID(), deviceId: COURIER_DEVICE, scannedType: "order" as const,
-      scannedId: f.orderId, capturedAt: "2026-12-01T10:00:00.000Z", context: {}, payloadHash: "hash",
+    const eventBase = {
+      clientEventId: randomUUID(), deviceId: f.deviceId, scannedType: "order" as const,
+      scannedId: f.orderId, capturedAt: "2026-12-01T10:00:00.000Z", context: {},
     };
+    const event = { ...eventBase, payloadHash: canonicalScanHash(eventBase) };
     const results = await Promise.all([
       syncScanEvents(db, f.courier, [event]),
       syncScanEvents(db, f.courier, [event]),

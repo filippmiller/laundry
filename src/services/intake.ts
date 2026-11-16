@@ -1,13 +1,14 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  containerAssignments, containers, custodyEvents, evidenceAssets, garments,
+  containerAssignments, containers, courierDevices, custodyEvents, evidenceAssets, garments,
   intakeManifestLines, intakeManifests, notifications, routeStops, seals, scanEvents, orders,
 } from "../db/schema.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
+import { canonicalScanHash } from "../core/scan-hash.js";
 import { nextState } from "../domain/order-state.js";
 
 export type BagInput = { containerCode: string; sealSerial: string; weightGrams: number };
@@ -182,6 +183,84 @@ export type ScanEventInput = {
   payloadHash: string;
 };
 
+export async function registerCourierDevice(
+  db: Db,
+  principal: Principal,
+  input: { deviceId: string; label?: string },
+) {
+  assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
+  const [existing] = await db.select().from(courierDevices).where(and(
+    eq(courierDevices.id, input.deviceId),
+    eq(courierDevices.organizationId, principal.organizationId),
+  )).limit(1);
+  if (existing) {
+    if (existing.courierId !== principal.userId) throw errors.notFound("device");
+    return { deviceId: existing.id, state: existing.state };
+  }
+  await db.insert(courierDevices).values({
+    id: input.deviceId,
+    organizationId: principal.organizationId,
+    courierId: principal.userId,
+    label: input.label ?? "courier device",
+  });
+  return { deviceId: input.deviceId, state: "active" as const };
+}
+
+async function scanRejection(
+  db: Db,
+  principal: Principal,
+  event: ScanEventInput,
+): Promise<string | undefined> {
+  const [device] = await db.select({ id: courierDevices.id }).from(courierDevices).where(and(
+    eq(courierDevices.id, event.deviceId),
+    eq(courierDevices.organizationId, principal.organizationId),
+    eq(courierDevices.courierId, principal.userId),
+    eq(courierDevices.state, "active"),
+  )).limit(1);
+  if (!device) return "DEVICE_NOT_OWNED";
+  if (canonicalScanHash(event) !== event.payloadHash) return "PAYLOAD_HASH_MISMATCH";
+
+  if (event.scannedType === "order") {
+    const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
+      eq(routeStops.organizationId, principal.organizationId),
+      eq(routeStops.orderId, event.scannedId),
+      eq(routeStops.assignedCourierId, principal.userId),
+    )).limit(1);
+    return stop ? undefined : "ORDER_NOT_ASSIGNED";
+  }
+
+  if (event.scannedType === "container") {
+    const [row] = await db.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
+      .innerJoin(containers, eq(containers.id, containerAssignments.containerId))
+      .where(and(
+        eq(containerAssignments.organizationId, principal.organizationId),
+        eq(containers.code, event.scannedId),
+      )).limit(1);
+    if (!row) return "CONTAINER_NOT_ASSIGNED";
+    const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
+      eq(routeStops.organizationId, principal.organizationId),
+      eq(routeStops.orderId, row.orderId),
+      eq(routeStops.assignedCourierId, principal.userId),
+    )).limit(1);
+    return stop ? undefined : "CONTAINER_NOT_ASSIGNED";
+  }
+
+  const [sealRow] = await db.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
+    .innerJoin(seals, eq(seals.id, containerAssignments.sealId))
+    .where(and(
+      eq(containerAssignments.organizationId, principal.organizationId),
+      eq(seals.serialNumber, event.scannedId),
+      eq(seals.state, "assigned"),
+    )).limit(1);
+  if (!sealRow) return "SEAL_NOT_ASSIGNED";
+  const [sealStop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
+    eq(routeStops.organizationId, principal.organizationId),
+    eq(routeStops.orderId, sealRow.orderId),
+    eq(routeStops.assignedCourierId, principal.userId),
+  )).limit(1);
+  return sealStop ? undefined : "SEAL_NOT_ASSIGNED";
+}
+
 export async function syncScanEvents(db: Db, principal: Principal, events: ScanEventInput[]) {
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   const accepted: string[] = [];
@@ -196,15 +275,7 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
       duplicate.push(event.clientEventId);
       continue;
     }
-    let reason: string | undefined;
-    if (event.scannedType === "order") {
-      const [stop] = await db.select().from(routeStops).where(and(
-        eq(routeStops.organizationId, principal.organizationId),
-        eq(routeStops.orderId, event.scannedId),
-        eq(routeStops.assignedCourierId, principal.userId),
-      )).limit(1);
-      if (!stop) reason = "ORDER_NOT_ASSIGNED";
-    }
+    const reason = await scanRejection(db, principal, event);
     const inserted = await db.insert(scanEvents).values({
       organizationId: principal.organizationId,
       deviceId: event.deviceId,
@@ -223,6 +294,10 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
       rejected.push({ clientEventId: event.clientEventId, reason });
     } else {
       accepted.push(event.clientEventId);
+      await db.update(courierDevices).set({ lastSeenAt: new Date() }).where(and(
+        eq(courierDevices.id, event.deviceId),
+        eq(courierDevices.organizationId, principal.organizationId),
+      ));
     }
   }
   return { accepted, duplicate, rejected };

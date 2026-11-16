@@ -413,6 +413,13 @@ function CourierView({ demo, notify }: { demo: DemoConfig | null; notify: (notic
   async function scanSelected() {
     const stop = stops.find(row => row.stopId === selected);
     if (!stop) return notify({ kind: "error", text: "Выберите остановку" });
+    try {
+      await api("/courier/devices", {
+        method: "POST", body: { deviceId, label: "Курьерский браузер" },
+      });
+    } catch (error) {
+      setLastError((error as Error).message);
+    }
     const event = {
       clientEventId: crypto.randomUUID(),
       deviceId,

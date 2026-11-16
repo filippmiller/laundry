@@ -4,8 +4,8 @@ import { eq } from "drizzle-orm";
 import { createDb, type Db } from "../src/db/client.js";
 import { custodyEvents, orders, paymentEvents } from "../src/db/schema.js";
 import { makePrincipal, seedUser } from "./fixtures.js";
-import { COURIER_DEVICE, seedFullOrder, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
-import { recordIntake, syncScanEvents } from "../src/services/intake.js";
+import { seedFullOrder, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
+import { canonicalScanHash } from "../src/core/scan-hash.js";import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import {
   decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
 } from "../src/services/partner.js";
@@ -44,20 +44,21 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
     expect(events[0].fromParty).toBe("customer");
     expect(events[0].toParty).toBe("courier");
 
-    const scan = {
+    const scanBase = {
       clientEventId: randomUUID(),
-      deviceId: COURIER_DEVICE,
+      deviceId: f.deviceId,
       scannedType: "order" as const,
       scannedId: f.orderId,
       capturedAt: "2026-12-01T10:00:00.000Z",
       context: { stopId: f.stopId },
-      payloadHash: "hash",
     };
+    const scan = { ...scanBase, payloadHash: canonicalScanHash(scanBase) };
     const first = await syncScanEvents(db, f.courier, [scan]);
     const second = await syncScanEvents(db, f.courier, [scan]);
     expect(first.accepted).toHaveLength(1);
     expect(second.duplicate).toHaveLength(1);
-    const forged = { ...scan, clientEventId: randomUUID(), scannedId: randomUUID() };
+    const forgedBase = { ...scanBase, clientEventId: randomUUID(), scannedId: randomUUID() };
+    const forged = { ...forgedBase, payloadHash: canonicalScanHash(forgedBase) };
     expect((await syncScanEvents(db, f.courier, [forged])).rejected[0].reason).toBe("ORDER_NOT_ASSIGNED");
   });
 

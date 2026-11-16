@@ -15,7 +15,7 @@ import { demoLogin, logout, principalFromToken } from "../services/auth.js";
 import { listServices, listWindows, resolveAddress } from "../services/catalog.js";
 import { createQuote, getQuote } from "../services/quotes.js";
 import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, rescheduleOrder, scheduleOrder } from "../services/orders.js";
-import { recordIntake, syncScanEvents } from "../services/intake.js";
+import { recordIntake, registerCourierDevice, syncScanEvents } from "../services/intake.js";
 import {
   assignOrderToPartner, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
   startInspection, startProcessing,
@@ -458,6 +458,13 @@ export function buildApp(db: Db) {
   add({
     method: "GET", path: "/courier/routes/current", summary: "Assigned stops for the courier", tags: ["Courier"],
     handler: ctx => currentCourierStops(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/courier/devices", summary: "Bind a scanning device to the courier", tags: ["Courier"],
+    body: z.object({ deviceId: z.uuid(), label: z.string().min(1).max(120).optional() }),
+    handler: ctx => registerCourierDevice(db, ctx.principal, {
+      deviceId: ctx.body.deviceId, label: ctx.body.label,
+    }),
   });
   add({
     method: "POST", path: "/courier/scan-events/sync", summary: "Offline scan sync", tags: ["Courier"],
