@@ -4,7 +4,7 @@ This repository distributes **no vendored third-party source**. The packages bel
 
 ## MIT (notice + permission text required in distributions)
 
-`@fastify/cookie`, `@fastify/cors`, `@fastify/static`, `@eslint/js`, `@types/node`, `@types/pg`, `@types/react`, `@types/react-dom`, `@vitejs/plugin-react`, `drizzle-kit`, `embedded-postgres`, `eslint`, `fastify`, `pg`, `react`, `react-dom`, `tsx`, `typescript-eslint`, `vite`, `vitest`, `zod`.
+`@fastify/cookie`, `@fastify/cors`, `@fastify/rate-limit`, `@fastify/static`, `@eslint/js`, `@types/node`, `@types/pg`, `@types/react`, `@types/react-dom`, `@vitejs/plugin-react`, `drizzle-kit`, `embedded-postgres`, `eslint`, `fastify`, `pg`, `react`, `react-dom`, `tsx`, `typescript-eslint`, `vite`, `vitest`, `zod`.
 
 Obligation: retain the copyright notice and permission notice. When a production bundle or container image is built, ship `node_modules` licence files or a generated notice bundle (`license-checker`-style) alongside it. That notice bundle is **not yet generated** and is part of the W6 packaging work.
 

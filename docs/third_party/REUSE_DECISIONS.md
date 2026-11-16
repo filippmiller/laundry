@@ -3,7 +3,6 @@
 **Scope of this document:** what is actually reused today, what was considered and rejected, and what may not be copied.
 
 ## 1. Current state: no third-party product code is integrated
-
 PR #3 contains **no ported source files** from Refine, Ownfleet, VROOM, Chatwoot or any other product. All application code under `src/`, `apps/` and `test/` is original to this repository. The only third-party material is **unmodified npm packages** declared in `package.json` and locked in `package-lock.json`.
 
 This is a deliberate position, not an omission: the audit found no provenance/licence evidence for any ported module, and copying a product UI or AGPL/ELv2 code without review is prohibited.
@@ -13,7 +12,7 @@ This is a deliberate position, not an omission: the audit found no provenance/li
 All direct dependencies are permissive (MIT / Apache-2.0 / BSD-2-Clause) and are used as libraries, not vendored. See `THIRD_PARTY_PROVENANCE.csv` for versions and licences, and `LICENSE_NOTICES.md` for the notice text obligations.
 
 Runtime:
-* `fastify` + `@fastify/cookie` / `@fastify/cors` / `@fastify/static` — HTTP server, sessions, CORS, SPA serving.
+* `fastify` + `@fastify/cookie` / `@fastify/cors` / `@fastify/static` / `@fastify/rate-limit` — HTTP server, sessions, CORS, SPA serving, abuse limits.
 * `drizzle-orm` + `pg` — typed SQL and PostgreSQL driver.
 * `zod` — request validation and OpenAPI generation.
 * `react` + `react-dom` — customer/courier/ops SPA.

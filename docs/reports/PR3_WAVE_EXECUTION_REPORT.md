@@ -91,3 +91,22 @@ Tests: 3 tests (duplicates, incomplete/full, bag partial → recovery → delive
 2. W3: two-party custody proof (device ownership, payload hash, seal/QR binding) and the adjustment→invoice→consent chain.
 3. W6: outbox worker (notification retries), populated-DB upgrade test, backup/restore drill.
 4. W4/W5 only after P0/P1 records stay green; independent review (W8) must be performed by a different model/owner, not by the author of these fixes.
+
+## 5. Wave 2 (same day, continuation) — closing customer/admin/support paths
+
+**Commits:** `30fae60` (customer lifecycle), `4f76385` (admin + fraud), `3ec3a19` (support, reviews, rate limiting, test harness). Local suite: **79 tests / 11 files**, lint/typecheck/build clean.
+
+Shipped and tested:
+
+* `POST /orders/:id/cancel` — releases both live holds inside the cancellation transaction; a foreign customer gets 404; a repeat cancel does not double-release.
+* `POST /orders/:id/reschedule` — atomic swap of both legs; a rejected leg rolls back and keeps the original confirmed capacity.
+* `GET /quotes/:id` and `POST /courier/stops/:id/start`; the courier stop list joins the order number/state and hides finished stops.
+* Admin: member listing, audited role grant/revoke (self-grant and last-admin blocked), session revocation, audit feed.
+* Fraud: read-only signals (claim velocity, refund without delivery, shared devices, repeated partials, cancel velocity) scoped per tenant; no automatic blocking.
+* Support: threads anchored to the customer's order, participant-scoped reads, replies, close.
+* Reviews/likes: migration `0014` (`reviews`, `review_likes`), one review per delivered/closed order, idempotent likes, audited hide.
+* External import: `@fastify/rate-limit` 10.3.0 (MIT) — 600/min global, 20/min demo login, 120/min webhooks.
+
+Environment trap found and fixed: a killed test run left `.pgdata-test` in a state where embedded PostgreSQL hung, and Vitest reported it as "No test files found / Unknown Error: undefined". `test/global-setup.ts` now fails fast after 45s, rebuilds the disposable cluster and retries; the trap is recorded here because it will recur on any interrupted run.
+
+Still open after Wave 2: customer-facing UI for cancel/reschedule/support/reviews, partner/support/finance workspaces, outbox worker, payment inbox processor, custody proof model, populated-DB upgrade/restore, and the independent reviewer verdict.

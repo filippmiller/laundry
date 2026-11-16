@@ -15,3 +15,11 @@ LND3-P1-06,P1,NOT_RUN,apps/web/src/App.tsx,None,n/a,0b7b4e81b4a49c0c12ea460538bd
 LND3-P1-07,P1,PARTIAL,infra/docker-compose.yml,None,n/a,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,not reviewed,Compose still uses dev:api; no populated upgrade or restore drill
 LND3-P2-01,P2,DONE,README.md,docs/reports/PR3_WAVE_EXECUTION_REPORT.md,README corrected to 78 tables/62 tests,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,self-review,Historical docs remain dated snapshots by design
 LND3-P2-02,P2,PARTIAL,.beads/,None,Beads not rewritten in this wave,0b7b4e81b4a49c0c12ea460538bd2d5e010d9579,not reviewed,Broad epics still do not reflect the missing workflows
+REQ-CUST-CANCEL,CUSTOMER,DONE,src/services/orders.ts,test/customer-lifecycle.integration.test.ts,cancel releases both holds; 2 tests,3ec3a19,self-review (not independent),Refund of a prepaid cancelled order not automated
+REQ-CUST-RESCHEDULE,CUSTOMER,DONE,src/services/orders.ts,test/customer-lifecycle.integration.test.ts,atomic swap + rollback test,3ec3a19,self-review (not independent),No customer UI
+REQ-COURIER-START,COURIER,DONE,src/services/delivery.ts,test/customer-lifecycle.integration.test.ts,en_route + active-stop list,3ec3a19,self-review (not independent),No mobile UI
+REQ-ADMIN-ROLES,ADMIN,DONE,src/services/admin.ts,test/admin-fraud.integration.test.ts,grant/revoke/last-admin/audit; 4 tests,3ec3a19,self-review (not independent),No admin UI
+REQ-FRAUD-SIGNALS,FRAUD,DONE,src/services/fraud.ts,test/admin-fraud.integration.test.ts,5 signal kinds + tenant isolation; read-only,3ec3a19,self-review (not independent),No case workflow or auto-block
+REQ-SUPPORT-THREADS,SUPPORT,DONE,src/services/support.ts,test/support-reviews.integration.test.ts,open/reply/close + scoping; 3 tests,3ec3a19,self-review (not independent),No attachments or SLA
+REQ-REVIEWS,REVIEWS,DONE,src/services/reviews.ts,test/support-reviews.integration.test.ts,one per delivered order + likes + hide audit; 2 tests,3ec3a19,self-review (not independent),No rating aggregation in UI
+REQ-RATELIMIT,SECURITY,DONE,src/api/server.ts,test/api.integration.test.ts,@fastify/rate-limit MIT wired; suite green,3ec3a19,self-review (not independent),No distributed store; in-memory per instance
