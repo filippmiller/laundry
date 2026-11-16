@@ -14,7 +14,7 @@
 | 5 | `npm run db:generate` then `git diff --exit-code -- drizzle` | PASS — "No schema changes, nothing to migrate" |
 | 6 | `npx vitest run test/security-regressions.integration.test.ts` | PASS — 23 tests |
 | 7 | `npm run smoke` | NOT_RUN (needs a separately started API; previously hosted run 43911616273 had 5 assertions) |
-| 8 | `npm audit --omit=dev` | NOT_RUN this wave (no dependency changes; previous hosted run passed) |
+| 8 | `npm audit --omit=dev` | PASS — 0 vulnerabilities (no dependency changes in this wave) |
 
 ## New regression file
 
