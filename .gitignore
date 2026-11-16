@@ -1,7 +1,11 @@
-
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
-.beads/proxieddb/
-*.gate.lock*
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.pgdata/
+.pgdata-test/
+*.log
+.DS_Store
+.beads.gate.lock

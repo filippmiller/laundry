@@ -3,20 +3,39 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrations:build": "node scripts/generate-migrations.mjs",
+    "db:migrate": "drizzle-kit migrate",
+    "dev:api": "tsx watch src/api/server.ts",
+    "worker": "tsx src/workers/index.ts"
   },
   "dependencies": {
-    "drizzle-orm": "^0.44.0",
-    "pg": "^8.16.0"
+    "@fastify/cookie": "11.0.2",
+    "@fastify/cors": "10.1.0",
+    "dotenv": "17.2.3",
+    "drizzle-orm": "0.45.4",
+    "fastify": "5.12.8",
+    "pg": "8.16.3",
+    "zod": "4.6.7"
+  },
+  "overrides": {
+    "esbuild": "0.25.12",
+    "minimatch": "11.0.8"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "@types/pg": "^8.15.0",
-    "drizzle-kit": "^0.31.0",
-    "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "@eslint/js": "9.37.0",
+    "@types/node": "22.18.6",
+    "@types/pg": "8.15.5",
+    "drizzle-kit": "0.31.11",
+    "embedded-postgres": "18.6.0-beta.19",
+    "eslint": "9.39.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.2",
+    "vitest": "5.1.0"
   }
 }
