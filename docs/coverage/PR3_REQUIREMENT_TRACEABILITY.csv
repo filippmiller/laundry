@@ -23,3 +23,6 @@ REQ-FRAUD-SIGNALS,FRAUD,DONE,src/services/fraud.ts,test/admin-fraud.integration.
 REQ-SUPPORT-THREADS,SUPPORT,DONE,src/services/support.ts,test/support-reviews.integration.test.ts,open/reply/close + scoping; 3 tests,3ec3a19,self-review (not independent),No attachments or SLA
 REQ-REVIEWS,REVIEWS,DONE,src/services/reviews.ts,test/support-reviews.integration.test.ts,one per delivered order + likes + hide audit; 2 tests,3ec3a19,self-review (not independent),No rating aggregation in UI
 REQ-RATELIMIT,SECURITY,DONE,src/api/server.ts,test/api.integration.test.ts,@fastify/rate-limit MIT wired; suite green,3ec3a19,self-review (not independent),No distributed store; in-memory per instance
+REQ-MONEY-VIEW,CUSTOMER,DONE,src/services/finance.ts,test/finance-reads.integration.test.ts,owner invoice/payments/refunds/fiscal; foreign 404; courier 403; 2 tests,53670d7,self-review (not independent),No UI
+REQ-CLAIM-VIEW,SUPPORT,DONE,src/services/claims.ts,test/finance-reads.integration.test.ts,items/decisions/holds scoped to owner or staff,53670d7,self-review (not independent),No evidence binary access
+REQ-PARTNER-MONEY,PARTNER,DONE,src/services/finance.ts,test/finance-reads.integration.test.ts,own accruals only; foreign partner gets empty list,53670d7,self-review (not independent),No payout statement

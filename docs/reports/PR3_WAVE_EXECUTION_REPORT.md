@@ -94,7 +94,7 @@ Tests: 3 tests (duplicates, incomplete/full, bag partial → recovery → delive
 
 ## 5. Wave 2 (same day, continuation) — closing customer/admin/support paths
 
-**Commits:** `30fae60` (customer lifecycle), `4f76385` (admin + fraud), `3ec3a19` (support, reviews, rate limiting, test harness). Local suite: **79 tests / 11 files**, lint/typecheck/build clean.
+**Commits:** `30fae60` (customer lifecycle), `4f76385` (admin + fraud), `3ec3a19` (support, reviews, rate limiting, test harness), `53670d7` (money/claim reads). Local suite: **83 tests / 12 files**, lint/typecheck/build clean.
 
 Shipped and tested:
 
@@ -106,6 +106,7 @@ Shipped and tested:
 * Support: threads anchored to the customer's order, participant-scoped reads, replies, close.
 * Reviews/likes: migration `0014` (`reviews`, `review_likes`), one review per delivered/closed order, idempotent likes, audited hide.
 * External import: `@fastify/rate-limit` 10.3.0 (MIT) — 600/min global, 20/min demo login, 120/min webhooks.
+* Money and claim reads: `GET /orders/:id/finance` (invoice, payments, refunds, fiscal state, explicit fake-provider marker), `GET /claims/:id` (items, decisions, held evidence ids), `GET /partner/accruals` (own accruals and invoices only).
 
 Environment trap found and fixed: a killed test run left `.pgdata-test` in a state where embedded PostgreSQL hung, and Vitest reported it as "No test files found / Unknown Error: undefined". `test/global-setup.ts` now fails fast after 45s, rebuilds the disposable cluster and retries; the trap is recorded here because it will recur on any interrupted run.
 
