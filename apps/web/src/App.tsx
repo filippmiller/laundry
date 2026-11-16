@@ -328,10 +328,18 @@ function OpsView({ notify }: { notify: (notice: Notice) => void }) {
 
   async function load() {
     try {
-      setReport(await api("/dispatch/capacity-reconciliation"));
-      setClaims(await api<Array<{ id: string; state: string; claimType: string }>>("/claims"));
-      setQueue(await api<Array<{ orderId: string; publicNumber: string }>>("/dispatch/pickup-queue"));
-      setReceipts(await api<Array<{ manifestId: string; orderId: string; weightGrams: number }>>("/partner/expected-receipts"));
+      // Each surface is role-gated server-side; a role that cannot read one surface must not
+      // break the whole workspace.
+      const [report, claims, queue, receipts] = await Promise.all([
+        api<unknown>("/dispatch/capacity-reconciliation").catch(() => null),
+        api<Array<{ id: string; state: string; claimType: string }>>("/claims").catch(() => []),
+        api<Array<{ orderId: string; publicNumber: string }>>("/dispatch/pickup-queue").catch(() => []),
+        api<Array<{ manifestId: string; orderId: string; weightGrams: number }>>("/partner/expected-receipts").catch(() => []),
+      ]);
+      setReport(report);
+      setClaims(claims);
+      setQueue(queue);
+      setReceipts(receipts);
       const demo = await api<{ shiftId?: string }>("/dev/seed", { method: "POST", body: {} });
       setShiftId(demo.shiftId ?? "");
       setSelectedOrder(prev => prev || queue[0]?.orderId || "");
