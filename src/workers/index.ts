@@ -3,10 +3,14 @@ import { organizations } from "../db/schema.js";
 import { createDb, requireDatabaseUrl } from "../db/client.js";
 import { expireDueHolds, reconcileCapacity } from "../domain/slot-reservation.js";
 import { ensureSystemPrincipal } from "../services/auth.js";
+import { processPaymentInbox, requeueFailedPaymentEvents } from "../services/payment-inbox.js";
 
 export async function runOnce(url = requireDatabaseUrl()) {
   const { db, pool } = createDb(url, { max: 4 });
-  const summary = { organizations: 0, expired: 0, mismatches: 0, pendingOutbox: 0 };
+  const summary = {
+    organizations: 0, expired: 0, mismatches: 0, pendingOutbox: 0,
+    inboxProcessed: 0, inboxFailed: 0, inboxRequeued: 0,
+  };
   try {
     const orgs = await db.select().from(organizations);
     summary.organizations = orgs.length;
@@ -22,6 +26,11 @@ export async function runOnce(url = requireDatabaseUrl()) {
       `);
       summary.pendingOutbox += Number((pending.rows as unknown as Array<{ count: number }>)[0]?.count ?? 0);
     }
+    const requeued = await requeueFailedPaymentEvents(db);
+    summary.inboxRequeued = requeued.requeued;
+    const inbox = await processPaymentInbox(db);
+    summary.inboxProcessed = inbox.processed;
+    summary.inboxFailed = inbox.failed;
     return summary;
   } finally {
     await pool.end();

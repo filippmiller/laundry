@@ -33,6 +33,7 @@ import {
 import { fraudSignals } from "../services/fraud.js";
 import { closeThread, getThread, listThreads, openThread, postMessage } from "../services/support.js";
 import { createReview, hideReview, likeReview, listReviews, unlikeReview } from "../services/reviews.js";
+import { markChargeback, paymentDrift } from "../services/payment-inbox.js";
 import { seedDemo } from "../services/seed.js";
 import { and, eq, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
@@ -698,6 +699,18 @@ export function buildApp(db: Db) {
         eventType: ctx.body.eventType, payload: ctx.body.payload,
       });
     },
+  });
+  add({
+    method: "GET", path: "/finance/payment-drift", summary: "Intent state versus completed refunds", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, "security_auditor"],
+    handler: ctx => paymentDrift(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/finance/chargebacks", summary: "Mark a capture as disputed by the provider", tags: ["Finance"],
+    body: z.object({ paymentIntentId: z.uuid(), reason: z.string().min(3), key: z.string().optional() }),
+    handler: ctx => markChargeback(db, ctx.principal, {
+      paymentIntentId: ctx.body.paymentIntentId, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
   });
   add({
     method: "POST", path: "/finance/partner-invoices", summary: "Accrue partner invoice", tags: ["Finance"],

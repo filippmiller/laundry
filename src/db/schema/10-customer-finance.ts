@@ -48,8 +48,15 @@ export const paymentEvents = pgTable("payment_events", {
   paymentIntentId: uuid("payment_intent_id").references(() => paymentIntents.id),
   eventType: text("event_type").notNull(),
   payloadHash: text("payload_hash").notNull(),
+  state: text("state").notNull().default("received"),
+  attempts: integer("attempts").notNull().default(0),
+  processedAt: timestamp("processed_at", { withTimezone: true }),
+  error: text("error"),
   receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
-}, t => [uniqueIndex("payment_events_provider_event_unique").on(t.provider, t.providerEventId)]);
+}, t => [
+  uniqueIndex("payment_events_provider_event_unique").on(t.provider, t.providerEventId),
+  index("payment_events_inbox_idx").on(t.state, t.receivedAt),
+]);
 
 export const refunds = pgTable("refunds", {
   id: uuid("id").primaryKey().defaultRandom(),
