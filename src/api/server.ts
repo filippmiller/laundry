@@ -25,6 +25,10 @@ import {
   capturePayment, createCustomerInvoice, createPartnerInvoice, disputePartnerLine, handlePaymentWebhook, refundPayment,
 } from "../services/finance.js";
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
+import {
+  grantRole, listAuditEvents, listMembers, memberRoles, revokeRole, revokeSession,
+} from "../services/admin.js";
+import { fraudSignals } from "../services/fraud.js";
 import { seedDemo } from "../services/seed.js";
 import { and, eq, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
@@ -188,6 +192,11 @@ export function buildApp(db: Db) {
 
   const idSchema = z.object({ id: z.uuid() });
   const keyed = z.object({ key: z.string().min(1) });
+  const roleSchema = z.enum([
+    "customer", "courier", "driver", "hub_worker", "laundry_operator", "laundry_supervisor",
+    "partner_finance", "dispatcher", "customer_support", "claims_investigator", "claims_approver",
+    "platform_finance", "platform_admin", "security_auditor", "system_worker",
+  ]);
 
   add({
     method: "GET", path: "/health", summary: "Liveness", tags: ["System"], public: true,
@@ -472,6 +481,57 @@ export function buildApp(db: Db) {
       key: z.string().optional(),
     }),
     handler: ctx => recordQualityCheck(db, ctx.principal, { orderId: ctx.params.id, ...ctx.body, key: idempotencyKey(ctx) }),
+  });
+
+  add({
+    method: "GET", path: "/admin/members", summary: "Tenant memberships with roles", tags: ["Admin"],
+    roles: ["platform_admin", "security_auditor"],
+    handler: ctx => listMembers(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/admin/members/:id/roles", summary: "Roles of one member", tags: ["Admin"],
+    params: idSchema,
+    roles: ["platform_admin"],
+    handler: ctx => memberRoles(db, ctx.principal, ctx.params.id),
+  });
+  add({
+    method: "POST", path: "/admin/members/:id/roles", summary: "Grant a role with an audit trail", tags: ["Admin"],
+    params: idSchema,
+    roles: ["platform_admin"],
+    body: z.object({ role: roleSchema, reason: z.string().min(5), key: z.string().optional() }),
+    handler: ctx => grantRole(db, ctx.principal, {
+      userId: ctx.params.id, role: ctx.body.role, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "DELETE", path: "/admin/members/:id/roles/:role", summary: "Revoke a role with an audit trail", tags: ["Admin"],
+    params: z.object({ id: z.uuid(), role: roleSchema }),
+    roles: ["platform_admin"],
+    query: z.object({ reason: z.string().min(5), key: z.string().min(1) }),
+    handler: ctx => revokeRole(db, ctx.principal, {
+      userId: ctx.params.id, role: ctx.params.role as Role, reason: ctx.query.reason as string, key: ctx.query.key as string,
+    }),
+  });
+  add({
+    method: "POST", path: "/admin/sessions/:id/revoke", summary: "Revoke another member's session", tags: ["Admin"],
+    params: idSchema,
+    roles: ["platform_admin"],
+    body: z.object({ reason: z.string().min(5), key: z.string().optional() }),
+    handler: ctx => revokeSession(db, ctx.principal, {
+      sessionId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/admin/audit-events", summary: "Recent audit events", tags: ["Admin"],
+    roles: ["platform_admin", "security_auditor"],
+    query: z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }),
+    handler: ctx => listAuditEvents(db, ctx.principal, { limit: ctx.query.limit as number | undefined }),
+  });
+  add({
+    method: "GET", path: "/admin/fraud/signals", summary: "Read-only fraud review queue", tags: ["Admin"],
+    roles: ["platform_admin", "security_auditor", "claims_investigator", "platform_finance"],
+    query: z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }),
+    handler: ctx => fraudSignals(db, ctx.principal, { limit: ctx.query.limit as number | undefined }),
   });
 
   add({
