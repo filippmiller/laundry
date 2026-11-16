@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { makePrincipal, seedAddress, seedCatalog, seedDeliveryWindow, seedUser, seedWindow } from "./fixtures.js";
 import { createQuote } from "../src/services/quotes.js";
 import { createOrder, scheduleOrder } from "../src/services/orders.js";
+import { assignOrderToPartner } from "../src/services/partner.js";
 import { holdSlot } from "../src/domain/slot-reservation.js";
 import type { Principal } from "../src/core/context.js";
 
@@ -40,8 +41,12 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
     principal, windowId: seed.windowId, key: `hold-${Math.random().toString(36).slice(2)}`,
     now: new Date("2026-11-16T12:00:00Z"), expiresAt: new Date("2026-11-16T12:10:00Z"),
   });
+  const deliveryHold = await holdSlot(db, {
+    principal, windowId: deliveryWindowId, key: `dhold-${Math.random().toString(36).slice(2)}`,
+    now: new Date("2026-11-16T12:00:00Z"), expiresAt: new Date("2026-11-16T12:10:00Z"),
+  });
   await scheduleOrder(db, principal, {
-    orderId: order.id, pickupReservationId: hold.reservationId,
+    orderId: order.id, pickupReservationId: hold.reservationId, deliveryReservationId: deliveryHold.reservationId,
     key: `schedule-${Math.random().toString(36).slice(2)}`,
     now: new Date("2026-11-16T12:00:00Z"),
   });
@@ -95,6 +100,18 @@ export async function seedPartner(db: Db, organizationId: string) {
   }).returning();
   const principal: Principal = makePrincipal(organizationId, userId, ["laundry_operator"], { partnerId: partner.id });
   return { partnerId: partner.id, contractId: contract.id, userId, principal };
+}
+
+export async function seedPartnerForOrder(
+  db: Db,
+  order: { orderId: string; organizationId: string; dispatcher: Principal },
+) {
+  const partner = await seedPartner(db, order.organizationId);
+  await assignOrderToPartner(db, order.dispatcher, {
+    orderId: order.orderId, partnerId: partner.partnerId,
+    key: `assign-partner-${Math.random().toString(36).slice(2)}`,
+  });
+  return partner;
 }
 
 export async function seedSeal(db: Db, organizationId: string, serial = `SEAL-${Math.random().toString(36).slice(2)}`) {

@@ -1,4 +1,4 @@
-import { and, eq, sql, sum } from "drizzle-orm";
+import { and, eq, inArray, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   customerInvoiceLines, customerInvoices, fiscalReceipts, ledgerAccounts, ledgerEntries, ledgerJournals,
@@ -78,7 +78,7 @@ export async function createCustomerInvoice(db: Db, principal: Principal, input:
   assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.worker, ...ROLE_GROUPS.customer);
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "invoice:create", key: input.key, actorId: principal.userId,
-    requestHash: hashRequest(input),
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
@@ -124,13 +124,23 @@ export async function capturePayment(
   assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.worker, "customer");
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "finance:capture", key: input.key, actorId: principal.userId,
-    requestHash: hashRequest(input),
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
+    // Serialize captures for one order: a second key must not create a second full capture.
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${order.id} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
+    const captured = await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(and(
+      eq(paymentIntents.organizationId, principal.organizationId),
+      eq(paymentIntents.orderId, order.id),
+      inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
+    )).limit(1);
+    if (captured.length) throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CAPTURED", { orderId: order.id });
     const [invoice] = await tx.select().from(customerInvoices).where(and(
       eq(customerInvoices.organizationId, principal.organizationId),
       eq(customerInvoices.orderId, order.id),
@@ -179,16 +189,36 @@ export async function capturePayment(
   });
 }
 
+/**
+ * Providers whose webhook contract is actually implemented. Only the local fake provider is
+ * supported; a real acquirer must not be claimed until a signed adapter is reviewed.
+ */
+export const SUPPORTED_WEBHOOK_PROVIDERS = new Set(["fake"]);
+
 export async function handlePaymentWebhook(
   db: Db,
   input: { provider: string; providerEventId: string; eventType: string; payload: Record<string, unknown> },
 ) {
+  if (!SUPPORTED_WEBHOOK_PROVIDERS.has(input.provider)) {
+    throw new AppError("DEPENDENCY_UNAVAILABLE", "PAYMENT_PROVIDER_NOT_CONFIGURED", { provider: input.provider });
+  }
+  const intentRef = input.payload.paymentIntentId;
+  if (typeof intentRef !== "string" || !intentRef) {
+    throw new AppError("VALIDATION_ERROR", "PAYMENT_INTENT_REQUIRED");
+  }
+  const [intent] = await db.select().from(paymentIntents).where(eq(paymentIntents.id, intentRef)).limit(1);
+  if (!intent) throw errors.notFound("payment intent");
+  // The tenant is derived from the stored intent, never trusted from the webhook body.
+  const claimedOrg = input.payload.organizationId;
+  if (claimedOrg !== undefined && claimedOrg !== intent.organizationId) {
+    throw new AppError("VALIDATION_ERROR", "WEBHOOK_ORGANIZATION_MISMATCH");
+  }
   const payloadHash = hashRequest(input.payload);
   const inserted = await db.insert(paymentEvents).values({
-    organizationId: input.payload.organizationId as string,
+    organizationId: intent.organizationId,
     provider: input.provider,
     providerEventId: input.providerEventId,
-    paymentIntentId: (input.payload.paymentIntentId as string) ?? null,
+    paymentIntentId: intent.id,
     eventType: input.eventType,
     payloadHash,
   }).onConflictDoNothing().returning({ id: paymentEvents.id });
@@ -204,8 +234,15 @@ export async function refundPayment(
   assertRole(principal, ...ROLE_GROUPS.finance);
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "finance:refund", key: input.key, actorId: principal.userId,
-    requestHash: hashRequest(input),
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
+    // Lock the intent so two concurrent refunds cannot both observe the same refundable balance.
+    const locked = await tx.execute(sql`
+      SELECT id FROM payment_intents
+      WHERE id = ${input.paymentIntentId} AND organization_id = ${principal.organizationId}
+      FOR UPDATE
+    `);
+    if (!(locked.rows as unknown[]).length) throw errors.notFound("payment intent");
     const [intent] = await tx.select().from(paymentIntents).where(and(
       eq(paymentIntents.id, input.paymentIntentId),
       eq(paymentIntents.organizationId, principal.organizationId),
@@ -308,6 +345,10 @@ export async function disputePartnerLine(
       eq(partnerInvoices.id, line.invoiceId), eq(partnerInvoices.organizationId, principal.organizationId),
     )).limit(1);
     if (!invoice) throw errors.notFound("invoice");
+    // A partner's finance user may only dispute invoices issued to that partner.
+    if (hasRole(principal, "partner_finance") && !hasRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin)) {
+      if (invoice.partnerId !== principal.partnerId) throw errors.notFound("invoice");
+    }
     const [dispute] = await tx.insert(partnerDisputes).values({
       organizationId: principal.organizationId,
       invoiceLineId: line.id,

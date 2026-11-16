@@ -2,16 +2,61 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
-  garments, intakeManifests, orderAdjustments, orderLines, orders, partnerContracts,
+  garments, intakeManifests, orderAdjustments, orderLines, orders, partnerContracts, partners,
   partnerReceiptLines, partnerReceipts, partnerServiceAccruals, processingOperations, qualityChecks, seals,
 } from "../db/schema.js";
-import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idempotency.js";
 import { nextState, type OrderState } from "../domain/order-state.js";
 
 export type ActualBag = { containerCode: string; sealSerial: string; actualWeightGrams: number };
+
+/**
+ * Partner actions are only valid for the partner that custody was assigned to. An unassigned
+ * order is never implicitly claimed by the partner making the request.
+ */
+function assertAssignedPartner(order: { assignedPartnerId: string | null }, principal: Principal) {
+  if (!principal.partnerId) throw errors.forbidden("partner scope required");
+  if (!order.assignedPartnerId || order.assignedPartnerId !== principal.partnerId) {
+    throw errors.notFound("order");
+  }
+}
+
+export async function assignOrderToPartner(
+  db: Db,
+  principal: Principal,
+  input: { orderId: string; partnerId: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.dispatcher);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "order:assign_partner", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const [order] = await tx.select().from(orders).where(and(
+      eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!order) throw errors.notFound("order");
+    const [partner] = await tx.select({ id: partners.id }).from(partners).where(and(
+      eq(partners.id, input.partnerId), eq(partners.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!partner) throw errors.notFound("partner");
+    if (order.assignedPartnerId && order.assignedPartnerId !== partner.id) {
+      throw new AppError("CUSTODY_CONFLICT", "ORDER_ALREADY_ASSIGNED", { partnerId: order.assignedPartnerId });
+    }
+    if (["partner_received", "inspection", "processing", "quality_check", "ready"].includes(order.lifecycleState)) {
+      throw errors.transition(order.lifecycleState, "assign_partner");
+    }
+    await tx.update(orders).set({ assignedPartnerId: partner.id, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    await appendEvent(tx, {
+      principal, aggregateType: "order", aggregateId: order.id,
+      eventType: "order.partner_assigned", payload: { partnerId: partner.id },
+    });
+    return { orderId: order.id, partnerId: partner.id };
+  });
+}
 
 export async function receiveHandoff(
   db: Db,
@@ -30,15 +75,9 @@ export async function receiveHandoff(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
-    if (order.assignedPartnerId && order.assignedPartnerId !== principal.partnerId) {
-      throw errors.notFound("order");
-    }
+    assertAssignedPartner(order, principal);
     if (!["picked_up", "at_hub"].includes(order.lifecycleState)) {
       throw new AppError("INVALID_TRANSITION", "ORDER_NOT_AWAITING_RECEIPT", { state: order.lifecycleState });
-    }
-    if (!order.assignedPartnerId) {
-      await tx.update(orders).set({ assignedPartnerId: principal.partnerId })
-        .where(eq(orders.id, order.id));
     }
     const [manifest] = await tx.select().from(intakeManifests).where(and(
       eq(intakeManifests.id, input.manifestId),
@@ -171,6 +210,7 @@ export async function reportSealBroken(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    if (hasRole(principal, ...ROLE_GROUPS.partner)) assertAssignedPartner(order, principal);
     await tx.update(seals).set({ state: "broken" }).where(eq(seals.id, seal.id));
     const [incident] = await tx.insert(custodyDiscrepancies).values({
       organizationId: principal.organizationId,
@@ -198,6 +238,7 @@ export async function startInspection(db: Db, principal: Principal, input: { ord
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    assertAssignedPartner(order, principal);
     const to = nextState(order.lifecycleState as "partner_received", "inspect", principal);
     await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
@@ -220,6 +261,7 @@ export async function proposeAdjustment(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    assertAssignedPartner(order, principal);
     if (order.lifecycleState !== "inspection") throw errors.transition(order.lifecycleState, "propose_change");
     const [adjustment] = await tx.insert(orderAdjustments).values({
       organizationId: principal.organizationId,
@@ -288,6 +330,7 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    assertAssignedPartner(order, principal);
     if (!["inspection", "processing"].includes(order.lifecycleState)) throw errors.transition(order.lifecycleState, "start_processing");
     const [batch] = await tx.insert(batches).values({
       organizationId: principal.organizationId,
@@ -343,6 +386,7 @@ export async function recordQualityCheck(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    assertAssignedPartner(order, principal);
     if (order.lifecycleState !== "processing") throw errors.transition(order.lifecycleState, "qc_start");
     const garmentRows = await tx.select({ id: garments.id }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId), eq(garments.orderId, order.id),
@@ -356,6 +400,15 @@ export async function recordQualityCheck(
       inArray(garments.id, garmentIds),
     ));
     if (owned.length !== new Set(garmentIds).size) throw errors.notFound("garment");
+    // QC must cover every accepted garment of the order exactly once.
+    if (garmentRows.length) {
+      const covered = new Set(garmentIds);
+      if (covered.size !== garmentRows.length || !garmentRows.every(row => covered.has(row.id))) {
+        throw new AppError("VALIDATION_ERROR", "QC_INCOMPLETE_COVERAGE", {
+          required: garmentRows.length, covered: covered.size,
+        });
+      }
+    }
     for (const result of input.results) {
       await tx.insert(qualityChecks).values({
         organizationId: principal.organizationId,
@@ -377,7 +430,8 @@ export async function recordQualityCheck(
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
     } else {
       // A QC failure is a rewash, never a delivery and never a customer surcharge.
-      finalState = nextState("quality_check", "rewash", principal);
+      // The escalation itself is automatic, so it is not blocked by supervisor-only command roles.
+      finalState = nextState("quality_check", "rewash");
       await tx.update(orders).set({ lifecycleState: finalState, version: order.version + 2 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
     }

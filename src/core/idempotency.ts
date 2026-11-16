@@ -9,6 +9,11 @@ export type IdempotentInput = {
   key: string;
   actorId?: string;
   requestHash: string;
+  /**
+   * Re-authorize the target resource when a stored response is replayed. A revoked membership,
+   * a reassigned order or a foreign partner must never receive cached data.
+   */
+  replayGuard?: (tx: Tx) => Promise<void>;
 };
 
 export type IdempotentResult<T> = { value: T; replayed: boolean };
@@ -46,10 +51,16 @@ export async function withIdempotency<T>(
       eq(idempotencyRecords.key, input.key),
     )).limit(1);
     if (!existing) throw new AppError("IDEMPOTENCY_IN_PROGRESS");
+    // A key belongs to the actor that first used it: sharing a key across principals must never
+    // replay another actor's stored response or resurrect a stale authorization.
+    if (input.actorId && existing.actorId !== input.actorId) {
+      throw new AppError("IDEMPOTENCY_OWNER_MISMATCH", "IDEMPOTENCY_OWNER_MISMATCH");
+    }
     if (existing.requestHash !== input.requestHash) {
       throw new AppError("IDEMPOTENCY_PAYLOAD_CONFLICT", "IDEMPOTENCY_PAYLOAD_CONFLICT");
     }
     if (existing.responseJson == null) throw new AppError("IDEMPOTENCY_IN_PROGRESS");
+    await input.replayGuard?.(tx);
     return { value: existing.responseJson as unknown as T, replayed: true };
   });
 }

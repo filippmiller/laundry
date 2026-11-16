@@ -56,8 +56,13 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slice B: quote to scheduled ord
       principal: f.principal, windowId: f.windowId, key: "pickup-hold",
       expiresAt: new Date("2026-11-16T12:10:00Z"), now: new Date("2026-11-16T12:00:00Z"),
     });
+    const deliveryHold = await holdSlot(db, {
+      principal: f.principal, windowId: f.deliveryWindowId, key: "delivery-hold",
+      expiresAt: new Date("2026-11-16T12:10:00Z"), now: new Date("2026-11-16T12:00:00Z"),
+    });
     await expect(scheduleOrder(db, f.principal, {
-      orderId: order.id, pickupReservationId: hold.reservationId, key: "schedule-1",
+      orderId: order.id, pickupReservationId: hold.reservationId,
+      deliveryReservationId: deliveryHold.reservationId, key: "schedule-1",
       now: new Date("2026-11-16T12:00:00Z"),
     })).resolves.toMatchObject({ state: "scheduled" });
     expect((await loadOrder(db, f.principal, order.id)).lifecycleState).toBe("scheduled");
@@ -120,8 +125,13 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slice B: quote to scheduled ord
       principal: f.principal, windowId: f.windowId, key: "roles-hold",
       expiresAt: new Date("2026-11-16T12:10:00Z"), now: new Date("2026-11-16T12:00:00Z"),
     });
+    const deliveryHold = await holdSlot(db, {
+      principal: f.principal, windowId: f.deliveryWindowId, key: "roles-delivery-hold",
+      expiresAt: new Date("2026-11-16T12:10:00Z"), now: new Date("2026-11-16T12:00:00Z"),
+    });
     await scheduleOrder(db, f.principal, {
-      orderId: order.id, pickupReservationId: hold.reservationId, key: "roles-schedule",
+      orderId: order.id, pickupReservationId: hold.reservationId,
+      deliveryReservationId: deliveryHold.reservationId, key: "roles-schedule",
       now: new Date("2026-11-16T12:00:00Z"),
     });
     await expect(transitionOrder(db, f.principal, {

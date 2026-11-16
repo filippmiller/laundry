@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { createDb, type Db } from "../src/db/client.js";
 import { custodyEvents, orders, paymentEvents } from "../src/db/schema.js";
 import { makePrincipal, seedUser } from "./fixtures.js";
-import { COURIER_DEVICE, seedFullOrder, seedPartner, seedSeal } from "./operations-fixtures.js";
+import { COURIER_DEVICE, seedFullOrder, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
 import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import {
   decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
@@ -64,7 +64,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("C01: a wrong seal at partner receipt blocks automatic custody transfer and opens an incident", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-C01");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -83,7 +83,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("C05/D03: QC passes to ready, partial delivery never closes the order", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-D03");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -114,7 +114,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("C04: a declined partner price change never starts processing", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-C04");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -143,7 +143,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("D04/E01: claim holds evidence, duplicate webhook records once, refund cannot exceed capture", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-E01");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -191,7 +191,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("E04: partner invoice accrues accepted work and a line can be disputed", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-E04");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",

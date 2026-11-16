@@ -177,13 +177,31 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
       eq(garments.organizationId, principal.organizationId), eq(garments.orderId, order.id),
     ));
     const deliveredIds = input.deliveredGarmentIds ?? [];
+    const uniqueDelivered = new Set(deliveredIds);
+    if (uniqueDelivered.size !== deliveredIds.length) {
+      throw new AppError("CUSTODY_CONFLICT", "DUPLICATE_GARMENT_ID", { deliveredIds });
+    }
     if (deliveredIds.length) {
       const owned = await tx.select({ id: garments.id }).from(garments).where(and(
         eq(garments.organizationId, principal.organizationId),
         eq(garments.orderId, order.id),
         inArray(garments.id, deliveredIds),
       ));
-      if (owned.length !== new Set(deliveredIds).size) throw errors.notFound("garment");
+      if (owned.length !== uniqueDelivered.size) throw errors.notFound("garment");
+    }
+    // Handover requires the exact complete item set; duplicates or omissions must use `partial`.
+    if (input.outcome === "delivered" && allGarments.length > 0) {
+      const exactSet = deliveredIds.length === allGarments.length
+        && allGarments.every(garment => uniqueDelivered.has(garment.id));
+      if (!exactSet) {
+        throw new AppError("CUSTODY_CONFLICT", "DELIVERY_SET_MISMATCH", {
+          required: allGarments.length, delivered: uniqueDelivered.size,
+        });
+      }
+    }
+    if (input.outcome === "delivered" && allGarments.length === 0 && deliveredIds.length > 0) {
+      // Economy bag orders have no per-item inventory: bag-level proof, never invented garment ids.
+      throw new AppError("CUSTODY_CONFLICT", "BAG_ORDER_HAS_NO_ITEMS");
     }
     const needsProof = input.outcome === "delivered" || input.outcome === "partial";
     if (needsProof && Object.keys(input.recipientProof ?? {}).length === 0) {
@@ -201,7 +219,8 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
     }).returning();
 
     let state: OrderState = order.lifecycleState;
-    if (input.outcome === "delivered" && allGarments.length > 0 && deliveredIds.length === allGarments.length) {
+    let recoveryStopId: string | null = null;
+    if (input.outcome === "delivered" && (allGarments.length === 0 || uniqueDelivered.size === allGarments.length)) {
       state = nextState(order.lifecycleState as "out_for_delivery", "handover", principal);
       await tx.update(orders).set({ lifecycleState: state, version: order.version + 1 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
@@ -233,6 +252,20 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
       }
       await tx.update(routeStops).set({ state: "completed", version: stop.version + 1 })
         .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
+      // A partial delivery leaves the order open and creates an actionable reattempt stop.
+      const [recovery] = await tx.insert(routeStops).values({
+        organizationId: principal.organizationId,
+        routeId: stop.routeId,
+        orderId: order.id,
+        buildingId: stop.buildingId,
+        kind: "delivery",
+        sequence: stop.sequence + 1,
+        state: "pending",
+        assignedCourierId: stop.assignedCourierId,
+        windowStart: stop.windowStart,
+        windowEnd: stop.windowEnd,
+      }).returning({ id: routeStops.id });
+      recoveryStopId = recovery.id;
       // The order deliberately stays out_for_delivery: partial delivery cannot close it.
     } else {
       state = nextState(order.lifecycleState as "out_for_delivery", "failed_attempt", principal);
@@ -248,7 +281,7 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
       payload: { attemptId: attempt.id, outcome: input.outcome, deliveredGarmentIds: deliveredIds, state },
       reason: input.reason,
     });
-    return { attemptId: attempt.id, orderId: order.id, outcome: input.outcome, state };
+    return { attemptId: attempt.id, orderId: order.id, outcome: input.outcome, state, recoveryStopId };
   });
 }
 

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  documentVersions, orderLines, orders, quotes, serviceWindows, slotReservations,
+  customerAddresses, documentVersions, orderLines, orders, quotes, routeStops, serviceWindows, slotReservations,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -99,23 +99,48 @@ export async function scheduleOrder(
     scope: "order:schedule",
     key: input.key,
     actorId: principal.userId,
-    requestHash: hashRequest(input),
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+    replayGuard: async tx => { await loadOrder(tx as Db, principal, input.orderId); },
   }, async tx => {
     const order = await loadOrder(tx as Db, principal, input.orderId);
     if (order.lifecycleState !== "confirmed") throw errors.transition(order.lifecycleState, "reserve_pickup");
-    for (const reservationId of [input.pickupReservationId, input.deliveryReservationId].filter(Boolean) as string[]) {
+    if (!input.pickupReservationId || !input.deliveryReservationId) {
+      throw new AppError("VALIDATION_ERROR", "BOTH_RESERVATIONS_REQUIRED");
+    }
+    const [address] = await tx.select({ buildingId: customerAddresses.buildingId }).from(customerAddresses).where(and(
+      eq(customerAddresses.id, order.addressId),
+      eq(customerAddresses.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!address) throw errors.notFound("address");
+
+    // Each leg must be the order customer's own held capacity for the order's building and kind.
+    const legs = [
+      { reservationId: input.pickupReservationId, kind: "pickup" as const },
+      { reservationId: input.deliveryReservationId, kind: "delivery" as const },
+    ];
+    for (const leg of legs) {
       const [reservation] = await tx.select().from(slotReservations).where(and(
-        eq(slotReservations.id, reservationId),
+        eq(slotReservations.id, leg.reservationId),
         eq(slotReservations.organizationId, principal.organizationId),
       )).limit(1);
       if (!reservation) throw errors.notFound("reservation");
-      const [window] = await tx.select().from(serviceWindows).where(eq(serviceWindows.id, reservation.windowId)).limit(1);
-      if (!window) throw errors.notFound("window");
       if (reservation.orderId && reservation.orderId !== order.id) throw errors.notFound("reservation");
+      if (reservation.quoteId && reservation.quoteId !== order.quoteId) throw errors.notFound("reservation");
+      if (reservation.principalId !== order.customerId) throw errors.notFound("reservation");
+      if (reservation.state !== "held") {
+        throw new AppError("INVALID_TRANSITION", "RESERVATION_NOT_CONFIRMABLE", { state: reservation.state });
+      }
+      const [window] = await tx.select().from(serviceWindows).where(and(
+        eq(serviceWindows.id, reservation.windowId),
+        eq(serviceWindows.organizationId, principal.organizationId),
+        eq(serviceWindows.buildingId, address.buildingId),
+        eq(serviceWindows.kind, leg.kind),
+      )).limit(1);
+      if (!window) throw errors.notFound("window");
       await confirmSlot(tx as Db, {
-        principal, reservationId, key: `schedule-${input.key}-${reservationId}`, now: input.now,
+        principal, reservationId: leg.reservationId, key: `schedule-${input.key}-${leg.reservationId}`, now: input.now,
       });
-      await tx.update(slotReservations).set({ orderId: order.id }).where(eq(slotReservations.id, reservationId));
+      await tx.update(slotReservations).set({ orderId: order.id }).where(eq(slotReservations.id, leg.reservationId));
     }
     await tx.update(orders).set({
       lifecycleState: "scheduled",
@@ -123,7 +148,7 @@ export async function scheduleOrder(
     }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.scheduled",
-      payload: { pickupReservationId: input.pickupReservationId ?? null, deliveryReservationId: input.deliveryReservationId ?? null },
+      payload: { pickupReservationId: input.pickupReservationId, deliveryReservationId: input.deliveryReservationId },
     });
     return { id: order.id, state: "scheduled" as const };
   });
@@ -140,6 +165,44 @@ export async function loadOrder(db: Db, principal: Principal, orderId: string) {
   return order;
 }
 
+/**
+ * Read projection for `GET /orders/:id`. Staff see the business fields without the accepted
+ * terms hash; a partner sees only orders assigned to it; a courier only stops assigned to them.
+ * Customer addresses, lead contact data and evidence are never part of this projection.
+ */
+export async function loadOrderView(db: Db, principal: Principal, orderId: string) {
+  const order = await loadOrder(db, principal, orderId);
+  const staff = hasRole(
+    principal,
+    ...ROLE_GROUPS.admin, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.support,
+  );
+  const publicFields = {
+    id: order.id,
+    publicNumber: order.publicNumber,
+    lifecycleState: order.lifecycleState,
+    version: order.version,
+    customerId: order.customerId,
+    assignedPartnerId: order.assignedPartnerId,
+    termsVersion: order.termsVersion,
+    createdAt: order.createdAt,
+  };
+  if (staff || hasRole(principal, "customer")) return publicFields;
+  if (hasRole(principal, ...ROLE_GROUPS.partner)) {
+    if (!principal.partnerId || order.assignedPartnerId !== principal.partnerId) throw errors.notFound("order");
+    return publicFields;
+  }
+  if (hasRole(principal, "courier")) {
+    const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
+      eq(routeStops.organizationId, principal.organizationId),
+      eq(routeStops.orderId, order.id),
+      eq(routeStops.assignedCourierId, principal.userId),
+    )).limit(1);
+    if (!stop) throw errors.notFound("order");
+    return publicFields;
+  }
+  throw errors.forbidden("no order view for this role");
+}
+
 export async function transitionOrder(
   db: Db,
   principal: Principal,
@@ -150,7 +213,7 @@ export async function transitionOrder(
     scope: "order:transition",
     key: input.key,
     actorId: principal.userId,
-    requestHash: hashRequest(input),
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
     const order = await loadOrder(tx as Db, principal, input.orderId);
     const to = nextState(order.lifecycleState as OrderState, input.command, principal);

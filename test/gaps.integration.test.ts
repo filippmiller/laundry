@@ -6,7 +6,7 @@ import { custodyEvents, ledgerAccounts, ledgerEntries, ledgerJournals, orders, t
 import { and, inArray } from "drizzle-orm";
 
 import { makePrincipal, seedUser } from "./fixtures.js";
-import { COURIER_DEVICE, seedFullOrder, seedPartner, seedSeal } from "./operations-fixtures.js";
+import { COURIER_DEVICE, seedFullOrder, seedPartner, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
 import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import { receiveHandoff, reportSealBroken, startInspection, startProcessing, recordQualityCheck } from "../src/services/partner.js";
 import { arriveStop, assignDelivery, closeOrder, recordDeliveryAttempt } from "../src/services/delivery.js";
@@ -37,7 +37,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
 
   it("C02: a broken seal blocks partner receipt and opens an incident", async () => {
     const f = await intakeFixture();
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const report = await reportSealBroken(db, partner.principal, {
       orderId: f.orderId, sealSerial: f.seal.serial, reason: "пломба повреждена", key: "broken-seal-1",
     });
@@ -51,7 +51,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
 
   it("E05: a second partner cannot take over an order already assigned to another partner", async () => {
     const f = await intakeFixture();
-    const first = await seedPartner(db, f.organizationId);
+    const first = await seedPartnerForOrder(db, f);
     await receiveHandoff(db, first.principal, {
       orderId: f.orderId, manifestId: f.intake.manifestId,
       actual: [{ containerCode: f.bag, sealSerial: f.seal.serial, actualWeightGrams: 1_000 }],
@@ -134,7 +134,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
 
   it("V2-01: partial delivery without an exception record cannot be closed away", async () => {
     const f = await intakeFixture();
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     await receiveHandoff(db, partner.principal, {
       orderId: f.orderId, manifestId: f.intake.manifestId,
       actual: [{ containerCode: f.bag, sealSerial: f.seal.serial, actualWeightGrams: 1_000 }],
@@ -157,7 +157,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
 
   it("D02: delivery with proof missing is rejected before any attempt is recorded", async () => {
     const f = await intakeFixture();
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     await receiveHandoff(db, partner.principal, {
       orderId: f.orderId, manifestId: f.intake.manifestId,
       actual: [{ containerCode: f.bag, sealSerial: f.seal.serial, actualWeightGrams: 1_000 }],

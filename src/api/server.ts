@@ -3,18 +3,20 @@ import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import type { Principal } from "../core/context.js";
+import { assertRole, hasRole, type Principal, type Role, ROLE_GROUPS } from "../core/context.js";
 import { AppError } from "../core/errors.js";
+import { hashRequest } from "../core/idempotency.js";
 import { demoLogin, logout, principalFromToken } from "../services/auth.js";
 import { listServices, listWindows, resolveAddress } from "../services/catalog.js";
 import { createQuote } from "../services/quotes.js";
-import { createOrder, getOrderTimeline, loadOrder, scheduleOrder } from "../services/orders.js";
+import { createOrder, getOrderTimeline, loadOrderView, scheduleOrder } from "../services/orders.js";
 import { recordIntake, syncScanEvents } from "../services/intake.js";
 import {
-  decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
+  assignOrderToPartner, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
   startInspection, startProcessing,
 } from "../services/partner.js";
 import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt } from "../services/delivery.js";
@@ -28,6 +30,29 @@ import { and, eq, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
 
 const SESSION_COOKIE = "laundry_session";
+
+/**
+ * Provider webhooks are authenticated outside the session cookie. The signature covers the
+ * provider, event id, event type and a canonical hash of the payload, so a session cannot
+ * forge an event and a replayed body cannot be re-signed without the shared secret.
+ */
+function verifyPaymentWebhookSignature(
+  provider: string,
+  body: { eventId: string; eventType: string; payload: Record<string, unknown> },
+  header: string | undefined,
+) {
+  const secret = process.env.PAYMENT_WEBHOOK_SECRET;
+  if (!secret) throw new AppError("DEPENDENCY_UNAVAILABLE", "PAYMENT_WEBHOOK_SECRET_MISSING");
+  if (typeof header !== "string" || !header) throw new AppError("UNAUTHORIZED", "WEBHOOK_SIGNATURE_REQUIRED");
+  const canonical = `${provider}:${body.eventId}:${body.eventType}:${hashRequest(body.payload)}`;
+  const expected = createHmac("sha256", secret).update(canonical).digest("hex");
+  const given = header.startsWith("sha256=") ? header.slice("sha256=".length) : header;
+  const givenBuffer = Buffer.from(given, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  if (givenBuffer.length !== expectedBuffer.length || !timingSafeEqual(givenBuffer, expectedBuffer)) {
+    throw new AppError("UNAUTHORIZED", "WEBHOOK_SIGNATURE_INVALID");
+  }
+}
 
 type Ctx = {
   principal: Principal;
@@ -44,6 +69,7 @@ type RouteDef = {
   path: string;
   summary: string;
   tags: string[];
+  roles?: Role[];
   public?: boolean;
   body?: z.ZodType;
   query?: z.ZodType;
@@ -112,6 +138,7 @@ export function buildApp(db: Db) {
       preHandler: def.public ? undefined : authHook,
       handler: async (request, reply) => {
         const principal = (request as FastifyRequest & { principal?: Principal }).principal;
+        if (def.roles) assertRole(principal!, ...def.roles);
         const ctx: Ctx = {
           principal: principal!,
           body: def.body ? def.body.parse(request.body ?? {}) : request.body,
@@ -212,7 +239,10 @@ export function buildApp(db: Db) {
   });
   add({
     method: "POST", path: "/dev/seed", summary: "Create demo data (never in production)", tags: ["System"], public: true,
-    handler: () => seedDemo(db),
+    handler: () => {
+      if (process.env.NODE_ENV === "production" || process.env.ALLOW_DEMO_SEED === "false") throw new AppError("NOT_FOUND");
+      return seedDemo(db);
+    },
   });
 
   add({
@@ -274,9 +304,10 @@ export function buildApp(db: Db) {
     }),
   });
   add({
-    method: "GET", path: "/orders/:id", summary: "Order detail", tags: ["Customer"],
+    method: "GET", path: "/orders/:id", summary: "Order detail (role-scoped projection)", tags: ["Customer"],
     params: idSchema,
-    handler: ctx => loadOrder(db, ctx.principal, ctx.params.id),
+    roles: ["customer", "courier", ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.support, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.partner],
+    handler: ctx => loadOrderView(db, ctx.principal, ctx.params.id),
   });
   add({
     method: "GET", path: "/orders/:id/timeline", summary: "Order domain events", tags: ["Customer"],
@@ -284,8 +315,16 @@ export function buildApp(db: Db) {
     handler: ctx => getOrderTimeline(db, ctx.principal, ctx.params.id),
   });
   add({
-    method: "GET", path: "/claims", summary: "Claims list", tags: ["Support"],
-    handler: async ctx => (await db.select().from(claims).where(eq(claims.organizationId, ctx.principal.organizationId))),
+    method: "GET", path: "/claims", summary: "Scoped claims list", tags: ["Support"],
+    roles: ["customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin],
+    handler: async ctx => {
+      const customerOnly = hasRole(ctx.principal, "customer")
+        && !hasRole(ctx.principal, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
+      const scope = customerOnly
+        ? and(eq(claims.organizationId, ctx.principal.organizationId), eq(claims.openedBy, ctx.principal.userId))
+        : eq(claims.organizationId, ctx.principal.organizationId);
+      return db.select().from(claims).where(scope).limit(100);
+    },
   });
   add({
     method: "POST", path: "/orders/:id/claims", summary: "Open a claim", tags: ["Customer", "Support"],
@@ -406,6 +445,14 @@ export function buildApp(db: Db) {
   });
 
   add({
+    method: "POST", path: "/dispatch/orders/:id/partner", summary: "Assign custody to a laundry partner", tags: ["Dispatch"],
+    params: idSchema,
+    body: z.object({ partnerId: z.uuid(), key: z.string().optional() }),
+    handler: ctx => assignOrderToPartner(db, ctx.principal, {
+      orderId: ctx.params.id, partnerId: ctx.body.partnerId, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
     method: "POST", path: "/dispatch/pickups/assign", summary: "Assign a pickup stop to an active courier shift", tags: ["Dispatch"],
     body: z.object({ orderId: z.uuid(), shiftId: z.uuid(), key: z.string().optional() }),
     handler: ctx => assignPickup(db, ctx.principal, {
@@ -455,13 +502,17 @@ export function buildApp(db: Db) {
     handler: ctx => refundPayment(db, ctx.principal, { ...ctx.body, key: idempotencyKey(ctx) }),
   });
   add({
-    method: "POST", path: "/webhooks/payments/:provider", summary: "Durable webhook inbox", tags: ["Integrations"],
+    method: "POST", path: "/webhooks/payments/:provider", summary: "Signature-verified provider webhook inbox", tags: ["Integrations"], public: true,
     body: z.object({ eventId: z.string().min(1), eventType: z.string().min(1), payload: z.record(z.string(), z.unknown()) }),
     params: z.object({ provider: z.string().min(1) }),
-    handler: ctx => handlePaymentWebhook(db, {
-      provider: ctx.params.provider, providerEventId: ctx.body.eventId,
-      eventType: ctx.body.eventType, payload: ctx.body.payload,
-    }),
+    handler: ctx => {
+      const signature = ctx.request.headers["x-provider-signature"];
+      verifyPaymentWebhookSignature(ctx.params.provider, ctx.body, typeof signature === "string" ? signature : undefined);
+      return handlePaymentWebhook(db, {
+        provider: ctx.params.provider, providerEventId: ctx.body.eventId,
+        eventType: ctx.body.eventType, payload: ctx.body.payload,
+      });
+    },
   });
   add({
     method: "POST", path: "/finance/partner-invoices", summary: "Accrue partner invoice", tags: ["Finance"],
@@ -482,10 +533,12 @@ export function buildApp(db: Db) {
   });
   add({
     method: "GET", path: "/dispatch/capacity-reconciliation", summary: "Capacity drift report", tags: ["Dispatch"],
+    roles: [...ROLE_GROUPS.dispatcher],
     handler: ctx => reconcileCapacity(db, ctx.principal.organizationId),
   });
   add({
     method: "GET", path: "/finance/reconciliation", summary: "posted journal and payment counts", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance],
     handler: async ctx => {
       const result = await db.execute(sql`
         SELECT
@@ -498,6 +551,7 @@ export function buildApp(db: Db) {
   });
   add({
     method: "GET", path: "/dispatch/pickup-queue", summary: "Scheduled orders awaiting courier assignment", tags: ["Dispatch"],
+    roles: [...ROLE_GROUPS.dispatcher],
     handler: async ctx => db.select({
       orderId: orders.id, publicNumber: orders.publicNumber, state: orders.lifecycleState,
       createdAt: orders.createdAt,
@@ -506,24 +560,54 @@ export function buildApp(db: Db) {
       .limit(50),
   });
   add({
-    method: "GET", path: "/partner/expected-receipts", summary: "Manifests awaiting partner receipt", tags: ["Partner"],
-    handler: async ctx => db.select({
-      manifestId: intakeManifests.id, orderId: intakeManifests.orderId,
-      weightGrams: intakeManifests.weightGrams, state: intakeManifests.state,
-      createdAt: intakeManifests.createdAt,
-    }).from(intakeManifests)
-      .where(eq(intakeManifests.organizationId, ctx.principal.organizationId))
-      .orderBy(intakeManifests.createdAt)
-      .limit(50),
+    method: "GET", path: "/partner/expected-receipts", summary: "Manifests awaiting this partner's receipt", tags: ["Partner"],
+    roles: [...ROLE_GROUPS.partner],
+    handler: async ctx => {
+      if (!ctx.principal.partnerId) return [];
+      return db.select({
+        manifestId: intakeManifests.id, orderId: intakeManifests.orderId,
+        weightGrams: intakeManifests.weightGrams, state: intakeManifests.state,
+        createdAt: intakeManifests.createdAt,
+      }).from(intakeManifests)
+        .innerJoin(orders, eq(orders.id, intakeManifests.orderId))
+        .where(and(
+          eq(intakeManifests.organizationId, ctx.principal.organizationId),
+          eq(orders.assignedPartnerId, ctx.principal.partnerId),
+        ))
+        .orderBy(intakeManifests.createdAt)
+        .limit(50);
+    },
   });
   add({
     method: "GET", path: "/finance/fiscal-receipts", summary: "Fiscal adapter state (never a replacement for a cash receipt)", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.worker],
     handler: async ctx => db.select().from(fiscalReceipts)
       .where(eq(fiscalReceipts.organizationId, ctx.principal.organizationId)).limit(50),
   });
   add({
-    method: "GET", path: "/orders", summary: "Scoped orders", tags: ["Customer", "Dispatch"],
-    handler: async ctx => db.select().from(orders).where(eq(orders.organizationId, ctx.principal.organizationId)).limit(100),
+    method: "GET", path: "/orders", summary: "Scoped order list", tags: ["Customer", "Dispatch"],
+    roles: ["customer", ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.support, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.partner],
+    handler: async ctx => {
+      const scope = eq(orders.organizationId, ctx.principal.organizationId);
+      const staff = hasRole(ctx.principal, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.support, ...ROLE_GROUPS.finance);
+      let where = scope;
+      if (!staff && hasRole(ctx.principal, "customer")) {
+        where = and(scope, eq(orders.customerId, ctx.principal.userId)) ?? scope;
+      } else if (!staff && hasRole(ctx.principal, ...ROLE_GROUPS.partner)) {
+        if (!ctx.principal.partnerId) return [];
+        where = and(scope, eq(orders.assignedPartnerId, ctx.principal.partnerId)) ?? scope;
+      }
+      // Projection excludes accepted terms hash and other fields a list view does not need.
+      return db.select({
+        id: orders.id,
+        publicNumber: orders.publicNumber,
+        state: orders.lifecycleState,
+        version: orders.version,
+        customerId: orders.customerId,
+        assignedPartnerId: orders.assignedPartnerId,
+        createdAt: orders.createdAt,
+      }).from(orders).where(where).limit(100);
+    },
   });
 
   return app;
