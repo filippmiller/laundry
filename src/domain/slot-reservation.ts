@@ -1,57 +1,52 @@
+import { createHash } from "node:crypto";
 import { and, eq, gt, sql } from "drizzle-orm";
-import { slotReservations, serviceWindows } from "../db/schema.js";
+import { buildings, slotReservations, serviceWindows } from "../db/schema.js";
 
-export type ReservationDb = {
-  transaction<T>(fn: (tx: ReservationTx) => Promise<T>): Promise<T>;
-};
-export type ReservationTx = {
-  select: (...args: any[]) => any;
-  insert: (...args: any[]) => any;
-  update: (...args: any[]) => any;
-};
+export type ReservationDb = { transaction<T>(fn: (tx: any) => Promise<T>): Promise<T> };
 export type HoldRequest = {
+  organizationId: string;
   windowId: string;
   key: string;
   expiresAt: Date;
   now?: Date;
 };
-
 export class CapacityUnavailable extends Error {
   constructor() { super("CAPACITY_UNAVAILABLE"); }
 }
-
-/**
- * Atomically reserves one order capacity unit. Callers must scope the
- * window to the authenticated tenant BEFORE invoking this function.
- *
- * This command is safe for concurrent callers because the UPDATE
- * conditionally increments the window counter in PostgreSQL.
- */
+function fingerprint(input: HoldRequest) {
+  return createHash("sha256").update(JSON.stringify({
+    organizationId: input.organizationId,
+    windowId: input.windowId,
+    expiresAt: input.expiresAt.toISOString(),
+  })).digest("hex");
+}
 export async function holdSlot(db: ReservationDb, input: HoldRequest) {
-  if (!input.key.trim() || input.key.length > 200) throw new Error("INVALID_IDEMPOTENCY_KEY");
+  if (!input.organizationId) throw new Error("ORGANIZATION_REQUIRED");
+  if (!input.key?.trim() || input.key.length > 200) throw new Error("INVALID_IDEMPOTENCY_KEY");
   const now = input.now ?? new Date();
   if (!(input.expiresAt instanceof Date) || !Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= now) {
     throw new Error("INVALID_EXPIRY");
   }
+  const requestHash = fingerprint(input);
   return db.transaction(async tx => {
-    // The unique (window_id, idempotency_key) index serializes retries.
-    // Insert-first avoids consuming capacity on an existing key.
+    // Check ownership inside transaction; the client cannot supply another tenant's window.
+    const owned = await tx.select({ id: serviceWindows.id }).from(serviceWindows)
+      .innerJoin(buildings, eq(serviceWindows.buildingId, buildings.id))
+      .where(and(eq(serviceWindows.id, input.windowId), eq(buildings.organizationId, input.organizationId)))
+      .limit(1);
+    if (!owned.length) throw new Error("WINDOW_NOT_FOUND");
     const inserted = await tx.insert(slotReservations).values({
-      windowId: input.windowId,
-      idempotencyKey: input.key,
-      expiresAt: input.expiresAt,
-      state: "held",
+      windowId: input.windowId, idempotencyKey: input.key,
+      requestHash, expiresAt: input.expiresAt, state: "held",
     }).onConflictDoNothing().returning({ id: slotReservations.id });
-
-    if (inserted.length === 0) {
-      const existing = await tx.select().from(slotReservations).where(and(
-        eq(slotReservations.windowId, input.windowId),
-        eq(slotReservations.idempotencyKey, input.key),
+    if (!inserted.length) {
+      const rows = await tx.select().from(slotReservations).where(and(
+        eq(slotReservations.windowId, input.windowId), eq(slotReservations.idempotencyKey, input.key),
       )).limit(1);
-      if (!existing.length) throw new Error("RETRY_CONFLICT");
-      return { reservationId: existing[0].id, state: existing[0].state, replayed: true };
+      if (!rows.length) throw new Error("RETRY_CONFLICT");
+      if (rows[0].requestHash !== requestHash) throw new Error("IDEMPOTENCY_PAYLOAD_CONFLICT");
+      return { reservationId: rows[0].id, state: rows[0].state, replayed: true };
     }
-
     const changed = await tx.update(serviceWindows).set({
       reservedOrders: sql`${serviceWindows.reservedOrders} + 1`,
       version: sql`${serviceWindows.version} + 1`,
@@ -60,12 +55,10 @@ export async function holdSlot(db: ReservationDb, input: HoldRequest) {
       gt(serviceWindows.capacityOrders, serviceWindows.reservedOrders),
       gt(serviceWindows.endsAt, now),
     )).returning({ id: serviceWindows.id });
-    if (!changed.length) throw new CapacityUnavailable(); // rollback insert
+    if (!changed.length) throw new CapacityUnavailable();
     return { reservationId: inserted[0].id, state: "held" as const, replayed: false };
   });
 }
-
-/** Confirm only a nonexpired hold; expiry worker must not touch confirmed rows. */
 export async function confirmSlot(db: ReservationDb, reservationId: string, now = new Date()) {
   return db.transaction(async tx => {
     const changed = await tx.update(slotReservations).set({ state: "confirmed" })
@@ -77,36 +70,27 @@ export async function confirmSlot(db: ReservationDb, reservationId: string, now 
     throw new Error("RESERVATION_NOT_CONFIRMABLE");
   });
 }
-
-/**
- * Release a held/confirmed reservation exactly once. For a confirmed
- * reservation, caller must first validate cancellation/refund policy.
- */
-export async function releaseSlot(db: ReservationDb, reservationId: string) {
+async function terminate(db: ReservationDb, reservationId: string, target: "released" | "expired", now: Date) {
   return db.transaction(async tx => {
-    const rows = await tx.update(slotReservations).set({ state: "released" })
-      .where(and(eq(slotReservations.id, reservationId), sql`${slotReservations.state} IN ('held','confirmed')`))
+    const condition = target === "expired"
+      ? and(eq(slotReservations.id, reservationId), eq(slotReservations.state, "held"), sql`${slotReservations.expiresAt} <= ${now}`)
+      : and(eq(slotReservations.id, reservationId), sql`${slotReservations.state} IN ('held','confirmed')`);
+    const changed = await tx.update(slotReservations).set({ state: target }).where(condition)
       .returning({ windowId: slotReservations.windowId });
-    if (!rows.length) return false;
-    await tx.update(serviceWindows).set({
+    if (!changed.length) return false;
+    const counter = await tx.update(serviceWindows).set({
       reservedOrders: sql`${serviceWindows.reservedOrders} - 1`,
       version: sql`${serviceWindows.version} + 1`,
-    }).where(and(eq(serviceWindows.id, rows[0].windowId), gt(serviceWindows.reservedOrders, 0)));
+    }).where(and(eq(serviceWindows.id, changed[0].windowId), gt(serviceWindows.reservedOrders, 0)))
+      .returning({ id: serviceWindows.id });
+    if (!counter.length) throw new Error("CAPACITY_COUNTER_INCONSISTENT"); // rollback reservation state
     return true;
   });
 }
-
-/** Expire a single hold with compare-and-swap; safe under repeated workers. */
-export async function expireSlot(db: ReservationDb, reservationId: string, now = new Date()) {
-  return db.transaction(async tx => {
-    const rows = await tx.update(slotReservations).set({ state: "expired" })
-      .where(and(eq(slotReservations.id, reservationId), eq(slotReservations.state, "held"), sql`${slotReservations.expiresAt} <= ${now}`))
-      .returning({ windowId: slotReservations.windowId });
-    if (!rows.length) return false;
-    await tx.update(serviceWindows).set({
-      reservedOrders: sql`${serviceWindows.reservedOrders} - 1`,
-      version: sql`${serviceWindows.version} + 1`,
-    }).where(and(eq(serviceWindows.id, rows[0].windowId), gt(serviceWindows.reservedOrders, 0)));
-    return true;
-  });
+/** Only call after authorization of cancellation and refund policy. */
+export function releaseSlot(db: ReservationDb, reservationId: string) {
+  return terminate(db, reservationId, "released", new Date());
+}
+export function expireSlot(db: ReservationDb, reservationId: string, now = new Date()) {
+  return terminate(db, reservationId, "expired", now);
 }
