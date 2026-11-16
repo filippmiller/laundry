@@ -54,6 +54,16 @@ export async function withIdempotency<T>(
   });
 }
 
+/** Flattened variant for service boundaries that expose the replay flag to callers. */
+export async function withIdempotencyFlat<T>(
+  db: Db,
+  input: IdempotentInput,
+  work: (tx: Tx) => Promise<T>,
+): Promise<T & { replayed: boolean }> {
+  const result = await withIdempotency(db, input, work);
+  return { ...result.value, replayed: result.replayed };
+}
+
 export function hashRequest(value: unknown) {
   // Deterministic ordering: object keys are sorted recursively.
   const stable = (node: unknown): unknown => {
