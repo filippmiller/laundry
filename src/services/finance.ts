@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql, sum } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   customerInvoiceLines, customerInvoices, fiscalReceipts, ledgerAccounts, ledgerEntries, ledgerJournals,
@@ -9,6 +9,7 @@ import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/contex
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
+import { loadOrder } from "./orders.js";
 
 const ACCOUNTS = [
   ["clearing", "Платежный клиринг"],
@@ -290,8 +291,80 @@ export async function refundPayment(
   });
 }
 
-export async function createPartnerInvoice(
-  db: Db,
+/** Customer/support/finance view of an order's money: no journal internals, no provider secrets. */
+export async function orderFinance(db: Db, principal: Principal, orderId: string) {
+  assertRole(principal, "customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  const order = await loadOrder(db, principal, orderId);
+  const [invoice] = await db.select().from(customerInvoices).where(and(
+    eq(customerInvoices.organizationId, principal.organizationId),
+    eq(customerInvoices.orderId, order.id),
+  )).limit(1);
+  const payments = await db.select({
+    id: paymentIntents.id, amountKopeks: paymentIntents.amountKopeks,
+    state: paymentIntents.state, provider: paymentIntents.provider, createdAt: paymentIntents.createdAt,
+  }).from(paymentIntents).where(and(
+    eq(paymentIntents.organizationId, principal.organizationId),
+    eq(paymentIntents.orderId, order.id),
+  )).orderBy(desc(paymentIntents.createdAt));
+  const intentIds = payments.map(payment => payment.id);
+  const refundRows = intentIds.length
+    ? await db.select({
+      id: refunds.id, paymentIntentId: refunds.paymentIntentId, amountKopeks: refunds.amountKopeks,
+      state: refunds.state, reason: refunds.reason, createdAt: refunds.createdAt,
+    }).from(refunds).where(and(
+      eq(refunds.organizationId, principal.organizationId),
+      inArray(refunds.paymentIntentId, intentIds),
+    )).orderBy(desc(refunds.createdAt))
+    : [];
+  const fiscal = invoice
+    ? await db.select({
+      state: fiscalReceipts.state, provider: fiscalReceipts.provider, createdAt: fiscalReceipts.createdAt,
+    }).from(fiscalReceipts).where(eq(fiscalReceipts.invoiceId, invoice.id)).orderBy(desc(fiscalReceipts.createdAt))
+    : [];
+  return {
+    orderId: order.id,
+    orderState: order.lifecycleState,
+    invoice: invoice
+      ? { id: invoice.id, number: invoice.number, totalKopeks: invoice.totalKopeks, state: invoice.state }
+      : null,
+    payments,
+    refunds: refundRows,
+    fiscalReceipts: fiscal,
+    providerMode: "fake" as const,
+    note: "Fiscal adapter state is not a cash receipt and carries no 54-FZ claim.",
+  };
+}
+
+/** A partner sees only its own accruals and invoices; never another partner's money. */
+export async function partnerAccruals(db: Db, principal: Principal, input: { limit?: number } = {}) {
+  assertRole(principal, ...ROLE_GROUPS.partner);
+  if (!principal.partnerId) throw errors.forbidden("partner scope required");
+  const limit = Math.min(input.limit ?? 50, 100);
+  const accruals = await db.select({
+    id: partnerServiceAccruals.id, orderLineId: partnerServiceAccruals.orderLineId,
+    quantity: partnerServiceAccruals.quantity, amountKopeks: partnerServiceAccruals.amountKopeks,
+    status: partnerServiceAccruals.status, createdAt: partnerServiceAccruals.createdAt,
+  }).from(partnerServiceAccruals).where(and(
+    eq(partnerServiceAccruals.organizationId, principal.organizationId),
+    eq(partnerServiceAccruals.partnerId, principal.partnerId),
+  )).orderBy(desc(partnerServiceAccruals.createdAt)).limit(limit);
+  const invoices = await db.select({
+    id: partnerInvoices.id, number: partnerInvoices.number, periodStart: partnerInvoices.periodStart,
+    periodEnd: partnerInvoices.periodEnd, totalKopeks: partnerInvoices.totalKopeks,
+    state: partnerInvoices.state, createdAt: partnerInvoices.createdAt,
+  }).from(partnerInvoices).where(and(
+    eq(partnerInvoices.organizationId, principal.organizationId),
+    eq(partnerInvoices.partnerId, principal.partnerId),
+  )).orderBy(desc(partnerInvoices.createdAt)).limit(limit);
+  return {
+    partnerId: principal.partnerId,
+    accruals,
+    invoices,
+    estimatedTotalKopeks: accruals.reduce((total, accrual) => total + accrual.amountKopeks, 0),
+  };
+}
+
+export async function createPartnerInvoice(  db: Db,
   principal: Principal,
   input: { partnerId: string; periodStart: Date; periodEnd: Date; key: string },
 ) {

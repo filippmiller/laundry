@@ -21,9 +21,10 @@ import {
   startInspection, startProcessing,
 } from "../services/partner.js";
 import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt, startStop } from "../services/delivery.js";
-import { decideClaim, openClaim, reopenClaim } from "../services/claims.js";
+import { decideClaim, getClaim, openClaim, reopenClaim } from "../services/claims.js";
 import {
-  capturePayment, createCustomerInvoice, createPartnerInvoice, disputePartnerLine, handlePaymentWebhook, refundPayment,
+  capturePayment, createCustomerInvoice, createPartnerInvoice, disputePartnerLine, handlePaymentWebhook,
+  orderFinance, partnerAccruals, refundPayment,
 } from "../services/finance.js";
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
 import {
@@ -353,6 +354,12 @@ export function buildApp(db: Db) {
     handler: ctx => loadOrderView(db, ctx.principal, ctx.params.id),
   });
   add({
+    method: "GET", path: "/orders/:id/finance", summary: "Invoice, payments, refunds and fiscal state", tags: ["Customer", "Finance"],
+    params: idSchema,
+    roles: ["customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.finance],
+    handler: ctx => orderFinance(db, ctx.principal, ctx.params.id),
+  });
+  add({
     method: "GET", path: "/orders/:id/timeline", summary: "Order domain events", tags: ["Customer"],
     params: idSchema,
     handler: ctx => getOrderTimeline(db, ctx.principal, ctx.params.id),
@@ -511,6 +518,12 @@ export function buildApp(db: Db) {
   });
 
   add({
+    method: "GET", path: "/partner/accruals", summary: "This partner's accruals and invoices", tags: ["Partner"],
+    roles: [...ROLE_GROUPS.partner],
+    query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }),
+    handler: ctx => partnerAccruals(db, ctx.principal, { limit: ctx.query.limit as number | undefined }),
+  });
+  add({
     method: "POST", path: "/partner/receipts", summary: "Partner receipt with discrepancy guard", tags: ["Partner"],
     body: z.object({
       orderId: z.uuid(), manifestId: z.uuid(),
@@ -638,6 +651,12 @@ export function buildApp(db: Db) {
     method: "POST", path: "/orders/:id/close", summary: "Close delivered order", tags: ["Finance", "System"],
     params: idSchema, body: keyed.partial(),
     handler: ctx => closeOrder(db, ctx.principal, { orderId: ctx.params.id, key: idempotencyKey(ctx) }),
+  });
+  add({
+    method: "GET", path: "/claims/:id", summary: "Claim detail with items, decisions and holds", tags: ["Support", "Customer"],
+    params: idSchema,
+    roles: ["customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.dispatcher],
+    handler: ctx => getClaim(db, ctx.principal, ctx.params.id),
   });
   add({
     method: "POST", path: "/claims/:id/decision", summary: "Approve or deny a claim", tags: ["Support"],

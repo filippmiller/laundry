@@ -97,6 +97,31 @@ export async function openClaim(
   });
 }
 
+/** Claim detail for its customer or support staff, with items, decisions and held evidence ids. */
+export async function getClaim(db: Db, principal: Principal, claimId: string) {
+  assertRole(principal, "customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.dispatcher);
+  const [claim] = await db.select().from(claims).where(and(
+    eq(claims.id, claimId),
+    eq(claims.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!claim) throw errors.notFound("claim");
+  const [order] = await db.select({ customerId: orders.customerId }).from(orders).where(and(
+    eq(orders.id, claim.orderId),
+    eq(orders.organizationId, principal.organizationId),
+  )).limit(1);
+  const staff = hasRole(principal, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.dispatcher);
+  if (!staff && order?.customerId !== principal.userId) throw errors.notFound("claim");
+  const items = await db.select().from(claimItems).where(eq(claimItems.claimId, claim.id));
+  const decisions = await db.select().from(claimDecisions).where(eq(claimDecisions.claimId, claim.id));
+  const holds = await db.select({
+    assetId: evidenceLegalHolds.assetId,
+    reason: evidenceLegalHolds.reason,
+    createdAt: evidenceLegalHolds.createdAt,
+    releasedAt: evidenceLegalHolds.releasedAt,
+  }).from(evidenceLegalHolds).where(eq(evidenceLegalHolds.claimId, claim.id));
+  return { claim, items, decisions, evidenceHolds: holds };
+}
+
 export async function decideClaim(
   db: Db,
   principal: Principal,
