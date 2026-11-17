@@ -96,6 +96,7 @@ export const outboxEvents = pgTable("outbox_events", {
   payloadJson: jsonb("payload_json").notNull().default({}),
   state: outboxState("state").notNull().default("pending"),
   attempts: integer("attempts").notNull().default(0),
+  error: text("error"),
   availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [index("outbox_pending_idx").on(t.state, t.availableAt)]);

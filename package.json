@@ -17,7 +17,8 @@
     "web:dev": "vite --config apps/web/vite.config.ts",
     "web:build": "vite build --config apps/web/vite.config.ts",
     "smoke": "node scripts/smoke-e2e.mjs",
-    "db:seed": "tsx src/scripts/seed-demo.ts"
+    "db:seed": "tsx src/scripts/seed-demo.ts",
+    "db:drill": "tsx scripts/upgrade-restore-drill.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.0.2",
