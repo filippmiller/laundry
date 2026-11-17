@@ -102,6 +102,35 @@ export function buildApp(db: Db) {
     bodyLimit: 1_048_576,
   });
   const openapiPaths: Record<string, Record<string, unknown>> = {};
+  // Extra origins the API may be embedded behind; the serving host itself is always trusted.
+  const allowedOrigins = new Set(process.env.WEB_ORIGIN ? [process.env.WEB_ORIGIN] : []);
+
+  /**
+   * Cookie-authenticated POSTs get an origin check on top of sameSite=lax: browsers always send
+   * Origin on cross-site POSTs, so a mismatch proves the request was not initiated by this site
+   * even if a legacy browser ignores SameSite. An absent Origin (curl, integration tests) carries
+   * no ambient-cookie risk and stays allowed. Signature-authenticated webhooks are exempt:
+   * payment providers are not browsers.
+   */
+  function assertTrustedOrigin(request: FastifyRequest) {
+    if (request.method !== "POST") return;
+    const origin = request.headers.origin;
+    if (typeof origin !== "string" || !origin) return;
+    let authority: string;
+    try {
+      authority = new URL(origin).host;
+    } catch {
+      throw new AppError("FORBIDDEN", "ORIGIN_INVALID");
+    }
+    const host = request.headers.host ?? "";
+    if (authority !== host && !allowedOrigins.has(origin)) {
+      throw new AppError("FORBIDDEN", "ORIGIN_MISMATCH", { origin });
+    }
+  }
+
+  async function originHook(request: FastifyRequest) {
+    assertTrustedOrigin(request);
+  }
 
   app.register(cookie);
   // External, maintained abuse control (MIT): baseline per-IP limit, stricter overrides below.
@@ -139,6 +168,7 @@ export function buildApp(db: Db) {
   });
 
   async function authHook(request: FastifyRequest) {
+    assertTrustedOrigin(request);
     const token = (request.cookies as Record<string, string | undefined>)[SESSION_COOKIE];
     (request as FastifyRequest & { principal?: Principal }).principal =
       await principalFromToken(db, token, request.id);
@@ -149,7 +179,9 @@ export function buildApp(db: Db) {
       method: def.method,
       url: `/api/v1${def.path}`,
       config: def.rateLimit ? { rateLimit: def.rateLimit } : undefined,
-      preHandler: def.public ? undefined : authHook,
+      preHandler: def.public
+        ? (def.method === "POST" && def.path !== "/webhooks/payments/:provider" ? originHook : undefined)
+        : authHook,
       handler: async (request, reply) => {
         const principal = (request as FastifyRequest & { principal?: Principal }).principal;
         if (def.roles) assertRole(principal!, ...def.roles);

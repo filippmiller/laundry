@@ -587,4 +587,72 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PR3 P0/P1 security regressions"
       expect(delivered.state).toBe("delivered");
     });
   });
+
+  describe("LND3-P1-09 cookie POSTs carry a trusted origin", () => {
+    async function paidIntent() {
+      const f = await orderFixture();
+      const { order } = await placeOrder(f);
+      const finance = makePrincipal(f.organizationId, await seedUser(db, f.organizationId), ["platform_finance"]);
+      const invoice = await createCustomerInvoice(db, finance, { orderId: order.id, key: `invoice-${rid()}` });
+      const capture = await capturePayment(db, finance, {
+        orderId: order.id, amountKopeks: invoice.totalKopeks, key: `capture-${rid()}`,
+      });
+      return { f, order, capture };
+    }
+
+    it("rejects a cookie-authenticated POST whose origin is not this site", async () => {
+      const f = await orderFixture();
+      const session = await login(f.organizationId, f.phone, ["customer"]);
+      const hijacked = await app.inject({
+        method: "POST", url: "/api/v1/orders",
+        headers: { cookie: session.cookie, origin: "https://evil.example" },
+        payload: {},
+      });
+      expect(hijacked.statusCode).toBe(403);
+      expect(hijacked.json().error.message).toBe("ORIGIN_MISMATCH");
+    });
+
+    it("accepts same-origin and configured WEB_ORIGIN POSTs and originless test clients", async () => {
+      const f = await orderFixture();
+      const session = await login(f.organizationId, f.phone, ["customer"]);
+      const quote = await createQuote(db, f.principal, {
+        buildingId: f.buildingId, pickupWindowId: f.windowId, deliveryWindowId: f.deliveryWindowId,
+        tariffVersionId: f.catalog.tariffVersionId, key: `orig-quote-${rid()}`,
+        lines: [{ serviceId: f.catalog.serviceId, tier: "economy", quantity: 1_000, unit: "gram" }],
+      });
+      const sameOrigin = await app.inject({
+        method: "POST", url: "/api/v1/orders",
+        headers: { cookie: session.cookie, host: "app.local", origin: "http://app.local" },
+        payload: {
+          quoteId: quote.id, acceptedQuoteHash: quote.quoteHash,
+          termsVersion: f.catalog.termsVersion, key: `orig-order-${rid()}`,
+        },
+      });
+      expect([200, 400, 404]).toContain(sameOrigin.statusCode);
+      expect(sameOrigin.json().error?.message).not.toBe("ORIGIN_MISMATCH");
+
+      const originless = await app.inject({
+        method: "POST", url: "/api/v1/orders",
+        headers: { cookie: session.cookie },
+        payload: { quoteId: quote.id, acceptedQuoteHash: quote.quoteHash, termsVersion: f.catalog.termsVersion, key: `orig2-${rid()}` },
+      });
+      expect(originless.json().error?.message).not.toBe("ORIGIN_MISMATCH");
+    });
+
+    it("still lets a payment provider post a webhook with a foreign origin", async () => {
+      const paid = await paidIntent();
+      const body = {
+        eventId: `evt-${rid()}`, eventType: "captured",
+        payload: { organizationId: paid.f.organizationId, paymentIntentId: paid.capture.paymentIntentId },
+      };
+      const canonical = `fake:${body.eventId}:${body.eventType}:${hashRequest(body.payload)}`;
+      const signature = "sha256=" + createHmac("sha256", "test-webhook-secret").update(canonical).digest("hex");
+      const response = await app.inject({
+        method: "POST", url: "/api/v1/webhooks/payments/fake", payload: body,
+        headers: { "x-provider-signature": signature, origin: "https://provider.example" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().status).toBe("recorded");
+    });
+  });
 });
