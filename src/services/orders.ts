@@ -1,8 +1,10 @@
-import { randomBytes } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { randomBytes, randomInt } from "node:crypto";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  customerAddresses, documentVersions, orderLines, orders, quotes, routeStops, serviceWindows, slotReservations,
+  containerAssignments, containers, customerAddresses, documentVersions, garments,
+  intakeManifestLines, intakeManifests, orderAdjustments, orderLines, orders, quotes,
+  routeStops, seals, serviceWindows, slotReservations,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -43,6 +45,7 @@ export async function createOrder(
     if (!serviceLines.length) throw new AppError("VALIDATION_ERROR", "NO_SERVICE_LINES");
 
     const publicNumber = `LA-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${randomBytes(4).toString("hex").toUpperCase()}`;
+    const handoffCode = randomInt(100000, 1000000).toString();
     const [order] = await tx.insert(orders).values({
       organizationId: principal.organizationId,
       customerId: quote.customerId,
@@ -56,6 +59,7 @@ export async function createOrder(
       lifecycleState: "draft",
       termsVersion: input.termsVersion,
       acceptedQuoteHash: input.acceptedQuoteHash,
+      handoffCode,
     }).returning();
 
     await tx.insert(orderLines).values(serviceLines.map(line => ({
@@ -268,7 +272,110 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     principal,
     ...ROLE_GROUPS.admin, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.support,
   );
-  const publicFields = {
+  const isOwnerCustomer = hasRole(principal, "customer") && order.customerId === principal.userId;
+
+  if (!staff && !isOwnerCustomer) {
+    if (hasRole(principal, ...ROLE_GROUPS.partner)) {
+      if (!principal.partnerId || order.assignedPartnerId !== principal.partnerId) throw errors.notFound("order");
+    } else if (hasRole(principal, "courier")) {
+      const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
+        eq(routeStops.organizationId, principal.organizationId),
+        eq(routeStops.orderId, order.id),
+        eq(routeStops.assignedCourierId, principal.userId),
+      )).limit(1);
+      if (!stop) throw errors.notFound("order");
+    } else {
+      throw errors.forbidden("no order view for this role");
+    }
+  }
+
+  const [quoteRows, adjustmentRows, garmentRows, assignmentRows, manifestLines] = await Promise.all([
+    db.select({ totalKopeks: quotes.totalKopeks }).from(quotes).where(and(
+      eq(quotes.id, order.quoteId),
+      eq(quotes.organizationId, principal.organizationId),
+    )).limit(1),
+    db.select({
+      id: orderAdjustments.id,
+      proposedBy: orderAdjustments.proposedBy,
+      reason: orderAdjustments.reason,
+      deltaKopeks: orderAdjustments.deltaKopeks,
+      state: orderAdjustments.state,
+      version: orderAdjustments.version,
+      createdAt: orderAdjustments.createdAt,
+    }).from(orderAdjustments).where(and(
+      eq(orderAdjustments.organizationId, principal.organizationId),
+      eq(orderAdjustments.orderId, order.id),
+    )).orderBy(asc(orderAdjustments.createdAt)),
+    db.select({
+      id: garments.id,
+      itemCode: garments.itemCode,
+      category: garments.category,
+      description: garments.description,
+      brandMark: garments.brandMark,
+      declaredValueKopeks: garments.declaredValueKopeks,
+      conditionJson: garments.conditionJson,
+      status: garments.status,
+      version: garments.version,
+      createdAt: garments.createdAt,
+    }).from(garments).where(and(
+      eq(garments.organizationId, principal.organizationId),
+      eq(garments.orderId, order.id),
+    )).orderBy(asc(garments.createdAt)),
+    db.select({
+      id: containers.id,
+      code: containers.code,
+      kind: containers.kind,
+      sealSerial: seals.serialNumber,
+    }).from(containerAssignments)
+      .innerJoin(containers, eq(containers.id, containerAssignments.containerId))
+      .leftJoin(seals, eq(seals.id, containerAssignments.sealId))
+      .where(and(
+        eq(containerAssignments.organizationId, principal.organizationId),
+        eq(containerAssignments.orderId, order.id),
+        isNull(containerAssignments.unassignedAt),
+      ))
+      .orderBy(asc(containerAssignments.assignedAt)),
+    db.select({
+      containerId: intakeManifests.containerId,
+      manifestWeightGrams: intakeManifests.weightGrams,
+      description: intakeManifestLines.description,
+      weightGrams: intakeManifestLines.weightGrams,
+    }).from(intakeManifestLines)
+      .innerJoin(intakeManifests, eq(intakeManifests.id, intakeManifestLines.manifestId))
+      .where(and(
+        eq(intakeManifests.organizationId, principal.organizationId),
+        eq(intakeManifests.orderId, order.id),
+      )),
+  ]);
+
+  const acceptedDelta = adjustmentRows
+    .filter(adj => adj.state === "accepted")
+    .reduce((sum, adj) => sum + Number(adj.deltaKopeks), 0);
+  const totalKopeks = Number(quoteRows[0]?.totalKopeks ?? 0) + acceptedDelta;
+
+  const weightByCode = new Map<string, number>();
+  const weightByContainerId = new Map<string, number>();
+  for (const line of manifestLines) {
+    if (line.description.startsWith("bag:")) {
+      const code = line.description.slice(4);
+      weightByCode.set(code, (weightByCode.get(code) ?? 0) + line.weightGrams);
+    }
+    if (line.containerId && line.manifestWeightGrams > 0) {
+      weightByContainerId.set(line.containerId, line.manifestWeightGrams);
+    }
+  }
+  const containersView = assignmentRows.map(row => ({
+    id: row.id,
+    code: row.code,
+    kind: row.kind,
+    sealSerial: row.sealSerial ?? null,
+    weightGrams: weightByCode.get(row.code) ?? weightByContainerId.get(row.id) ?? 0,
+  }));
+
+  const canSeeHandoff = isOwnerCustomer
+    || hasRole(principal, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
+
+  return {
     id: order.id,
     publicNumber: order.publicNumber,
     lifecycleState: order.lifecycleState,
@@ -276,23 +383,19 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     customerId: order.customerId,
     assignedPartnerId: order.assignedPartnerId,
     termsVersion: order.termsVersion,
+    returnReason: order.returnReason ?? null,
+    totalKopeks,
+    garments: garmentRows,
+    containers: containersView,
+    adjustments: adjustmentRows,
     createdAt: order.createdAt,
+    ...(canSeeHandoff
+      ? {
+        handoffCode: order.handoffCode ?? null,
+        qrPayload: order.handoffCode ? `LND1:ORD:${order.id}:${order.handoffCode}` : null,
+      }
+      : {}),
   };
-  if (staff || hasRole(principal, "customer")) return publicFields;
-  if (hasRole(principal, ...ROLE_GROUPS.partner)) {
-    if (!principal.partnerId || order.assignedPartnerId !== principal.partnerId) throw errors.notFound("order");
-    return publicFields;
-  }
-  if (hasRole(principal, "courier")) {
-    const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
-      eq(routeStops.organizationId, principal.organizationId),
-      eq(routeStops.orderId, order.id),
-      eq(routeStops.assignedCourierId, principal.userId),
-    )).limit(1);
-    if (!stop) throw errors.notFound("order");
-    return publicFields;
-  }
-  throw errors.forbidden("no order view for this role");
 }
 
 export async function transitionOrder(
@@ -324,12 +427,40 @@ export async function transitionOrder(
   return { ...result.value, replayed: result.replayed };
 }
 
-export async function getOrderTimeline(db: Db, principal: Principal, orderId: string) {  await loadOrder(db, principal, orderId);
+const SENSITIVE_TIMELINE_KEY = /(kopek|amount|price|tariff|quote|terms|invoice|payment|refund|payout|billing|fee|handoff|qr_?payload)/i;
+
+function sanitizeTimelinePayload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeTimelinePayload);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SENSITIVE_TIMELINE_KEY.test(k)) continue;
+      out[k] = sanitizeTimelinePayload(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+export async function getOrderTimeline(db: Db, principal: Principal, orderId: string) {
+  await loadOrderView(db, principal, orderId);
   const rows = await db.execute(sql`
     SELECT event_type, payload_json, created_at FROM outbox_events
     WHERE organization_id = ${principal.organizationId} AND aggregate_type = 'order'
       AND aggregate_id = ${orderId}
     ORDER BY created_at ASC
   `);
-  return rows.rows;
+  const canSeeInternalBilling = hasRole(
+    principal,
+    "customer",
+    ...ROLE_GROUPS.admin,
+    ...ROLE_GROUPS.dispatcher,
+    ...ROLE_GROUPS.finance,
+    ...ROLE_GROUPS.support,
+  );
+  if (canSeeInternalBilling) return rows.rows;
+  return (rows.rows as Array<Record<string, unknown>>).map(row => ({
+    ...row,
+    payload_json: sanitizeTimelinePayload(row.payload_json),
+  }));
 }

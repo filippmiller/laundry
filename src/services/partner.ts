@@ -1,9 +1,10 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
-  garments, intakeManifests, orderAdjustments, orderLines, orders, partnerContracts, partners,
-  partnerReceiptLines, partnerReceipts, partnerServiceAccruals, processingOperations, qualityChecks, seals,
+  customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifests,
+  orderAdjustments, orderLines, orders, partnerContracts, partners, partnerReceiptLines,
+  partnerReceipts, partnerServiceAccruals, processingOperations, qualityChecks, seals,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -284,7 +285,7 @@ export async function proposeAdjustment(
 export async function decideAdjustment(
   db: Db,
   principal: Principal,
-  input: { adjustmentId: string; accept: boolean; quoteHash: string; key: string },
+  input: { adjustmentId: string; accept: boolean; quoteHash: string; returnUnprocessed?: boolean; key: string },
 ) {
   assertRole(principal, "customer", ...ROLE_GROUPS.admin);
   return withIdempotencyFlat(db, {
@@ -305,18 +306,135 @@ export async function decideAdjustment(
     }
     if (adjustment.state !== "proposed") throw new AppError("CONFLICT_VERSION", "ADJUSTMENT_NOT_OPEN");
     if (order.acceptedQuoteHash !== input.quoteHash) throw new AppError("CONFLICT_VERSION", "QUOTE_HASH_MISMATCH");
+
     await tx.update(orderAdjustments).set({ state: input.accept ? "accepted" : "declined" })
       .where(eq(orderAdjustments.id, adjustment.id));
-    const command = input.accept ? "approve_change" : "decline_change";
-    const to = nextState(order.lifecycleState as "awaiting_approval", command, principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [approval] = await tx.insert(customerApprovals).values({
+      organizationId: principal.organizationId,
+      orderId: order.id,
+      adjustmentId: adjustment.id,
+      quoteHash: order.acceptedQuoteHash,
+      actorId: principal.userId,
+      method: input.accept ? "web_accept" : "web_decline",
+    }).returning();
+
+    if (input.accept) {
+      const to = nextState(order.lifecycleState as "awaiting_approval", "approve_change", principal);
+      await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      const [openInvoice] = await tx.select().from(customerInvoices).where(and(
+        eq(customerInvoices.organizationId, principal.organizationId),
+        eq(customerInvoices.orderId, order.id),
+        eq(customerInvoices.state, "open"),
+      )).limit(1);
+      if (openInvoice) {
+        await tx.insert(customerInvoiceLines).values({
+          invoiceId: openInvoice.id,
+          kind: "adjustment",
+          description: adjustment.reason,
+          quantity: 1,
+          amountKopeks: adjustment.deltaKopeks,
+          tariffVersionId: null,
+          taxMode: "none",
+          source: "adjustment",
+          consentId: approval.id,
+          actorId: principal.userId,
+        });
+        await tx.update(customerInvoices).set({
+          totalKopeks: openInvoice.totalKopeks + adjustment.deltaKopeks,
+        }).where(eq(customerInvoices.id, openInvoice.id));
+      }
+      await appendEvent(tx, {
+        principal, aggregateType: "order", aggregateId: order.id,
+        eventType: "order.approve_change",
+        payload: { adjustmentId: adjustment.id, deltaKopeks: adjustment.deltaKopeks, approvalId: approval.id },
+      });
+      return { orderId: order.id, adjustmentId: adjustment.id, state: to };
+    }
+
+    const inspected = nextState(order.lifecycleState as "awaiting_approval", "decline_change", principal);
+    if (input.returnUnprocessed === true) {
+      const hubState = nextState(inspected, "return_unprocessed");
+      const readyState = nextState(hubState, "ready_for_return");
+      const reason = "Отказ клиента: возврат без обработки";
+      await tx.update(orders).set({
+        lifecycleState: readyState,
+        returnReason: reason,
+        version: order.version + 1,
+      }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      await tx.update(garments).set({ status: "returned_unprocessed" }).where(and(
+        eq(garments.organizationId, principal.organizationId),
+        eq(garments.orderId, order.id),
+      ));
+      await appendEvent(tx, {
+        principal, aggregateType: "order", aggregateId: order.id,
+        eventType: "order.decline_change",
+        reason,
+        payload: { adjustmentId: adjustment.id, deltaKopeks: adjustment.deltaKopeks, returnUnprocessed: true },
+      });
+      await appendEvent(tx, {
+        principal, aggregateType: "order", aggregateId: order.id,
+        eventType: "order.return_unprocessed",
+        reason,
+        payload: { adjustmentId: adjustment.id, from: inspected, to: readyState },
+      });
+      return { orderId: order.id, adjustmentId: adjustment.id, state: readyState };
+    }
+
+    const declineReason = "Отказ клиента от доплаты";
+    await tx.update(orders).set({
+      lifecycleState: inspected,
+      returnReason: declineReason,
+      version: order.version + 1,
+    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
-      eventType: input.accept ? "order.approve_change" : "order.decline_change",
+      eventType: "order.decline_change",
+      reason: declineReason,
       payload: { adjustmentId: adjustment.id, deltaKopeks: adjustment.deltaKopeks },
     });
-    return { orderId: order.id, adjustmentId: adjustment.id, state: to };
+    return { orderId: order.id, adjustmentId: adjustment.id, state: inspected };
+  });
+}
+
+export async function returnUnprocessedOrder(
+  db: Db,
+  principal: Principal,
+  input: { orderId: string; reason: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.partner, ...ROLE_GROUPS.dispatcher);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "order:return_unprocessed", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const [order] = await tx.select().from(orders).where(and(
+      eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!order) throw errors.notFound("order");
+    if (hasRole(principal, ...ROLE_GROUPS.partner) && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
+      assertAssignedPartner(order, principal);
+    }
+    if (order.lifecycleState !== "inspection") {
+      throw errors.transition(order.lifecycleState, "return_unprocessed");
+    }
+    const hubState = nextState("inspection", "return_unprocessed");
+    const readyState = nextState(hubState, "ready_for_return");
+    await tx.update(orders).set({
+      lifecycleState: readyState,
+      returnReason: input.reason,
+      version: order.version + 1,
+    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    await tx.update(garments).set({ status: "returned_unprocessed" }).where(and(
+      eq(garments.organizationId, principal.organizationId),
+      eq(garments.orderId, order.id),
+    ));
+    await appendEvent(tx, {
+      principal, aggregateType: "order", aggregateId: order.id,
+      eventType: "order.return_unprocessed",
+      reason: input.reason,
+      payload: { from: order.lifecycleState, to: readyState, reason: input.reason },
+    });
+    return { orderId: order.id, state: readyState, returnReason: input.reason };
   });
 }
 
@@ -442,4 +560,129 @@ export async function recordQualityCheck(
     });
     return { orderId: order.id, state: finalState, allPassed };
   });
+}
+
+const ACTIVE_PARTNER_STATES: OrderState[] = [
+  "picked_up",
+  "at_hub",
+  "partner_received",
+  "inspection",
+  "awaiting_approval",
+  "processing",
+  "quality_check",
+  "ready",
+];
+
+export async function partnerWorkspace(db: Db, principal: Principal) {
+  assertRole(principal, ...ROLE_GROUPS.partner);
+  if (!principal.partnerId) return { orders: [] };
+
+  const orderRows = await db.select().from(orders).where(and(
+    eq(orders.organizationId, principal.organizationId),
+    eq(orders.assignedPartnerId, principal.partnerId),
+    inArray(orders.lifecycleState, ACTIVE_PARTNER_STATES),
+  )).orderBy(desc(orders.createdAt));
+
+  if (!orderRows.length) return { orders: [] };
+
+  const orderIds = orderRows.map(order => order.id);
+  const [manifestRows, containerRows, garmentRows, adjustmentRows] = await Promise.all([
+    db.select().from(intakeManifests).where(and(
+      eq(intakeManifests.organizationId, principal.organizationId),
+      inArray(intakeManifests.orderId, orderIds),
+    )).orderBy(desc(intakeManifests.createdAt)),
+    db.select({
+      orderId: containerAssignments.orderId,
+      containerId: containers.id,
+      containerCode: containers.code,
+      sealSerial: seals.serialNumber,
+    }).from(containerAssignments)
+      .innerJoin(containers, eq(containerAssignments.containerId, containers.id))
+      .leftJoin(seals, eq(containerAssignments.sealId, seals.id))
+      .where(and(
+        eq(containerAssignments.organizationId, principal.organizationId),
+        inArray(containerAssignments.orderId, orderIds),
+      )),
+    db.select({
+      id: garments.id,
+      orderId: garments.orderId,
+      itemCode: garments.itemCode,
+      category: garments.category,
+      description: garments.description,
+      status: garments.status,
+      brandMark: garments.brandMark,
+      declaredValueKopeks: garments.declaredValueKopeks,
+    }).from(garments).where(and(
+      eq(garments.organizationId, principal.organizationId),
+      inArray(garments.orderId, orderIds),
+    )),
+    db.select({
+      id: orderAdjustments.id,
+      orderId: orderAdjustments.orderId,
+      reason: orderAdjustments.reason,
+      deltaKopeks: orderAdjustments.deltaKopeks,
+      state: orderAdjustments.state,
+      createdAt: orderAdjustments.createdAt,
+    }).from(orderAdjustments).where(and(
+      eq(orderAdjustments.organizationId, principal.organizationId),
+      inArray(orderAdjustments.orderId, orderIds),
+    )).orderBy(desc(orderAdjustments.createdAt)),
+  ]);
+
+  const latestManifestByOrder = new Map<string, typeof intakeManifests.$inferSelect>();
+  const weightByOrderContainer = new Map<string, number>();
+  for (const manifest of manifestRows) {
+    if (!latestManifestByOrder.has(manifest.orderId)) {
+      latestManifestByOrder.set(manifest.orderId, manifest);
+    }
+    if (manifest.containerId) {
+      const key = `${manifest.orderId}:${manifest.containerId}`;
+      if (!weightByOrderContainer.has(key)) {
+        weightByOrderContainer.set(key, manifest.weightGrams);
+      }
+    }
+  }
+
+  const containersByOrder = new Map<string, Array<{ containerCode: string; sealSerial: string | null; weightGrams: number }>>();
+  for (const row of containerRows) {
+    const list = containersByOrder.get(row.orderId) ?? [];
+    const weightGrams = weightByOrderContainer.get(`${row.orderId}:${row.containerId}`)
+      ?? latestManifestByOrder.get(row.orderId)?.weightGrams
+      ?? 0;
+    list.push({
+      containerCode: row.containerCode,
+      sealSerial: row.sealSerial ?? null,
+      weightGrams,
+    });
+    containersByOrder.set(row.orderId, list);
+  }
+
+  const garmentsByOrder = new Map<string, typeof garmentRows>();
+  for (const row of garmentRows) {
+    const list = garmentsByOrder.get(row.orderId) ?? [];
+    list.push(row);
+    garmentsByOrder.set(row.orderId, list);
+  }
+
+  const adjustmentsByOrder = new Map<string, typeof adjustmentRows>();
+  for (const row of adjustmentRows) {
+    const list = adjustmentsByOrder.get(row.orderId) ?? [];
+    list.push(row);
+    adjustmentsByOrder.set(row.orderId, list);
+  }
+
+  return {
+    orders: orderRows.map(order => ({
+      id: order.id,
+      orderId: order.id,
+      publicNumber: order.publicNumber,
+      lifecycleState: order.lifecycleState,
+      returnReason: order.returnReason,
+      createdAt: order.createdAt,
+      manifestId: latestManifestByOrder.get(order.id)?.id ?? null,
+      containers: containersByOrder.get(order.id) ?? [],
+      garments: garmentsByOrder.get(order.id) ?? [],
+      adjustments: adjustmentsByOrder.get(order.id) ?? [],
+    })),
+  };
 }

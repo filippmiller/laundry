@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, garments, orders,
@@ -86,7 +86,10 @@ export async function openClaim(
         reason: `claim:${claim.id}`,
         placedBy: principal.userId,
       });
-      await tx.update(evidenceAssets).set({ status: "legal_hold" })
+      await tx.update(evidenceAssets).set({
+        status: "legal_hold",
+        legalHoldCount: sql`${evidenceAssets.legalHoldCount} + 1`,
+      })
         .where(eq(evidenceAssets.id, asset.id));
     }
     await appendEvent(tx, {

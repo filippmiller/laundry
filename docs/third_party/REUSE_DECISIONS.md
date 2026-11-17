@@ -16,20 +16,25 @@ Runtime:
 * `drizzle-orm` + `pg` — typed SQL and PostgreSQL driver.
 * `zod` — request validation and OpenAPI generation.
 * `react` + `react-dom` — customer/courier/ops SPA.
+* `@zxing/browser` + `@zxing/library` — courier camera QR/barcode scanning with manual fallback (MIT / Apache-2.0).
+* `qrcode` — customer/order handoff QR generation (MIT).
+* `lucide-react` — crisp icon system across all 8 workspaces (ISC).
 * `dotenv` — local configuration.
 
 Development/test only:
-* `vitest`, `embedded-postgres`, `playwright` (smoke), `tsx`, `drizzle-kit`, `typescript`, `eslint`, `typescript-eslint`, `@eslint/js`, `vite`, `@vitejs/plugin-react`, `@types/*`.
+* `vitest`, `embedded-postgres`, `playwright` (smoke & multi-role E2E), `tsx`, `drizzle-kit`, `typescript`, `eslint`, `typescript-eslint`, `@eslint/js`, `vite`, `@vitejs/plugin-react`, `@types/*`.
 
-## 3. Considered and explicitly deferred
+## 3. Considered, integrated via adapter, and deferred
 
 | Candidate | Why it was considered | Decision now | Condition to revisit |
 | --- | --- | --- | --- |
-| Refine | Internal admin/partner portals | **DEFERRED** | Only after a licence/security review and a measured prototype; not before W4 |
-| Ownfleet (dispatch) | Route optimisation and dispatch UI | **DEFERRED** | Check licence, maintenance, data model and benchmark against the manual fallback |
-| VROOM | Vehicle routing | **DEFERRED** | Must pass licence check + benchmark on real building clusters; manual sequencing stays the fallback |
-| Chatwoot | Support inbox | **DEFERRED** | Evaluate as a service integration, never as copied source; 152-FZ/localisation review required |
-| QR/barcode scanner (e.g. zxing) | Courier scanning | **DEFERRED** | Choose a maintained permissive library in W5; manual entry remains mandatory |
+| `@zxing/browser` + `@zxing/library` | Courier camera QR/barcode scanning | **INTEGRATED (Wave 7)** | MIT + Apache-2.0, npm-installed, wrapped with native `BarcodeDetector` & manual fallback |
+| `qrcode` + `lucide-react` | Order handoff QR badges & accessible UI icons | **INTEGRATED (Wave 7)** | MIT / ISC permissive npm packages |
+| VROOM | Vehicle routing optimization | **ADAPTER + BUILTIN VRPTW SOLVER** | VROOM HTTP adapter (`VROOM_URL`) + deterministic building-cluster 2-Opt VRPTW fallback (`src/services/routing.ts`); optional Docker service |
+| Refine | Internal admin/partner portals | **DEFERRED** | Replaced by modular 8-workspace React 19 architecture using shared data/RBAC patterns; avoids antd/MUI bloat |
+| Ownfleet (dispatch) | Route optimisation and dispatch UI | **REFERENCE ONLY** | Dispatch & courier stop model adapted cleanly to Laundry's dual-leg & seal/custody schema |
+| Chatwoot | Support inbox | **DEFERRED** | Support threads/omnibus lookup kept in-core for strict tenant/order/152-FZ scoping; external webhook bridge only if approved |
+| `GoogleChrome/modern-web-guidance` | Modern web standards & DOM/CSS audit | **TOOLCHAIN INTEGRATED** | Ran `legacy-scan apps/web` (0 legacy findings) and applied `<dialog>`, `[popover]`, `@container`, `:has()`, `100dvh`, View Transitions |
 
 No candidate is "integrated" until there is a provenance row with repository, commit, subpackage, licence, local path, modifications, SBOM/security result and a test.
 

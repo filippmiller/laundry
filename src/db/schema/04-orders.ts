@@ -29,6 +29,8 @@ export const orders = pgTable("orders", {
   termsVersion: text("terms_version").notNull(),
   acceptedQuoteHash: text("accepted_quote_hash").notNull(),
   assignedPartnerId: uuid("assigned_partner_id").references(() => partners.id),
+  handoffCode: text("handoff_code"),
+  returnReason: text("return_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [
   uniqueIndex("orders_org_public_unique").on(t.organizationId, t.publicNumber),

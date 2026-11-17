@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   auditEvents, memberships, membershipRoles, partners, sessions, users,
@@ -9,6 +9,7 @@ import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 
 const ADMIN_ROLES: Role[] = ["platform_admin"];
 const AUDIT_ROLES: Role[] = ["platform_admin", "security_auditor"];
+const PRIVILEGED_ROLES: Role[] = ["platform_admin", "security_auditor", "claims_approver", "platform_finance"];
 
 async function writeAudit(
   tx: Db,
@@ -65,14 +66,22 @@ async function membershipFor(db: Db, principal: Principal, userId: string) {
   return membership;
 }
 
+async function revokeUserSessions(tx: Db, organizationId: string, userId: string) {
+  await tx.update(sessions).set({ revokedAt: new Date() }).where(and(
+    eq(sessions.userId, userId),
+    eq(sessions.organizationId, organizationId),
+    isNull(sessions.revokedAt),
+  ));
+}
+
 export async function grantRole(
   db: Db,
   principal: Principal,
   input: { userId: string; role: Role; reason: string; key: string },
 ) {
   assertRole(principal, ...ADMIN_ROLES);
-  if (input.userId === principal.userId && input.role === "platform_admin") {
-    // Granting yourself a role is auditable but never a silent self-escalation shortcut.
+  if (input.userId === principal.userId && PRIVILEGED_ROLES.includes(input.role)) {
+    // Granting yourself a privileged role is auditable but never a silent self-escalation shortcut.
     throw new AppError("FORBIDDEN", "SELF_ROLE_GRANT");
   }
   return withIdempotencyFlat(db, {
@@ -101,23 +110,62 @@ export async function revokeRole(
   }, async tx => {
     const membership = await membershipFor(tx, principal, input.userId);
     if (input.role === "platform_admin") {
-      const [count] = await tx.select({ total: sql<number>`count(*)::int` }).from(membershipRoles)
+      // Lock admin rows before counting so concurrent revocations serialize instead of leaving zero admins.
+      const adminRoles = await tx.select({ id: membershipRoles.id }).from(membershipRoles)
         .innerJoin(memberships, eq(memberships.id, membershipRoles.membershipId))
         .where(and(
           eq(memberships.organizationId, principal.organizationId),
           eq(membershipRoles.role, "platform_admin"),
-        ));
-      if (Number(count?.total ?? 0) <= 1) throw new AppError("FORBIDDEN", "LAST_ADMIN");
+        ))
+        .for("update");
+      if (adminRoles.length <= 1) throw new AppError("FORBIDDEN", "LAST_ADMIN");
     }
     const removed = await tx.delete(membershipRoles).where(and(
       eq(membershipRoles.membershipId, membership.id),
       eq(membershipRoles.role, input.role),
     )).returning({ id: membershipRoles.id });
+    if (removed.length > 0) {
+      await revokeUserSessions(tx, principal.organizationId, input.userId);
+    }
     await writeAudit(tx, principal, {
       action: "admin.role_revoked", resourceType: "membership", resourceId: membership.id,
       reason: input.reason, scope: { userId: input.userId, role: input.role, removed: removed.length },
     });
     return { userId: input.userId, role: input.role, removed: removed.length > 0 };
+  });
+}
+
+export async function setMembershipState(
+  db: Db,
+  principal: Principal,
+  input: { userId: string; state: "active" | "suspended" | "revoked"; reason: string; key: string },
+) {
+  assertRole(principal, ...ADMIN_ROLES);
+  if (input.userId === principal.userId && input.state !== "active") {
+    throw new AppError("FORBIDDEN", "SELF_SUSPENSION");
+  }
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "admin:set_membership_state",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const membership = await membershipFor(tx, principal, input.userId);
+    await tx.update(memberships)
+      .set({ state: input.state })
+      .where(eq(memberships.id, membership.id));
+    if (input.state !== "active") {
+      await revokeUserSessions(tx, principal.organizationId, input.userId);
+    }
+    await writeAudit(tx, principal, {
+      action: "admin.membership_state",
+      resourceType: "membership",
+      resourceId: membership.id,
+      reason: input.reason,
+      scope: { userId: input.userId, state: input.state },
+    });
+    return { userId: input.userId, state: input.state };
   });
 }
 

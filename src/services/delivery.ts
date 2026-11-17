@@ -1,7 +1,8 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  claims, courierShifts, custodyEvents, deliveryAttempts, garments, notifications, orders, routes, routeStops,
+  buildings, claims, courierShifts, custodyDiscrepancies, custodyEvents, customerAddresses,
+  deliveryAttempts, garments, notifications, orders, partners, routes, routeStops, users, vehicles,
 } from "../db/schema.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -219,6 +220,18 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
     }
     // Handover requires the exact complete item set; duplicates or omissions must use `partial`.
     if (input.outcome === "delivered" && allGarments.length > 0) {
+      const missing = allGarments.filter(garment => garment.status === "missing_reported");
+      if (missing.length > 0) {
+        throw new AppError("CUSTODY_CONFLICT", "MISSING_GARMENTS_CANNOT_BE_DELIVERED", {
+          missingGarmentIds: missing.map(garment => garment.id),
+        });
+      }
+      const unprocessed = allGarments.filter(garment => garment.status === "returned_unprocessed");
+      if (unprocessed.length > 0 && !order.returnReason) {
+        throw new AppError("CUSTODY_CONFLICT", "RETURN_REASON_REQUIRED", {
+          garmentIds: unprocessed.map(garment => garment.id),
+        });
+      }
       const exactSet = deliveredIds.length === allGarments.length
         && allGarments.every(garment => uniqueDelivered.has(garment.id));
       if (!exactSet) {
@@ -234,6 +247,14 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
     const needsProof = input.outcome === "delivered" || input.outcome === "partial";
     if (needsProof && Object.keys(input.recipientProof ?? {}).length === 0) {
       throw new AppError("EVIDENCE_REQUIRED", "RECIPIENT_PROOF_REQUIRED");
+    }
+    const rawPin = input.recipientProof?.pin;
+    const pinProvided = rawPin !== undefined && rawPin !== null
+      && (typeof rawPin !== "string" || rawPin.length > 0 || Object.keys(input.recipientProof ?? {}).length === 1);
+    if (pinProvided && order.handoffCode) {
+      if (String(rawPin).trim() !== order.handoffCode) {
+        throw new AppError("FORBIDDEN", "HANDOFF_PIN_MISMATCH");
+      }
     }
     const [attempt] = await tx.insert(deliveryAttempts).values({
       organizationId: principal.organizationId,
@@ -353,4 +374,105 @@ export async function closeOrder(db: Db, principal: Principal, input: { orderId:
     });
     return { orderId: order.id, state: to, openClaimCount: openClaims.length };
   });
+}
+
+export async function dispatchOverview(db: Db, principal: Principal) {
+  assertRole(principal, ...ROLE_GROUPS.dispatcher);
+  const orgId = principal.organizationId;
+
+  const orderQueueSelect = {
+    id: orders.id,
+    publicNumber: orders.publicNumber,
+    lifecycleState: orders.lifecycleState,
+    assignedPartnerId: orders.assignedPartnerId,
+    returnReason: orders.returnReason,
+    buildingId: customerAddresses.buildingId,
+    address: buildings.address,
+    createdAt: orders.createdAt,
+  };
+
+  const [shiftRows, partnerRows, pickupQueue, deliveryQueue, returnOrders, openDiscrepancies] = await Promise.all([
+    db.select({
+      id: courierShifts.id,
+      courierId: courierShifts.courierId,
+      courierName: users.displayName,
+      vehicleId: courierShifts.vehicleId,
+      vehiclePlate: vehicles.plate,
+      capacityWeightGrams: vehicles.capacityWeightGrams,
+      state: courierShifts.state,
+      startsAt: courierShifts.startsAt,
+      endsAt: courierShifts.endsAt,
+    }).from(courierShifts)
+      .leftJoin(users, eq(users.id, courierShifts.courierId))
+      .leftJoin(vehicles, eq(vehicles.id, courierShifts.vehicleId))
+      .where(and(
+        eq(courierShifts.organizationId, orgId),
+        inArray(courierShifts.state, ["planned", "active"]),
+      ))
+      .orderBy(asc(courierShifts.startsAt))
+      .limit(100),
+    db.select({
+      id: partners.id,
+      name: partners.name,
+      status: partners.status,
+      createdAt: partners.createdAt,
+    }).from(partners)
+      .where(eq(partners.organizationId, orgId))
+      .orderBy(asc(partners.name))
+      .limit(100),
+    db.select(orderQueueSelect).from(orders)
+      .innerJoin(customerAddresses, eq(customerAddresses.id, orders.addressId))
+      .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
+      .where(and(
+        eq(orders.organizationId, orgId),
+        inArray(orders.lifecycleState, ["scheduled", "pickup_assigned"]),
+      ))
+      .orderBy(asc(orders.createdAt))
+      .limit(100),
+    db.select(orderQueueSelect).from(orders)
+      .innerJoin(customerAddresses, eq(customerAddresses.id, orders.addressId))
+      .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
+      .where(and(
+        eq(orders.organizationId, orgId),
+        inArray(orders.lifecycleState, ["ready", "out_for_delivery"]),
+      ))
+      .orderBy(asc(orders.createdAt))
+      .limit(100),
+    db.select(orderQueueSelect).from(orders)
+      .innerJoin(customerAddresses, eq(customerAddresses.id, orders.addressId))
+      .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
+      .where(and(
+        eq(orders.organizationId, orgId),
+        isNotNull(orders.returnReason),
+      ))
+      .orderBy(desc(orders.createdAt))
+      .limit(100),
+    db.select({
+      id: custodyDiscrepancies.id,
+      orderId: custodyDiscrepancies.orderId,
+      publicNumber: orders.publicNumber,
+      orderState: orders.lifecycleState,
+      kind: custodyDiscrepancies.kind,
+      detailsJson: custodyDiscrepancies.detailsJson,
+      state: custodyDiscrepancies.state,
+      openedBy: custodyDiscrepancies.openedBy,
+      openedAt: custodyDiscrepancies.openedAt,
+    }).from(custodyDiscrepancies)
+      .innerJoin(orders, eq(orders.id, custodyDiscrepancies.orderId))
+      .where(and(
+        eq(custodyDiscrepancies.organizationId, orgId),
+        eq(custodyDiscrepancies.state, "open"),
+      ))
+      .orderBy(desc(custodyDiscrepancies.openedAt))
+      .limit(100),
+  ]);
+
+  return {
+    shifts: shiftRows,
+    partners: partnerRows,
+    pickupQueue,
+    deliveryQueue,
+    returnOrders,
+    openDiscrepancies,
+  };
 }

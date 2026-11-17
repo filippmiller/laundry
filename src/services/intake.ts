@@ -1,10 +1,10 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  containerAssignments, containers, courierDevices, custodyEvents, evidenceAssets, garments,
+  containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets, garments,
   intakeManifestLines, intakeManifests, notifications, routeStops, seals, scanEvents, orders,
 } from "../db/schema.js";
-import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
@@ -23,6 +23,7 @@ export type IntakeInput = {
   items?: GarmentInput[];
   customerConfirmation: boolean;
   courierConfirmation: boolean;
+  handoffCode?: string;
   deviceId?: string;
   key: string;
 };
@@ -31,6 +32,20 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   if (!input.customerConfirmation || !input.courierConfirmation) {
     throw new AppError("EVIDENCE_REQUIRED", "DUAL_CONFIRMATION_REQUIRED");
+  }
+  if (input.mode === "mixed") {
+    if (!input.bags.length || !input.items?.length) {
+      throw new AppError("VALIDATION_ERROR", "MIXED_SEPARATION_REQUIRED");
+    }
+    const bagCodes = new Set(input.bags.map(bag => bag.containerCode.trim()));
+    const itemCodes = new Set<string>();
+    for (const item of input.items) {
+      const code = item.itemCode?.trim();
+      if (!code || itemCodes.has(code) || bagCodes.has(code)) {
+        throw new AppError("VALIDATION_ERROR", "MIXED_SEPARATION_REQUIRED");
+      }
+      itemCodes.add(code);
+    }
   }
   if (!input.bags.length) throw new AppError("VALIDATION_ERROR", "BAG_REQUIRED");
 
@@ -55,6 +70,11 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
       eq(routeStops.assignedCourierId, principal.userId),
     )).limit(1);
     if (!stop) throw errors.forbidden("courier is not assigned to this stop");
+    if (input.handoffCode) {
+      if (!order.handoffCode || input.handoffCode.trim() !== order.handoffCode) {
+        throw new AppError("FORBIDDEN", "HANDOFF_PIN_MISMATCH");
+      }
+    }
 
     const serials = input.bags.map(bag => bag.sealSerial);
     const sealRows = await tx.select().from(seals).where(and(
@@ -159,7 +179,12 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
       aggregateType: "order",
       aggregateId: input.orderId,
       eventType: "order.accept_handoff",
-      payload: { manifestId: manifest.id, custodyEventId: event.id, bagCount: input.bags.length },
+      payload: {
+        manifestId: manifest.id,
+        custodyEventId: event.id,
+        bagCount: input.bags.length,
+        verificationMethod: input.handoffCode ? "pin_verified" : "dual_confirmation_demo",
+      },
     });
     return {
       orderId: input.orderId,
@@ -219,6 +244,14 @@ async function scanRejection(
   )).limit(1);
   if (!device) return "DEVICE_NOT_OWNED";
   if (canonicalScanHash(event) !== event.payloadHash) return "PAYLOAD_HASH_MISMATCH";
+  if (hasRole(principal, "courier") && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
+    const [shift] = await db.select({ id: courierShifts.id }).from(courierShifts).where(and(
+      eq(courierShifts.organizationId, principal.organizationId),
+      eq(courierShifts.courierId, principal.userId),
+      eq(courierShifts.state, "active"),
+    )).limit(1);
+    if (!shift) return "NO_ACTIVE_SHIFT";
+  }
 
   if (event.scannedType === "order") {
     const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(

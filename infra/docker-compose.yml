@@ -16,6 +16,19 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: npm run db:migrate
+
   api:
     build:
       context: ..
@@ -25,14 +38,26 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
       SESSION_SECRET: ${SESSION_SECRET:?set in .env}
-      WEB_ORIGIN: https://laundry.filippmiller.com
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?set in .env}
+      WEB_ORIGIN: ${WEB_ORIGIN:-https://laundry.filippmiller.com}
       PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-fake}
       FISCAL_PROVIDER: ${FISCAL_PROVIDER:-stub}
+      PREVIEW_MODE: ${PREVIEW_MODE:-disabled}
+      PREVIEW_ACCESS_KEY: ${PREVIEW_ACCESS_KEY:-}
+      VROOM_URL: ${VROOM_URL:-}
       LOG_LEVEL: warn
     depends_on:
       db:
         condition: service_healthy
-    command: sh -c "node ./node_modules/drizzle-kit/bin.cjs migrate && npm run dev:api"
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    command: npm run start:api
 
   worker:
     build:
@@ -46,6 +71,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: npm run worker
 
   caddy:
@@ -59,7 +86,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:

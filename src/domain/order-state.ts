@@ -29,12 +29,15 @@ export const ORDER_TRANSITIONS: Record<OrderState, Record<string, Transition>> =
     hub_receive: { to: "at_hub", roles: ["hub_worker", "dispatcher"] },
     partner_receive: { to: "partner_received", roles: ["laundry_operator", "laundry_supervisor", "hub_worker"] },
   },
-  at_hub: { partner_receive: { to: "partner_received", roles: ["laundry_operator", "laundry_supervisor", "hub_worker"] } },
+  at_hub: {
+    partner_receive: { to: "partner_received", roles: ["laundry_operator", "laundry_supervisor", "hub_worker"] },
+    ready_for_return: { to: "ready", roles: ["laundry_operator", "laundry_supervisor", "hub_worker", "dispatcher"] },
+  },
   partner_received: { inspect: { to: "inspection", roles: ["laundry_operator", "laundry_supervisor"] } },
   inspection: {
     propose_change: { to: "awaiting_approval", roles: ["laundry_operator", "laundry_supervisor"] },
     start_processing: { to: "processing", roles: ["laundry_operator", "laundry_supervisor"] },
-    return_unprocessed: { to: "at_hub", roles: ["laundry_supervisor", "dispatcher"] },
+    return_unprocessed: { to: "at_hub", roles: ["laundry_operator", "laundry_supervisor", "dispatcher"] },
   },
   awaiting_approval: {
     approve_change: { to: "processing", roles: ["customer", "platform_admin"] },

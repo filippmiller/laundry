@@ -1,10 +1,11 @@
-import { and, eq, sql, sum } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import { and, eq, sql } from "drizzle-orm";
+import type { Db, Tx } from "../db/client.js";
 import { paymentEvents, paymentIntents, refunds } from "../db/schema.js";
 import { assertRole, type Principal } from "../core/context.js";
 import { AppError } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
+import { postCaptureJournalTx, postRefundJournalTx } from "./finance.js";
 
 const MAX_ATTEMPTS = 5;
 
@@ -66,22 +67,37 @@ export async function processPaymentInbox(db: Db, input: { limit?: number } = {}
 
 type Intent = typeof paymentIntents.$inferSelect;
 
-async function applyEvent(tx: Db, eventType: string, intent: Intent) {
+async function applyEvent(tx: Tx, eventType: string, intent: Intent) {
   switch (eventType) {
     case "captured": {
       if (["pending", "authorized"].includes(intent.state)) {
         await tx.update(paymentIntents).set({ state: "captured" }).where(eq(paymentIntents.id, intent.id));
+        await postCaptureJournalTx(tx, {
+          organizationId: intent.organizationId,
+          sourceId: intent.id,
+          amountKopeks: intent.amountKopeks,
+          description: "Оплата (вебхук провайдера)",
+        });
       }
       return;
     }
     case "refunded": {
-      const [totals] = await tx.select({ total: sum(refunds.amountKopeks) }).from(refunds).where(and(
+      const completedRefunds = await tx.select().from(refunds).where(and(
         eq(refunds.organizationId, intent.organizationId),
         eq(refunds.paymentIntentId, intent.id),
         eq(refunds.state, "completed"),
       ));
-      const refunded = Number(totals?.total ?? 0);
+      const refunded = completedRefunds.reduce((acc, row) => acc + row.amountKopeks, 0);
       if (!refunded) return;
+      for (const refundRow of completedRefunds) {
+        await postRefundJournalTx(tx, {
+          organizationId: intent.organizationId,
+          sourceId: refundRow.id,
+          amountKopeks: refundRow.amountKopeks,
+          description: `Возврат: ${refundRow.reason}`,
+          reversalOf: intent.id,
+        });
+      }
       const state = refunded >= intent.amountKopeks ? "refunded" : "partially_refunded";
       if (state !== intent.state) {
         await tx.update(paymentIntents).set({ state }).where(eq(paymentIntents.id, intent.id));

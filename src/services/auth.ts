@@ -1,14 +1,27 @@
-import { randomBytes, createHash } from "node:crypto";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { randomBytes, randomInt, createHash, timingSafeEqual } from "node:crypto";
+import { and, desc, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  memberships, membershipRoles, organizations, sessions, users,
+  memberships, membershipRoles, organizations, otpChallenges, sessions, users,
 } from "../db/schema.js";
 import type { Principal, Role } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 
 export function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+export function isPreviewEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" || process.env.PREVIEW_MODE === "enabled";
+}
+
+export function verifyPreviewKey(givenKey: string | undefined): boolean {
+  const expected = process.env.PREVIEW_ACCESS_KEY;
+  if (!expected) return process.env.NODE_ENV !== "production";
+  const actualBuf = Buffer.from(givenKey ?? "");
+  const expectedBuf = Buffer.from(expected);
+  if (actualBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(actualBuf, expectedBuf);
 }
 
 export async function ensureOrganization(db: Db, organizationId: string) {
@@ -47,8 +60,10 @@ export async function ensureSystemPrincipal(db: Db, organizationId: string): Pro
 export async function demoLogin(
   db: Db,
   input: { organizationId: string; phone: string; displayName?: string; roles: Role[]; partnerId?: string | null; ttlMinutes?: number },
+  options?: { previewAuthorized?: boolean },
 ) {
-  if (process.env.NODE_ENV === "production") {
+  const previewAuthorized = process.env.PREVIEW_MODE === "enabled" && options?.previewAuthorized === true;
+  if (process.env.NODE_ENV === "production" && !previewAuthorized) {
     throw new AppError("UNAUTHORIZED", "DEMO_AUTH_DISABLED");
   }
   if (!input.roles.length) throw new AppError("VALIDATION_ERROR", "ROLE_REQUIRED");
@@ -81,6 +96,130 @@ export async function demoLogin(
   return { token, userId: user.id, organizationId: input.organizationId, roles: input.roles };
 }
 
+export async function requestOtp(
+  db: Db,
+  input: { organizationId: string; phone: string },
+) {
+  const phone = input.phone.trim();
+  if (phone.length < 6) {
+    throw new AppError("VALIDATION_ERROR", "INVALID_PHONE");
+  }
+  await ensureOrganization(db, input.organizationId);
+  const code = randomInt(100000, 1000000).toString();
+  const expiresAt = new Date(Date.now() + 5 * 60_000);
+  const [challenge] = await db.insert(otpChallenges).values({
+    organizationId: input.organizationId,
+    phone,
+    codeHash: hashToken(code),
+    attempts: 0,
+    expiresAt,
+  }).returning({ id: otpChallenges.id, expiresAt: otpChallenges.expiresAt });
+  const preview = isPreviewEnabled();
+  if (preview) {
+    console.info(JSON.stringify({
+      event: "auth.otp_challenge",
+      organizationId: input.organizationId,
+      phone,
+      challengeId: challenge.id,
+      code,
+      expiresAt: challenge.expiresAt.toISOString(),
+    }));
+  }
+  return {
+    challengeId: challenge.id,
+    expiresAt: challenge.expiresAt,
+    devCode: preview ? code : undefined,
+  };
+}
+
+export async function verifyOtp(
+  db: Db,
+  input: { organizationId: string; phone: string; code: string },
+) {
+  const phone = input.phone.trim();
+  const code = input.code.trim();
+  // Return error outcomes instead of throwing on invalid attempts so the incremented counter commits.
+  const outcome = await db.transaction(async tx => {
+    const [challenge] = await tx.select().from(otpChallenges).where(and(
+      eq(otpChallenges.organizationId, input.organizationId),
+      eq(otpChallenges.phone, phone),
+      isNull(otpChallenges.consumedAt),
+      gt(otpChallenges.expiresAt, new Date()),
+    )).orderBy(desc(otpChallenges.createdAt)).limit(1).for("update");
+
+    if (!challenge) {
+      return { ok: false as const, error: new AppError("UNAUTHORIZED", "OTP_EXPIRED_OR_MISSING") };
+    }
+    if (challenge.attempts >= 5) {
+      return { ok: false as const, error: new AppError("FORBIDDEN", "OTP_LOCKED") };
+    }
+
+    const givenHash = Buffer.from(hashToken(code));
+    const expectedHash = Buffer.from(challenge.codeHash);
+    if (givenHash.length !== expectedHash.length || !timingSafeEqual(givenHash, expectedHash)) {
+      await tx.update(otpChallenges)
+        .set({ attempts: challenge.attempts + 1 })
+        .where(eq(otpChallenges.id, challenge.id));
+      return { ok: false as const, error: new AppError("UNAUTHORIZED", "OTP_INVALID") };
+    }
+
+    await tx.update(otpChallenges)
+      .set({ consumedAt: new Date() })
+      .where(eq(otpChallenges.id, challenge.id));
+
+    let [user] = await tx.select().from(users).where(eq(users.phone, phone)).limit(1);
+    if (!user) {
+      await tx.insert(users).values({ phone, displayName: phone }).onConflictDoNothing();
+      [user] = await tx.select().from(users).where(eq(users.phone, phone)).limit(1);
+    }
+
+    let [membership] = await tx.select().from(memberships).where(and(
+      eq(memberships.organizationId, input.organizationId),
+      eq(memberships.userId, user.id),
+    )).limit(1);
+    if (membership) {
+      if (membership.state !== "active") {
+        throw errors.forbidden("membership suspended");
+      }
+    } else {
+      [membership] = await tx.insert(memberships).values({
+        organizationId: input.organizationId,
+        userId: user.id,
+      }).returning();
+    }
+
+    let roleRows = await tx.select({ role: membershipRoles.role })
+      .from(membershipRoles)
+      .where(eq(membershipRoles.membershipId, membership.id));
+    if (roleRows.length === 0) {
+      await tx.insert(membershipRoles).values({
+        membershipId: membership.id,
+        role: "customer",
+      }).onConflictDoNothing();
+      roleRows = await tx.select({ role: membershipRoles.role })
+        .from(membershipRoles)
+        .where(eq(membershipRoles.membershipId, membership.id));
+    }
+    const roles = roleRows.map(row => row.role);
+
+    const token = randomBytes(32).toString("base64url");
+    await tx.insert(sessions).values({
+      userId: user.id,
+      organizationId: input.organizationId,
+      tokenHash: hashToken(token),
+      expiresAt: new Date(Date.now() + 12 * 60 * 60_000),
+    });
+
+    return {
+      ok: true as const,
+      value: { token, userId: user.id, organizationId: input.organizationId, roles },
+    };
+  });
+
+  if (!outcome.ok) throw outcome.error;
+  return outcome.value;
+}
+
 export async function principalFromToken(db: Db, token: string | undefined, requestId: string): Promise<Principal> {
   if (!token) throw errors.unauthorized();
   const [session] = await db.select().from(sessions).where(and(
@@ -97,6 +236,7 @@ export async function principalFromToken(db: Db, token: string | undefined, requ
   if (!membership) throw errors.forbidden();
   const roles = await db.select({ role: membershipRoles.role }).from(membershipRoles)
     .where(eq(membershipRoles.membershipId, membership.id));
+  if (roles.length === 0) throw errors.forbidden("no active roles");
   return {
     userId: session.userId,
     organizationId: session.organizationId,

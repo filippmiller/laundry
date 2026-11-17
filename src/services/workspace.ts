@@ -1,8 +1,8 @@
 import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  claims, compensations, courierShifts, evidenceAssets, evidenceAccessEvents, orders, outboxEvents,
-  sessions, supportThreads,
+  claims, compensations, courierShifts, evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
+  orders, outboxEvents, sessions, supportThreads,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -58,7 +58,7 @@ export async function revokeOwnSession(
  * cached, nothing is mutated, and every role in the ops group sees the same projection.
  */
 export async function opsMetrics(db: Db, principal: Principal) {
-  assertRole(principal, ...STAFF, "courier", "laundry_operator", "security_auditor");
+  assertRole(principal, ...STAFF, "security_auditor");
   const org = principal.organizationId;
   const [ordersByState, openClaims, openThreads, captured, pendingOutbox, activeShifts] =
     await Promise.all([
@@ -167,6 +167,69 @@ export async function listEvidence(db: Db, principal: Principal, ownerType: stri
     );
   }
   return rows;
+}
+
+export async function deleteEvidence(
+  db: Db,
+  principal: Principal,
+  input: { evidenceId: string; key: string },
+) {
+  assertRole(principal, "customer", ...SUPPORT_ROLES);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "evidence:delete",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const [asset] = await tx.select().from(evidenceAssets).where(and(
+      eq(evidenceAssets.id, input.evidenceId),
+      eq(evidenceAssets.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!asset) throw errors.notFound("evidence");
+
+    if (!hasRole(principal, ...SUPPORT_ROLES)) {
+      let isOwner = asset.createdBy === principal.userId;
+      if (!isOwner && asset.ownerType === "order") {
+        const [order] = await tx.select({ customerId: orders.customerId }).from(orders).where(and(
+          eq(orders.id, asset.ownerId),
+          eq(orders.organizationId, principal.organizationId),
+        )).limit(1);
+        isOwner = Boolean(order && order.customerId === principal.userId && (!asset.createdBy || asset.createdBy === principal.userId));
+      }
+      if (!isOwner) throw errors.notFound("evidence");
+    }
+
+    if (asset.status === "legal_hold") {
+      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id });
+    }
+    const [activeHold] = await tx.select({ id: evidenceLegalHolds.id }).from(evidenceLegalHolds).where(and(
+      eq(evidenceLegalHolds.organizationId, principal.organizationId),
+      eq(evidenceLegalHolds.assetId, asset.id),
+      isNull(evidenceLegalHolds.releasedAt),
+    )).limit(1);
+    if (activeHold) {
+      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id, holdId: activeHold.id });
+    }
+
+    await tx.delete(evidenceAccessEvents).where(eq(evidenceAccessEvents.assetId, asset.id));
+    await tx.delete(evidenceLegalHolds).where(and(
+      eq(evidenceLegalHolds.organizationId, principal.organizationId),
+      eq(evidenceLegalHolds.assetId, asset.id),
+    ));
+    await tx.delete(evidenceAssets).where(and(
+      eq(evidenceAssets.id, asset.id),
+      eq(evidenceAssets.organizationId, principal.organizationId),
+    ));
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "evidence",
+      aggregateId: asset.id,
+      eventType: "evidence.deleted",
+      payload: { ownerType: asset.ownerType, ownerId: asset.ownerId, objectKey: asset.objectKey },
+    });
+    return { evidenceId: asset.id, deleted: true as const };
+  });
 }
 
 /**

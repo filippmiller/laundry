@@ -4,13 +4,17 @@ This repository distributes **no vendored third-party source**. The packages bel
 
 ## MIT (notice + permission text required in distributions)
 
-`@fastify/cookie`, `@fastify/cors`, `@fastify/rate-limit`, `@fastify/static`, `@eslint/js`, `@types/node`, `@types/pg`, `@types/react`, `@types/react-dom`, `@vitejs/plugin-react`, `drizzle-kit`, `embedded-postgres`, `eslint`, `fastify`, `pg`, `react`, `react-dom`, `tsx`, `typescript-eslint`, `vite`, `vitest`, `zod`.
+`@fastify/cookie`, `@fastify/cors`, `@fastify/rate-limit`, `@fastify/static`, `@zxing/browser`, `@types/qrcode`, `@eslint/js`, `@types/node`, `@types/pg`, `@types/react`, `@types/react-dom`, `@vitejs/plugin-react`, `drizzle-kit`, `embedded-postgres`, `eslint`, `fastify`, `pg`, `qrcode`, `react`, `react-dom`, `tsx`, `typescript-eslint`, `vite`, `vitest`, `zod`.
 
 Obligation: retain the copyright notice and permission notice. When a production bundle or container image is built, ship `node_modules` licence files or a generated notice bundle (`license-checker`-style) alongside it. That notice bundle is **not yet generated** and is part of the W6 packaging work.
 
+## ISC
+
+`lucide-react`. Obligation: retain copyright and permission notice.
+
 ## Apache-2.0 (notice, licence copy, patent grant, change disclosure)
 
-`drizzle-orm`, `playwright`, `typescript`.
+`@zxing/library`, `drizzle-orm`, `playwright`, `typescript`.
 
 Obligation: include the Apache-2.0 licence text and a NOTICE file if the upstream package provides one; state any modifications (none: these are unmodified npm packages).
 

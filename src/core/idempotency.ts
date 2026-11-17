@@ -18,6 +18,16 @@ export type IdempotentInput = {
 
 export type IdempotentResult<T> = { value: T; replayed: boolean };
 
+function isUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth++) {
+    const record = current as { code?: unknown; cause?: unknown };
+    if (record.code === "23505") return true;
+    current = record.cause;
+  }
+  return false;
+}
+
 /**
  * One idempotency spine for every mutation with external, financial or custody effects.
  * An in-flight row with no stored response yields a retryable conflict instead of a second effect.
@@ -29,13 +39,19 @@ export async function withIdempotency<T>(
 ): Promise<IdempotentResult<T>> {
   if (!input.key?.trim()) throw new AppError("VALIDATION_ERROR", "IDEMPOTENCY_KEY_REQUIRED");
   return db.transaction(async tx => {
-    const inserted = await tx.insert(idempotencyRecords).values({
-      organizationId: input.organizationId,
-      scope: input.scope,
-      key: input.key,
-      actorId: input.actorId,
-      requestHash: input.requestHash,
-    }).onConflictDoNothing().returning({ id: idempotencyRecords.id });
+    let inserted: { id: string }[];
+    try {
+      inserted = await tx.insert(idempotencyRecords).values({
+        organizationId: input.organizationId,
+        scope: input.scope,
+        key: input.key,
+        actorId: input.actorId,
+        requestHash: input.requestHash,
+      }).onConflictDoNothing().returning({ id: idempotencyRecords.id });
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new AppError("IDEMPOTENCY_IN_PROGRESS");
+      throw error;
+    }
 
     if (inserted.length) {
       const value = await work(tx);
