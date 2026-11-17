@@ -24,7 +24,7 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
       ]);
       setData(overview);
       setMetrics(metricsData);
-    } catch (_e) {
+    } catch {
       notify({ kind: 'error', text: 'Ошибка загрузки данных' });
     }
   };
