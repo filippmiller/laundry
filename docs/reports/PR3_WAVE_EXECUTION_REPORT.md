@@ -134,3 +134,15 @@ Still open after Wave 2: customer-facing UI for cancel/reschedule/support/review
 
 * Cookie-authenticated POSTs now verify the `Origin` authority against the serving host or a configured `WEB_ORIGIN` (`ORIGIN_MISMATCH` -> 403). This is defense-in-depth on top of `sameSite=lax` for browsers that ignore SameSite. Absent Origin (curl, integration tests) stays allowed because those clients carry no ambient cookies. The signature-authenticated payment webhook is exempt: providers are not browsers.
 * 3 new regressions in the security suite (LND3-P1-09): hijacked-origin POST rejected, same-origin/originless POSTs accepted, provider webhook with foreign origin still processed.
+
+## 9. Wave 6 (same day) - ten missing use cases
+
+**Commit:** `841762f`. Suite: **107 tests / 16 files**, lint/typecheck/build clean, migration `0018` no drift, drill passes.
+
+* Customer: notification feed + mark-read, address book, no-login tracking by public number + exact phone (no enumeration oracle).
+* Courier: shift open / current / complete with stop-state and scan reconciliation.
+* Staff: self-service session list + revoke-own, ops metrics (read-only), evidence registration with SHA-256 validation + access logging, claim compensation propose (support) / decide (finance, approval only - no money movement), support order search by public number or phone.
+* UI: notification panel, address book, shift controls, ops metrics panel.
+* 8 integration tests covering all ten flows.
+
+Honest limits recorded in code and tests: compensation approval does not move money; tracking is tenant-scoped; door codes are not accepted until an encryption path exists.

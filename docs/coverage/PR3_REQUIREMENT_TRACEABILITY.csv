@@ -38,3 +38,12 @@ REQ-SEAL-BIND,CUSTODY,DONE,src/services/intake.ts,test/custody-proof.integration
 REQ-OUTBOX-WORKER,OPS,DONE,src/services/outbox.ts,test/outbox.integration.test.ts,SKIP LOCKED drain + template map + outbox:<eventId> dedupe + requeue,1f615b6,self-review (not independent),No external delivery channel; notifications are DB rows only
 REQ-DB-DRILL,OPS,DONE,scripts/upgrade-restore-drill.ts,None,full migration chain + idempotent upgrade + physical clone restore on populated data,1f615b6,manual drill run (npm run db:drill),Not wired into CI; pg_dump leg missing (no binary on machine)
 REQ-CSRF-ORIGIN,SECURITY,DONE,src/api/server.ts,test/security-regressions.integration.test.ts,origin authority vs host/WEB_ORIGIN on every cookie POST; webhook exempt,fe6ce7c,self-review (not independent),__Host- cookie prefix not adopted (breaks local http test harness)
+REQ-USECASE-NOTIFICATIONS,CUSTOMER,DONE,src/services/customer.ts,test/use-cases.integration.test.ts,feed + mark-read,841762f,self-review (not independent),notifications state reused as read flag via read_at
+REQ-USECASE-ADDRESSES,CUSTOMER,DONE,src/services/customer.ts,test/use-cases.integration.test.ts,add/list/remove,841762f,self-review (not independent),door codes deliberately not accepted
+REQ-USECASE-TRACKING,CUSTOMER,DONE,src/services/customer.ts,test/use-cases.integration.test.ts,public number + exact phone, no oracle,841762f,self-review (not independent),tenant id required in query
+REQ-USECASE-SHIFTS,COURIER,DONE,src/services/courier-shift.ts,test/use-cases.integration.test.ts,open/reuse/complete + reconciliation,841762f,self-review (not independent),no shift auto-close
+REQ-USECASE-SESSIONS,SECURITY,DONE,src/services/workspace.ts,test/use-cases.integration.test.ts,list + revoke-own only,841762f,self-review (not independent),admin cross-member route stays separate
+REQ-USECASE-METRICS,OPS,DONE,src/services/workspace.ts,test/use-cases.integration.test.ts,read-only counts,841762f,self-review (not independent),no caching
+REQ-USECASE-EVIDENCE,CUSTODY,DONE,src/services/workspace.ts,test/use-cases.integration.test.ts,SHA-256 + owner scoping + access log,841762f,self-review (not independent),no file storage
+REQ-USECASE-COMPENSATION,MONEY,DONE,src/services/workspace.ts,test/use-cases.integration.test.ts,propose (support) + decide (finance),841762f,self-review (not independent),approval does not move money
+REQ-USECASE-SEARCH,SUPPORT,DONE,src/services/workspace.ts,test/use-cases.integration.test.ts,public number or phone,841762f,self-review (not independent),exact match only
