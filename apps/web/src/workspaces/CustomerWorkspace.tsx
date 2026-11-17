@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
-import { ShoppingBag, ListOrdered, MapPin, MessageSquare, Plus, Calculator, Check, Calendar, CreditCard, Printer, FileText, ChevronDown, Trash2, AlertCircle } from 'lucide-react';
-import { api, money, dt, sha256FileHex } from '../api';
-import { ModalDialog } from '../components/ModalDialog';
-import { QrCodeBadge } from '../components/QrCodeBadge';
-import { DocumentPrintModal } from '../components/DocumentPrintModal';
+import { useState, useEffect as _useEffect, useCallback as _useCallback } from 'react';
+import { ShoppingBag, ListOrdered, MapPin, MessageSquare, Plus as _Plus, Calculator, Check, Calendar, CreditCard, Printer as _Printer, FileText as _FileText, ChevronDown as _ChevronDown, Trash2 as _Trash2, AlertCircle as _AlertCircle } from 'lucide-react';
+import { api as _api, money as _money, dt as _dt, sha256FileHex as _sha256FileHex } from '../api';
+import { ModalDialog as _ModalDialog } from '../components/ModalDialog';
+import { QrCodeBadge as _QrCodeBadge } from '../components/QrCodeBadge';
+import { DocumentPrintModal as _DocumentPrintModal } from '../components/DocumentPrintModal';
 
 type DemoConfig = {
   organizationId: string;
@@ -42,14 +42,14 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: 
   );
 }
 
-function NewOrderTab({ demo, notify }: { demo: DemoConfig; notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
+function NewOrderTab({ demo: _demo, notify: _notify }: { demo: DemoConfig; notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
   // Skeleton implementation for logic placeholders
   return (
     <div className="tab-content">
       <h2>Новый заказ</h2>
       {/* Implementation details for building, service, tier selectors */}
       <div className="button-group">
-        <button type="button" className="primary" onClick={() => notify({ kind: "ok", text: "Калькуляция выполнена" })}>
+        <button type="button" className="primary" onClick={() => _notify({ kind: "ok", text: "Калькуляция выполнена" })}>
           <Calculator size={18} /> Рассчитать
         </button>
       </div>
@@ -62,14 +62,14 @@ function NewOrderTab({ demo, notify }: { demo: DemoConfig; notify: (n: { kind: "
   );
 }
 
-function MyOrdersTab({ notify }: { notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
+function MyOrdersTab({ notify: _notify }: { notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
   return <div className="tab-content"><h2>Мои заказы</h2></div>;
 }
 
-function AddressesTab({ notify }: { notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
+function AddressesTab({ notify: _notify }: { notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
   return <div className="tab-content"><h2>Адресная книга</h2></div>;
 }
 
-function SupportTab({ notify }: { notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
+function SupportTab({ notify: _notify }: { notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
   return <div className="tab-content"><h2>Отзывы и поддержка</h2></div>;
 }
