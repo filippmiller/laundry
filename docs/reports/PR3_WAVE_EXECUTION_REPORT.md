@@ -127,3 +127,10 @@ Still open after Wave 2: customer-facing UI for cancel/reschedule/support/review
 
 * **Outbox notification worker** - `outbox_events` gains an `error` column (`0017`). `processOutbox` claims pending rows with `FOR UPDATE SKIP LOCKED` and maps customer-visible event types (order confirmed/scheduled/cancelled/rescheduled, invoice created, payment captured/refunded, claim opened/decided, delivery failed/partial) to `notifications` rows with `dedupeKey = outbox:<eventId>`, so a replay of the worker can never double-send. Events the screens already notify directly (`order.accept_handoff`, `delivery.delivered`) are deliberately excluded from the map. Unmappable rows stay `failed` with a reason and are re-armed by `requeueFailedOutboxEvents`. The worker drains the outbox every cycle.
 * **Populated-DB upgrade/restore drill** - `npm run db:drill` boots a throwaway embedded cluster and proves, in order: the full migration chain (`0000..0017`) applies to an empty database; the demo seed plus a real scheduled order populate orders/quotes/outbox/audit and one worker cycle drains the outbox (7 events, 2 notifications); re-running migrations on the populated database is a no-op; a physical clone (`CREATE DATABASE ... TEMPLATE`) preserves every checked row exactly. Because the machine has no `pg_dump`, the restore leg uses the server-side physical clone; a real `pg_dump`/`pg_restore` leg should be added when production tooling is chosen.
+
+## 8. Wave 5 (same day) - CSRF/origin hardening
+
+**Commit:** `fe6ce7c`. Suite: **99 tests / 15 files**, lint/typecheck clean.
+
+* Cookie-authenticated POSTs now verify the `Origin` authority against the serving host or a configured `WEB_ORIGIN` (`ORIGIN_MISMATCH` -> 403). This is defense-in-depth on top of `sameSite=lax` for browsers that ignore SameSite. Absent Origin (curl, integration tests) stays allowed because those clients carry no ambient cookies. The signature-authenticated payment webhook is exempt: providers are not browsers.
+* 3 new regressions in the security suite (LND3-P1-09): hijacked-origin POST rejected, same-origin/originless POSTs accepted, provider webhook with foreign origin still processed.
