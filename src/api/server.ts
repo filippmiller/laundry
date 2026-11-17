@@ -34,6 +34,15 @@ import { fraudSignals } from "../services/fraud.js";
 import { closeThread, getThread, listThreads, openThread, postMessage } from "../services/support.js";
 import { createReview, hideReview, likeReview, listReviews, unlikeReview } from "../services/reviews.js";
 import { markChargeback, paymentDrift } from "../services/payment-inbox.js";
+import {
+  addAddress, listAddresses, listNotifications, markNotificationsRead, removeAddress as removeAddressRoute,
+  trackOrder,
+} from "../services/customer.js";
+import { completeShift, currentShift, openShift } from "../services/courier-shift.js";
+import {
+  decideCompensation, listEvidence, listMySessions, opsMetrics, proposeCompensation,
+  registerEvidence, revokeOwnSession, searchOrders,
+} from "../services/workspace.js";
 import { seedDemo } from "../services/seed.js";
 import { and, eq, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
@@ -290,6 +299,27 @@ export function buildApp(db: Db) {
     handler: ctx => ({ ...ctx.principal, sessionId: undefined }),
   });
   add({
+    method: "GET", path: "/auth/sessions", summary: "My active sessions", tags: ["Auth"],
+    handler: ctx => listMySessions(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/auth/sessions/:id/revoke", summary: "Revoke one of my own sessions", tags: ["Auth"],
+    params: idSchema,
+    body: z.object({ key: z.string().min(1).optional() }),
+    handler: ctx => revokeOwnSession(db, ctx.principal, {
+      sessionId: ctx.params.id, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/track/:publicNumber", summary: "No-login tracking (public number + exact phone + tenant id)", tags: ["System"], public: true,
+    rateLimit: { max: 30, timeWindow: "1 minute" },
+    params: z.object({ publicNumber: z.string().min(3).max(40) }),
+    query: z.object({ organizationId: z.uuid(), phone: z.string().min(6).max(24) }),
+    handler: ctx => trackOrder(db, ctx.query.organizationId as string, {
+      publicNumber: ctx.params.publicNumber, phone: ctx.query.phone as string,
+    }),
+  });
+  add({
     method: "POST", path: "/dev/seed", summary: "Create demo data (never in production)", tags: ["System"], public: true,
     handler: () => {
       if (process.env.NODE_ENV === "production" || process.env.ALLOW_DEMO_SEED === "false") throw new AppError("NOT_FOUND");
@@ -300,6 +330,36 @@ export function buildApp(db: Db) {
   add({
     method: "GET", path: "/catalog", summary: "Published services", tags: ["Customer"],
     handler: ctx => listServices(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/addresses", summary: "My address book", tags: ["Customer"],
+    handler: ctx => listAddresses(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/addresses", summary: "Add an address inside a known building", tags: ["Customer"],
+    body: z.object({
+      buildingId: z.uuid(), entranceId: z.uuid().optional(),
+      apartment: z.string().max(40).optional(), notes: z.string().max(200).optional(),
+      key: z.string().min(1).optional(),
+    }),
+    handler: ctx => addAddress(db, ctx.principal, {
+      buildingId: ctx.body.buildingId, entranceId: ctx.body.entranceId,
+      apartment: ctx.body.apartment, notes: ctx.body.notes, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "DELETE", path: "/addresses/:id", summary: "Remove one of my addresses", tags: ["Customer"],
+    params: idSchema,
+    handler: ctx => removeAddressRoute(db, ctx.principal, ctx.params.id),
+  });
+  add({
+    method: "GET", path: "/notifications", summary: "My notification feed", tags: ["Customer"],
+    handler: ctx => listNotifications(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/notifications/read", summary: "Mark notifications read", tags: ["Customer"],
+    body: z.object({ ids: z.array(z.uuid()).max(100) }),
+    handler: ctx => markNotificationsRead(db, ctx.principal, { ids: ctx.body.ids }),
   });
   add({
     method: "GET", path: "/service-areas/resolve", summary: "Resolve building and city", tags: ["Customer"],
@@ -492,6 +552,28 @@ export function buildApp(db: Db) {
     handler: ctx => currentCourierStops(db, ctx.principal),
   });
   add({
+    method: "POST", path: "/courier/shifts", summary: "Open my shift (reuse the running one)", tags: ["Courier"],
+    body: z.object({
+      startsAt: z.string().datetime().optional(), endsAt: z.string().datetime().optional(),
+      key: z.string().min(1).optional(),
+    }),
+    handler: ctx => openShift(db, ctx.principal, {
+      startsAt: ctx.body.startsAt, endsAt: ctx.body.endsAt, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/courier/shifts/current", summary: "My running shift", tags: ["Courier"],
+    handler: ctx => currentShift(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/courier/shifts/:id/complete", summary: "Close my shift with a stop/scan reconciliation", tags: ["Courier"],
+    params: idSchema,
+    body: z.object({ key: z.string().min(1).optional() }),
+    handler: ctx => completeShift(db, ctx.principal, {
+      shiftId: ctx.params.id, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
     method: "POST", path: "/courier/devices", summary: "Bind a scanning device to the courier", tags: ["Courier"],
     body: z.object({ deviceId: z.uuid(), label: z.string().min(1).max(120).optional() }),
     handler: ctx => registerCourierDevice(db, ctx.principal, {
@@ -654,6 +736,50 @@ export function buildApp(db: Db) {
     roles: ["platform_admin", "security_auditor"],
     query: z.object({ limit: z.coerce.number().int().min(1).max(200).optional() }),
     handler: ctx => listAuditEvents(db, ctx.principal, { limit: ctx.query.limit as number | undefined }),
+  });
+  add({
+    method: "GET", path: "/ops/metrics", summary: "Read-only counts for the ops console", tags: ["Admin"],
+    handler: ctx => opsMetrics(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/evidence", summary: "Register photo evidence metadata (hash, object key)", tags: ["Customer"],
+    body: z.object({
+      ownerType: z.enum(["order", "claim", "custody_event"]), ownerId: z.uuid(),
+      objectKey: z.string().min(3).max(300), sha256: z.string().length(64),
+      purpose: z.string().min(3).max(60), mimeType: z.string().max(80).optional(),
+      sizeBytes: z.number().int().min(0).max(52_428_800).optional(), key: z.string().min(1).optional(),
+    }),
+    handler: ctx => registerEvidence(db, ctx.principal, {
+      ownerType: ctx.body.ownerType, ownerId: ctx.body.ownerId, objectKey: ctx.body.objectKey,
+      sha256: ctx.body.sha256, purpose: ctx.body.purpose, mimeType: ctx.body.mimeType,
+      sizeBytes: ctx.body.sizeBytes, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/evidence/:ownerType/:ownerId", summary: "Evidence registered for an order or claim", tags: ["Customer"],
+    params: z.object({ ownerType: z.enum(["order", "claim", "custody_event"]), ownerId: z.uuid() }),
+    handler: ctx => listEvidence(db, ctx.principal, ctx.params.ownerType, ctx.params.ownerId),
+  });
+  add({
+    method: "POST", path: "/claims/:id/compensations", summary: "Propose a compensation on a decided claim", tags: ["Support"],
+    params: idSchema,
+    body: z.object({ amountKopeks: z.number().int().min(1), key: z.string().min(1).optional() }),
+    handler: ctx => proposeCompensation(db, ctx.principal, {
+      claimId: ctx.params.id, amountKopeks: ctx.body.amountKopeks, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/compensations/:id/decision", summary: "Finance approves or denies a compensation", tags: ["Finance"],
+    params: idSchema,
+    body: z.object({ approve: z.boolean(), key: z.string().min(1).optional() }),
+    handler: ctx => decideCompensation(db, ctx.principal, {
+      compensationId: ctx.params.id, approve: ctx.body.approve, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/support/orders", summary: "Find orders by public number or phone", tags: ["Support"],
+    query: z.object({ query: z.string().min(4).max(64) }),
+    handler: ctx => searchOrders(db, ctx.principal, ctx.query.query as string),
   });
   add({
     method: "GET", path: "/admin/fraud/signals", summary: "Read-only fraud review queue", tags: ["Admin"],

@@ -24,6 +24,48 @@ const ROLE_LABELS: Record<string, string> = {
   customer_support: "Поддержка", platform_admin: "Администратор", security_auditor: "Аудит",
 };
 
+type NotificationRow = {
+  id: string; template: string; channel: string; read: boolean; readAt: string | null;
+  createdAt: string; orderId: string | null;
+};
+
+function NotificationsPanel({ notify }: { notify: (notice: Notice) => void }) {
+  const [rows, setRows] = useState<NotificationRow[]>([]);
+
+  async function load() {
+    try { setRows(await api<NotificationRow[]>("/notifications")); }
+    catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function markRead() {
+    const unread = rows.filter(row => !row.read).map(row => row.id);
+    if (!unread.length) return;
+    try {
+      await api("/notifications/read", { method: "POST", body: { ids: unread } });
+      await load();
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-head"><div><h2>Уведомления</h2><p className="muted">Что платформа сообщила по вашим заказам</p></div></div>
+      <button className="secondary" onClick={load}>Обновить</button>
+      {rows.length === 0 ? <p className="empty">Уведомлений нет.</p> : (
+        <ul className="timeline">
+          {rows.slice(0, 12).map(row => (
+            <li key={row.id} style={{ opacity: row.read ? 0.55 : 1 }}>
+              <code>{row.template}</code>
+              <span>{row.read ? "прочитано · " : "новое · "}{new Date(row.createdAt).toLocaleString("ru-RU")}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {rows.some(row => !row.read) && <button className="ghost" onClick={markRead}>Отметить всё прочитанным</button>}
+    </section>
+  );
+}
+
 function App() {
   const [demo, setDemo] = useState<DemoConfig | null>(null);
   const [me, setMe] = useState<Me | null>(null);
@@ -41,7 +83,6 @@ function App() {
       .catch(() => undefined);
     api<Me>("/me").then(setMe).catch(() => undefined);
   }, []);
-
   async function login() {
     if (!demo) return setNotice({ kind: "error", text: "Демо-данные ещё не готовы" });
     try {
@@ -99,9 +140,14 @@ function App() {
             ))}
           </nav>
           {me.roles.includes("customer") && demo && <CustomerView demo={demo} notify={setNotice} />}
+          {me.roles.includes("customer") && demo && <AddressBook demo={demo} notify={setNotice} />}
           {me.roles.includes("courier") && <CourierView demo={demo} notify={setNotice} />}
+          <NotificationsPanel notify={setNotice} />
           {(me.roles.includes("dispatcher") || me.roles.includes("platform_finance") || me.roles.includes("claims_approver")) && (
-            <OpsView notify={setNotice} />
+            <>
+              <OpsView notify={setNotice} />
+              <OpsMetricsPanel notify={setNotice} />
+            </>
           )}
           {me.roles.some(item => ["customer_support", "claims_investigator", "claims_approver", "platform_admin"].includes(item)) && (
             <SupportView notify={setNotice} />
@@ -109,10 +155,109 @@ function App() {
           {me.roles.some(item => ["platform_admin", "security_auditor"].includes(item)) && (
             <AdminView notify={setNotice} />
           )}
+          {me.roles.some(item => ["platform_admin", "security_auditor", "dispatcher", "platform_finance", "claims_approver"].includes(item)) && (
+            <OpsMetricsPanel notify={setNotice} />
+          )}
         </main>
       )}
       <footer className="footer">Суммы указаны в копейках на сервере · тарифы демонстрационные · юридические гейты не пройдены</footer>
     </div>
+  );
+}
+
+type AddressRow = {
+  id: string; buildingId: string; entranceId: string | null; apartment: string | null;
+  notes: string | null; buildingAddress: string; city: string;
+};
+
+function AddressBook({ demo, notify }: { demo: DemoConfig; notify: (notice: Notice) => void }) {
+  const [rows, setRows] = useState<AddressRow[]>([]);
+  const [apartment, setApartment] = useState("");
+  const [notes, setNotes] = useState("");
+
+  async function load() {
+    try { setRows(await api<AddressRow[]>("/addresses")); }
+    catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function add() {
+    if (!demo.buildingId) return notify({ kind: "error", text: "В демо доступен только дом из демо-данных" });
+    try {
+      await api("/addresses", {
+        method: "POST", key: newKey(),
+        body: { buildingId: demo.buildingId, apartment: apartment || undefined, notes: notes || undefined },
+      });
+      setApartment(""); setNotes("");
+      notify({ kind: "ok", text: "Адрес добавлен" });
+      await load();
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  async function remove(id: string) {
+    try {
+      await api(`/addresses/${id}`, { method: "DELETE" });
+      await load();
+      notify({ kind: "ok", text: "Адрес удалён" });
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-head"><div><h2>Адресная книга</h2><p className="muted">Домофон, подъезд и заметки курьеру</p></div></div>
+      {rows.length === 0 ? <p className="empty">Адресов нет.</p> : (
+        <ul className="timeline">
+          {rows.map(row => (
+            <li key={row.id}>
+              <code>{row.city} · {row.buildingAddress}</code>
+              <span>{row.apartment ? `кв. ${row.apartment} · ` : ""}{row.notes ?? ""}</span>
+              <button className="ghost" onClick={() => remove(row.id)}>Удалить</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {demo.buildingId && (
+        <div className="grid two">
+          <div className="field"><label>Квартира</label><input value={apartment} onChange={event => setApartment(event.target.value)} /></div>
+          <div className="field"><label>Заметка курьеру</label><input value={notes} onChange={event => setNotes(event.target.value)} /></div>
+        </div>
+      )}
+      <button className="secondary" onClick={add}>Добавить адрес</button>
+    </section>
+  );
+}
+
+type Metrics = {
+  ordersByState: Record<string, number>;
+  openClaims: number; openThreads: number; capturedKopeks: number;
+  pendingOutbox: number; activeShifts: number;
+};
+
+function OpsMetricsPanel({ notify }: { notify: (notice: Notice) => void }) {
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+
+  async function load() {
+    try { setMetrics(await api<Metrics>("/ops/metrics")); }
+    catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+  useEffect(() => { void load(); }, []);
+
+  if (!metrics) return null;
+  return (
+    <section className="panel">
+      <div className="panel-head"><div><h2>Метрики</h2><p className="muted">Только чтение, по живым данным</p></div></div>
+      <button className="secondary" onClick={load}>Обновить</button>
+      <div className="stat-row">
+        {Object.entries(metrics.ordersByState).map(([state, count]) => (
+          <div className="stat" key={state}><span>{state}</span><strong>{count}</strong></div>
+        ))}
+        <div className="stat"><span>Открытые претензии</span><strong>{metrics.openClaims}</strong></div>
+        <div className="stat"><span>Открытые обращения</span><strong>{metrics.openThreads}</strong></div>
+        <div className="stat"><span>Принято денег</span><strong>{money(metrics.capturedKopeks)}</strong></div>
+        <div className="stat"><span>В очереди outbox</span><strong>{metrics.pendingOutbox}</strong></div>
+        <div className="stat"><span>Активных смен</span><strong>{metrics.activeShifts}</strong></div>
+      </div>
+    </section>
   );
 }
 
@@ -375,6 +520,40 @@ function CourierView({ demo, notify }: { demo: DemoConfig | null; notify: (notic
   const [deviceId] = useState(() => localDeviceId());
   const [queued, setQueued] = useState(0);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [shift, setShift] = useState<{ shiftId: string; state: string } | null>(null);
+  const [shiftSummary, setShiftSummary] = useState<string | null>(null);
+
+  async function loadShift() {
+    try {
+      setShift(await api<{ shiftId: string; state: string } | null>("/courier/shifts/current"));
+    } catch { setShift(null); }
+  }
+
+  async function openMyShift() {
+    try {
+      const result = await api<{ shiftId: string; state: string; reused: boolean }>("/courier/shifts", {
+        method: "POST", body: {},
+      });
+      setShift(result);
+      notify({ kind: "ok", text: result.reused ? "Смена уже открыта" : "Смена открыта" });
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  async function completeMyShift() {
+    if (!shift) return;
+    try {
+      const result = await api<{
+        shiftId: string; stops?: Record<string, number>; scans?: { accepted: number; rejected: number };
+      }>(`/courier/shifts/${shift.shiftId}/complete`, { method: "POST", body: {} });
+      setShift(null);
+      const stops = result.stops ? Object.entries(result.stops).map(([state, count]) => `${state}: ${count}`).join(", ") : "нет остановок";
+      const scans = result.scans ? `сканы приняты ${result.scans.accepted}, отклонены ${result.scans.rejected}` : "";
+      setShiftSummary(`Смена закрыта. Остановки — ${stops}. ${scans}`);
+      notify({ kind: "ok", text: "Смена закрыта" });
+    } catch (error) { notify({ kind: "error", text: (error as Error).message }); }
+  }
+
+  useEffect(() => { void loadShift(); }, []);
 
   async function load() {
     try {
@@ -460,6 +639,15 @@ function CourierView({ demo, notify }: { demo: DemoConfig | null; notify: (notic
     <section className="panel">
       <div className="panel-head"><div><h2>Курьерская смена</h2><p className="muted">Сканирование, пломба, подтверждение клиента</p></div></div>
       <button className="secondary" onClick={load}>Обновить остановки</button>
+      <div className="result">
+        <h4>Смена</h4>
+        <p className="muted small">{shift ? `Открыта (${shift.state})` : "Смена закрыта"}</p>
+        <div className="button-row">
+          <button className="ghost" disabled={!!shift} onClick={openMyShift}>Открыть смену</button>
+          <button className="ghost" disabled={!shift} onClick={completeMyShift}>Закрыть смену</button>
+        </div>
+        {shiftSummary && <p className="muted small">{shiftSummary}</p>}
+      </div>
       {stops.length === 0 ? <p className="empty">Нет назначенных остановок. Диспетчер должен назначить забор.</p> : (
         <div className="grid two">
           <div className="field">

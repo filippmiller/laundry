@@ -71,6 +71,7 @@ export const notifications = pgTable("notifications", {
   payloadJson: jsonb("payload_json").notNull().default({}),
   dedupeKey: text("dedupe_key").notNull(),
   state: text("state").notNull().default("pending"),
+  readAt: timestamp("read_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [uniqueIndex("notifications_dedupe_unique").on(t.organizationId, t.dedupeKey)]);
 
