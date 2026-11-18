@@ -17,6 +17,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { api, ApiError, dt, money } from "../api";
+import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { ModalDialog } from "../components/ModalDialog";
 import { QrCodeBadge } from "../components/QrCodeBadge";
 import { CustomerMoneyPanel } from "./analytics-panels";
@@ -317,6 +318,7 @@ function NewOrderTab({
   const [serviceId, setServiceId] = useState<string>(demo.services?.[0]?.id ?? "");
   const [tier, setTier] = useState<"economy" | "protected">("economy");
   const [quantity, setQuantity] = useState("1000");
+  const [declared, setDeclared] = useState<PickedGarment[]>([]);
 
   const [quote, setQuote] = useState<QuoteDto | null>(null);
   const [pickupHold, setPickupHold] = useState<HoldDto | null>(null);
@@ -459,6 +461,11 @@ function NewOrderTab({
           pickupWindowId,
           deliveryWindowId,
           lines: [{ serviceId, tier, quantity: parsedQuantity, unit }],
+          // The declaration travels inside the immutable quote, so the courier's
+          // acceptance can be reconciled against exactly what the customer saw.
+          ...(tier === "protected" && declared.length > 0
+            ? { declaredItems: declared.map((item) => ({ subtypeId: item.subtypeId, quantity: item.quantity })) }
+            : {}),
         },
       });
       setQuote(created);
@@ -705,6 +712,22 @@ function NewOrderTab({
             <span className="muted">Единица измерения задана каталогом услуг.</span>
           </div>
         </div>
+
+        {tier === "protected" ? (
+          <div style={{ marginBlockStart: 16 }}>
+            <GarmentPicker
+              value={declared}
+              onChange={setDeclared}
+              title="Что сдаёте"
+              hint="Тариф «Защищённый» ведёт поштучную опись. Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Курьер увидит ваш список и сверит его с тем, что принял."
+            />
+          </div>
+        ) : (
+          <div className="notice" style={{ marginBlockStart: 16 }}>
+            Тариф «Эконом» — это закрытый и взвешенный пакет без поштучной описи: сколько футболок внутри,
+            никто не знает и не обещает. Вес посчитают при приёме.
+          </div>
+        )}
 
         {windowsError && (
           <div className="notice error" style={{ marginBlockStart: 12 }}>

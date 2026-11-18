@@ -21,6 +21,9 @@ coverage/
 .DS_Store
 .beads.gate.lock
 
+# Local scratch space for agent probes and local run logs.
+temp/
+
 # Local agent runtime configuration. `.agents/skills/` is part of the repository; these three
 # are machine-local hooks and rules that point at absolute paths outside this checkout.
 .agents/hooks.json

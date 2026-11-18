@@ -28,6 +28,7 @@ import {
   orderFinance, partnerAccruals, refundPayment,
 } from "../services/finance.js";
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
+import { MAX_DECLARED_ROWS, MAX_PICKED_QUANTITY } from "../../shared/garment-taxonomy.js";
 import {
   grantRole, listAuditEvents, listMembers, memberRoles, revokeRole, revokeSession, setMembershipState,
 } from "../services/admin.js";
@@ -496,6 +497,9 @@ export function buildApp(db: Db) {
         serviceId: z.uuid(), tier: z.enum(["economy", "protected"]),
         quantity: z.number().int().positive(), unit: z.enum(["piece", "gram"]),
       })).min(1),
+      declaredItems: z.array(z.object({
+        subtypeId: z.string().min(1), quantity: z.number().int().min(1).max(MAX_PICKED_QUANTITY),
+      })).max(MAX_DECLARED_ROWS).optional(),
     }),
     handler: ctx => createQuote(db, ctx.principal, {
       ...ctx.body, key: idempotencyKey(ctx),
@@ -714,6 +718,7 @@ export function buildApp(db: Db) {
       })).min(1),
       items: z.array(z.object({
         itemCode: z.string().min(2), category: z.string().min(2), description: z.string().min(1),
+        subtypeId: z.string().min(1).optional(),
         declaredValueKopeks: z.number().int().nonnegative().optional(),
         condition: z.record(z.string(), z.unknown()).optional(),
         evidenceAssetIds: z.array(z.uuid()).optional(),

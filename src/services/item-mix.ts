@@ -51,39 +51,13 @@ export type ItemMix = {
 /**
  * Controlled vocabulary for garment categories. Everything outside it lands in `прочее`, which is
  * reported with its raw values so the taxonomy can be extended from real data instead of guesses.
+ *
+ * The vocabulary itself lives in `shared/garment-taxonomy.ts` — the very same file the icon picker
+ * in the web client reads — so a garment picked with an icon and a garment typed in by hand end up
+ * in the same bucket.
  */
-const CATEGORY_SYNONYMS: Record<string, string[]> = {
-  футболка: ["футболка", "футболки", "tee", "t-shirt", "t shirt", "футболка-хайтас", "хайтас"],
-  рубашка: ["рубашка", "рубашки", "shirt", "френч"],
-  брюки: ["брюки", "брюк", "pants", "trousers", "тренеры"],
-  джинсы: ["джинсы", "jeans", "джинса"],
-  шорты: ["шорты", "shorts", "шортинки"],
-  платье: ["платье", "dress", "платья"],
-  юбка: ["юбка", "skirt"],
-  кофта: ["кофта", "худи", "свитшот", "свитер", "hoodie", "sweatshirt", "свитка", "кардиган"],
-  куртка: ["куртка", "пуховик", "пальто", "coat", "jacket", "куртки"],
-  бельё: ["белье", "бельё", "постельное бельё", "комплект белья"],
-  полотенце: ["полотенце", "полотенца", "towel"],
-  обувь: ["обувь", "кроссовки", "ботинки", "shoes", "туфли"],
-  "спортивные штаны": ["спортивные штаны", "спортштаны", "joggers", "спортивные брюки"],
-  костюм: ["костюм", "suit"],
-  свитер: ["свитер", "свитера"],
-};
-
-const CATEGORY_LOOKUP = new Map<string, string>();
-for (const [canonical, synonyms] of Object.entries(CATEGORY_SYNONYMS)) {
-  for (const synonym of synonyms) CATEGORY_LOOKUP.set(synonym.toLowerCase(), canonical);
-}
-
-/**
- * Maps a free-text category onto the controlled vocabulary. Falls back to `прочее` — never to a
- * guess that would inflate one bucket and deflate another.
- */
-export function normalizeCategory(raw: string): string {
-  const key = (raw ?? "").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!key) return "прочее";
-  return CATEGORY_LOOKUP.get(key) ?? "прочее";
-}
+export { normalizeCategory };
+import { normalizeCategory } from "../../shared/garment-taxonomy.js";
 
 type CategoryRow = { raw_category: string | null; item_count: string; order_count: string };
 type StatusRow = { status: string; count: string };

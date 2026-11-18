@@ -7,6 +7,7 @@ import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
 import { calculateQuote, type QuoteInput, type ServiceLineInput } from "../domain/pricing.js";
 import { activeTariff, resolveAddress } from "./catalog.js";
+import { normalizeDeclaredItems } from "../../shared/garment-taxonomy.js";
 
 export type QuoteLineInput = {
   serviceId: string;
@@ -24,6 +25,13 @@ export type CreateQuoteInput = {
   deliveryWindowId: string;
   offSchedulePickup?: boolean;
   offScheduleDelivery?: boolean;
+  /**
+   * What the customer says they are handing over. It is validated against the
+   * shared taxonomy, folded into the immutable quote snapshot and therefore
+   * into the quote hash: the declaration the courier reconciles against is the
+   * one the customer actually accepted.
+   */
+  declaredItems?: Array<{ subtypeId: string; quantity: number }>;
   key: string;
   now?: Date;
 };
@@ -33,6 +41,17 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
   const customerId = hasRole(principal, "customer") ? principal.userId : input.customerId;
   if (!customerId) throw errors.forbidden();
   const now = input.now ?? new Date();
+  // Validated before the idempotency envelope is opened: an unknown subtype or
+  // an out-of-range quantity is a client mistake, not a replay.
+  const declared = normalizeDeclaredItems(input.declaredItems);
+  if (!declared.ok) {
+    throw new AppError("VALIDATION_ERROR", declared.error, declared.detail ?? {});
+  }
+  // Эконом is a closed, weighed bag: the tariff promises no per-item inventory, so a
+  // per-item list on such a quote would contradict what the customer was sold.
+  if (declared.items.length > 0 && !input.lines.some(line => line.tier === "protected")) {
+    throw new AppError("VALIDATION_ERROR", "DECLARATION_REQUIRES_PROTECTED_TIER");
+  }
   const requestHash = hashRequest({ ...input, customerId, principalId: principal.userId });
 
   const result = await withIdempotency(db, {
@@ -105,6 +124,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       sharedPickupFeeKopeks: tariff.sharedPickupFeeKopeks,
       sharedDeliveryFeeKopeks: tariff.sharedDeliveryFeeKopeks,
       expiresAt: expiresAt.toISOString(),
+      declaredItems: declared.items,
     };
     const pricedQuote = calculateQuote(pricingInput);
     const [quote] = await tx.insert(quotes).values({
@@ -133,6 +153,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       quoteHash: quote.quoteHash,
       totalKopeks: quote.totalKopeks,
       lines: pricedQuote.lines,
+      declaredItems: declared.items,
       snapshot: pricedQuote.snapshot,
     };
   });

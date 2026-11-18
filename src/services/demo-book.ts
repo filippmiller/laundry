@@ -105,6 +105,7 @@ type Outcome =
   | "unpaid"
   | "in_processing"
   | "scheduled"
+  | "awaiting_intake"
   | "claim_paid";
 
 type Scenario = {
@@ -112,6 +113,8 @@ type Scenario = {
   customer: string;
   tier: "economy" | "protected";
   items?: ItemSpec[];
+  /** What the customer declared they were handing over — the list the courier reconciles against. */
+  declared?: Array<{ subtypeId: string; quantity: number }>;
   weightGrams: number;
   daysAgo: number;
   outcome: Outcome;
@@ -165,6 +168,17 @@ const SCENARIOS: Scenario[] = [
   },
   { id: "s13", customer: "anna", tier: "economy", weightGrams: 3_100, daysAgo: 6, outcome: "in_processing" },
   { id: "s14", customer: "oleg", tier: "economy", weightGrams: 2_600, daysAgo: 2, outcome: "scheduled" },
+  {
+    // A handover waiting for the courier: the customer declared the contents with the icon picker,
+    // the stop is on the courier's route, and the acceptance is still open. This is the scenario
+    // that shows the two lists side by side — "клиент заявил" and "фактически приняли".
+    id: "s15", customer: "vera", tier: "protected", weightGrams: 3_400, daysAgo: 0, outcome: "awaiting_intake",
+    declared: [
+      { subtypeId: "tshirt_plain", quantity: 3 },
+      { subtypeId: "underwear_socks", quantity: 1 },
+      { subtypeId: "trousers_classic", quantity: 1 },
+    ],
+  },
 ];
 
 const EXTRA_CUSTOMERS = [
@@ -463,6 +477,7 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
       offSchedulePickup: scenario.offSchedule,
       offScheduleDelivery: scenario.offSchedule,
       lines: [{ serviceId: context.washServiceId, tier: scenario.tier, quantity: weightGrams, unit: "gram" }],
+      ...(scenario.declared?.length ? { declaredItems: scenario.declared } : {}),
       key: key("quote"),
     });
 
@@ -504,6 +519,13 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
     await assignPickup(db, context.principals.dispatcher, {
       orderId: order.id, shiftId: context.shiftId, key: key("pickup"),
     });
+
+    // The stop is on the courier's route but the acceptance is still open: the demo shows the
+    // handover screen live, with the customer's declaration waiting to be reconciled.
+    if (scenario.outcome === "awaiting_intake") {
+      await backdateOrder(db, context.organizationId, order.id, daysAgo(scenario.daysAgo));
+      continue;
+    }
 
     const containerCode = `DEMO-BAG-${tag}`;
     const sealSerial = await sealFor(db, context.organizationId, tag);

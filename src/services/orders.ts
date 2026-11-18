@@ -13,10 +13,12 @@ import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idemp
 import { nextState, type OrderState } from "../domain/order-state.js";
 import { confirmSlot, releaseSlot } from "../domain/slot-reservation.js";
 import { assertAcceptableQuote } from "./quotes.js";
+import type { DeclaredItem } from "../../shared/garment-taxonomy.js";
 
 type QuoteSnapshot = {
   addressId?: string;
   lines: Array<{ kind: string; serviceId?: string; tier?: "economy" | "protected"; quantity: number; unit: string; amountKopeks: number }>;
+  declaredItems?: DeclaredItem[];
 };
 
 export async function createOrder(
@@ -290,7 +292,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
   }
 
   const [quoteRows, adjustmentRows, garmentRows, assignmentRows, manifestLines] = await Promise.all([
-    db.select({ totalKopeks: quotes.totalKopeks }).from(quotes).where(and(
+    db.select({ totalKopeks: quotes.totalKopeks, snapshotJson: quotes.snapshotJson }).from(quotes).where(and(
       eq(quotes.id, order.quoteId),
       eq(quotes.organizationId, principal.organizationId),
     )).limit(1),
@@ -353,6 +355,11 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     .reduce((sum, adj) => sum + Number(adj.deltaKopeks), 0);
   const totalKopeks = Number(quoteRows[0]?.totalKopeks ?? 0) + acceptedDelta;
 
+  // What the customer declared at handover, straight out of the immutable quote
+  // snapshot. The courier reconciles the accepted garments against this list.
+  const quoteSnapshot = (quoteRows[0]?.snapshotJson ?? null) as QuoteSnapshot | null;
+  const declaredItems: DeclaredItem[] = quoteSnapshot?.declaredItems ?? [];
+
   const weightByCode = new Map<string, number>();
   const weightByContainerId = new Map<string, number>();
   for (const line of manifestLines) {
@@ -386,6 +393,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     returnReason: order.returnReason ?? null,
     totalKopeks,
     garments: garmentRows,
+    declaredItems,
     containers: containersView,
     adjustments: adjustmentRows,
     createdAt: order.createdAt,

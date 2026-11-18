@@ -10,11 +10,18 @@ import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
 import { canonicalScanHash } from "../core/scan-hash.js";
 import { nextState } from "../domain/order-state.js";
+import { findSubtype } from "../../shared/garment-taxonomy.js";
 
 export type BagInput = { containerCode: string; sealSerial: string; weightGrams: number };
 export type GarmentInput = {
   itemCode: string; category: string; description: string;
   declaredValueKopeks?: number; condition?: Record<string, unknown>; evidenceAssetIds?: string[];
+  /**
+   * Taxonomy subtype the courier picked with the icon grid. When it is present
+   * the server derives the category itself, so a hand-crafted request cannot
+   * smuggle an arbitrary category string into the analytics.
+   */
+  subtypeId?: string;
 };
 export type IntakeInput = {
   orderId: string;
@@ -123,14 +130,23 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
     }
     const createdGarments: Array<{ id: string; itemCode: string }> = [];
     for (const item of input.items ?? []) {
+      // The taxonomy is the authority on the category: a picked subtype always
+      // wins over whatever string the client sent.
+      const subtype = item.subtypeId ? findSubtype(item.subtypeId) : undefined;
+      if (item.subtypeId && !subtype) {
+        throw new AppError("VALIDATION_ERROR", "UNKNOWN_GARMENT_SUBTYPE", { subtypeId: item.subtypeId });
+      }
+      const category = subtype?.category ?? item.category;
       const [garment] = await tx.insert(garments).values({
         organizationId: principal.organizationId,
         orderId: input.orderId,
         itemCode: item.itemCode,
-        category: item.category,
+        category,
         description: item.description,
         declaredValueKopeks: item.declaredValueKopeks ?? null,
-        conditionJson: item.condition ?? {},
+        conditionJson: subtype
+          ? { ...(item.condition ?? {}), subtypeId: subtype.id, subtypeLabel: subtype.label }
+          : (item.condition ?? {}),
         status: "accepted",
       }).returning();
       for (const evidenceId of item.evidenceAssetIds ?? []) {
@@ -144,7 +160,7 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
       await tx.insert(intakeManifestLines).values({
         manifestId: manifest.id,
         garmentId: garment.id,
-        description: `${item.category}:${item.itemCode}`,
+        description: `${category}:${item.itemCode}`,
         quantity: 1,
       });
       createdGarments.push({ id: garment.id, itemCode: item.itemCode });

@@ -1,5 +1,6 @@
 import { hashRequest } from "../core/idempotency.js";
 import { assertKopeks } from "./money.js";
+import type { DeclaredItem } from "../../shared/garment-taxonomy.js";
 
 export type ServiceLineInput = {
   serviceId: string;
@@ -25,6 +26,12 @@ export type QuoteInput = {
   sharedPickupFeeKopeks?: number;
   sharedDeliveryFeeKopeks?: number;
   expiresAt: string;
+  /**
+   * What the customer declared they were handing over. It rides inside the
+   * immutable snapshot, so the courier's acceptance can be reconciled against
+   * it later — the declaration can never be edited behind the customer's back.
+   */
+  declaredItems?: DeclaredItem[];
 };
 
 export type QuoteLine = {
@@ -100,6 +107,7 @@ export function calculateQuote(input: QuoteInput): QuoteResult {
     lines,
     totalKopeks,
     currency: "RUB",
+    declaredItems: input.declaredItems ?? [],
   };
   return { lines, totalKopeks, quoteHash: hashRequest(snapshot), snapshot };
 }

@@ -9,20 +9,21 @@ import {
   PackageCheck,
   PackagePlus,
   Play,
-  Plus,
   QrCode,
   RefreshCw,
   ScanLine,
   ShieldCheck,
   Square,
-  Trash2,
   Truck,
   Wifi,
   WifiOff,
 } from "lucide-react";
 import { ApiError, DemoConfig, api, dt, money, newKey } from "../api";
+import { GarmentIcon } from "../components/garment-icons";
+import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { QrScannerDialog } from "../components/QrScannerDialog";
 import { ORDER_STATE_LABELS, formatError } from "../labels";
+import { findSubtype } from "@shared/garment-taxonomy";
 import {
   QueuedScan,
   enqueueScan,
@@ -86,16 +87,23 @@ type OrderDetails = {
   state?: string;
   mode?: string;
   garments?: OrderGarment[];
+  /** What the customer declared at handover — straight from the immutable quote. */
+  declaredItems?: DeclaredItemView[];
+};
+
+type DeclaredItemView = {
+  subtypeId: string;
+  label: string;
+  category: string;
+  quantity: number;
 };
 
 type IntakeMode = "economy_bag" | "protected_items" | "mixed";
 
-type IntakeGarmentDraft = {
-  localId: string;
-  itemCode: string;
-  category: string;
-  description: string;
+/** Per-picked-garment extras the courier may adjust: the value and a short note. */
+type IntakeItemMeta = {
   declaredValueRub: string;
+  note: string;
 };
 
 type DeliveryOutcome =
@@ -171,14 +179,17 @@ function normalizeShift(raw: unknown): CourierShift | null {
 }
 
 function normalizeStops(raw: unknown): RouteStop[] {
-  if (!raw || typeof raw !== "object") return [];
-  const obj = raw as Record<string, unknown>;
-  const routeObj = (obj.route && typeof obj.route === "object" ? obj.route : obj) as Record<string, unknown>;
-  const list = Array.isArray(routeObj.stops)
-    ? routeObj.stops
-    : Array.isArray(obj.stops)
-      ? obj.stops
-      : [];
+  if (!raw) return [];
+  // The endpoint answers with a plain array of stops; older builds also answered
+  // with `{ stops: [...] }`, and both shapes are still in the wild.
+  const list: unknown[] = Array.isArray(raw)
+    ? raw
+    : (() => {
+        const obj = raw as Record<string, unknown>;
+        const routeObj = (obj.route && typeof obj.route === "object" ? obj.route : obj) as Record<string, unknown>;
+        if (Array.isArray(routeObj.stops)) return routeObj.stops;
+        return Array.isArray(obj.stops) ? obj.stops : [];
+      })();
 
   return list
     .map((item, idx): RouteStop | null => {
@@ -227,6 +238,21 @@ function normalizeOrder(raw: unknown): OrderDetails | null {
       state: typeof g.state === "string" ? g.state : undefined,
     }));
 
+  const declaredRaw = Array.isArray(inner.declaredItems)
+    ? inner.declaredItems
+    : Array.isArray(obj.declaredItems)
+      ? obj.declaredItems
+      : [];
+  const declaredItems: DeclaredItemView[] = declaredRaw
+    .filter((d): d is Record<string, unknown> => Boolean(d && typeof d === "object"))
+    .map(d => ({
+      subtypeId: String(d.subtypeId ?? ""),
+      label: String(d.label ?? d.subtypeId ?? "Вещь"),
+      category: String(d.category ?? ""),
+      quantity: Number(d.quantity ?? 0),
+    }))
+    .filter(d => d.subtypeId.length > 0);
+
   return {
     id: typeof inner.id === "string" ? inner.id : undefined,
     orderId: typeof inner.orderId === "string" ? inner.orderId : undefined,
@@ -234,6 +260,7 @@ function normalizeOrder(raw: unknown): OrderDetails | null {
     state: typeof inner.state === "string" ? inner.state : undefined,
     mode: typeof inner.mode === "string" ? inner.mode : undefined,
     garments,
+    declaredItems,
   };
 }
 
@@ -341,16 +368,6 @@ function parseSyncResponse(raw: unknown, sentScans: QueuedScan[]): {
   };
 }
 
-function createGarmentDraft(index: number): IntakeGarmentDraft {
-  return {
-    localId: newKey(),
-    itemCode: `GAR-${String(index).padStart(3, "0")}`,
-    category: "Верхняя одежда",
-    description: "",
-    declaredValueRub: "5000",
-  };
-}
-
 export function CourierWorkspace({
   demo,
   notify,
@@ -392,7 +409,8 @@ export function CourierWorkspace({
   const [sealSerial, setSealSerial] = useState("DEMO-SEAL-001");
   const [weightGrams, setWeightGrams] = useState("2500");
   const [handoffCode, setHandoffCode] = useState("");
-  const [garments, setGarments] = useState<IntakeGarmentDraft[]>(() => [createGarmentDraft(1)]);
+  const [picked, setPicked] = useState<PickedGarment[]>([]);
+  const [itemMeta, setItemMeta] = useState<Record<string, IntakeItemMeta>>({});
   const [dualConfirmed, setDualConfirmed] = useState(false);
   const [intakeBusy, setIntakeBusy] = useState(false);
 
@@ -480,9 +498,11 @@ export function CourierWorkspace({
     };
   }, []);
 
-  // Fetch order details when a delivery stop is selected
+  // Fetch order details for the selected stop. A pickup stop needs it as much as a
+  // delivery stop: the customer's declaration lives in the order's quote snapshot,
+  // and the acceptance screen reconciles the two lists.
   useEffect(() => {
-    if (!selectedStop || selectedStop.kind !== "delivery" || !selectedStop.orderId) {
+    if (!selectedStop || !selectedStop.orderId) {
       setOrderDetails(null);
       setCheckedGarments({});
       return;
@@ -516,6 +536,13 @@ export function CourierWorkspace({
       cancelled = true;
     };
   }, [selectedStop, notify]);
+
+  // The intake list belongs to one stop: a new stop starts with an empty manifest.
+  useEffect(() => {
+    setPicked([]);
+    setItemMeta({});
+    setDualConfirmed(false);
+  }, [selectedStop?.stopId]);
 
   const syncQueue = useCallback(async () => {
     if (!isOnline) {
@@ -759,20 +786,25 @@ export function CourierWorkspace({
     }
   };
 
-  const handleAddGarment = () => {
-    setGarments(prev => [...prev, createGarmentDraft(prev.length + 1)]);
+  const handlePickedChange = (next: PickedGarment[]) => {
+    setPicked(next);
+    setItemMeta(prev => {
+      const kept: Record<string, IntakeItemMeta> = {};
+      for (const item of next) {
+        kept[item.subtypeId] = prev[item.subtypeId] ?? { declaredValueRub: "5000", note: "" };
+      }
+      return kept;
+    });
   };
 
-  const handleRemoveGarment = (localId: string) => {
-    setGarments(prev => (prev.length > 1 ? prev.filter(g => g.localId !== localId) : prev));
-  };
-
-  const handleGarmentChange = (
-    localId: string,
-    field: keyof Omit<IntakeGarmentDraft, "localId">,
-    value: string,
-  ) => {
-    setGarments(prev => prev.map(g => (g.localId === localId ? { ...g, [field]: value } : g)));
+  const handleMetaChange = (subtypeId: string, field: keyof IntakeItemMeta, value: string) => {
+    setItemMeta(prev => ({
+      ...prev,
+      [subtypeId]: {
+        ...(prev[subtypeId] ?? { declaredValueRub: "5000", note: "" }),
+        [field]: value,
+      },
+    }));
   };
 
   const handleSubmitIntake = async (e: React.FormEvent) => {
@@ -793,33 +825,49 @@ export function CourierWorkspace({
     }
 
     const needsGarments = intakeMode === "protected_items" || intakeMode === "mixed";
-    if (needsGarments && garments.some(g => !g.itemCode.trim() || !g.category.trim())) {
+    if (needsGarments && picked.length === 0) {
       notify({
         kind: "error",
-        text: "Заполните код и категорию для каждой вещи в описи.",
+        text: "Выберите принятые вещи иконками — опись не может быть пустой.",
       });
       return;
     }
 
     setIntakeBusy(true);
     try {
+      // The API takes a bag list and an item list; one bag per handover form.
       const payload: Record<string, unknown> = {
         mode: intakeMode,
-        containerCode: containerCode.trim(),
-        sealSerial: sealSerial.trim(),
-        weightGrams: Math.round(parsedWeight),
-        dualConfirmed: true,
+        bags: [{
+          containerCode: containerCode.trim(),
+          sealSerial: sealSerial.trim(),
+          weightGrams: Math.round(parsedWeight),
+        }],
+        customerConfirmation: true,
+        courierConfirmation: true,
       };
       if (handoffCode.trim()) {
         payload.handoffCode = handoffCode.trim();
       }
       if (needsGarments) {
-        payload.garments = garments.map(g => ({
-          itemCode: g.itemCode.trim(),
-          category: g.category.trim(),
-          description: g.description.trim(),
-          declaredValueKopeks: Math.max(0, Math.round((Number(g.declaredValueRub) || 0) * 100)),
-        }));
+        // One manifest line per physical piece: "3 футболки" is three garments.
+        const codePrefix = selectedStop.publicNumber || selectedStop.orderId.slice(0, 8);
+        const items: Array<Record<string, unknown>> = [];
+        let index = 0;
+        for (const item of picked) {
+          const meta = itemMeta[item.subtypeId] ?? { declaredValueRub: "5000", note: "" };
+          for (let piece = 0; piece < item.quantity; piece += 1) {
+            index += 1;
+            items.push({
+              itemCode: `${codePrefix}-${String(index).padStart(2, "0")}`,
+              category: item.category,
+              subtypeId: item.subtypeId,
+              description: meta.note.trim() || item.label,
+              declaredValueKopeks: Math.max(0, Math.round((Number(meta.declaredValueRub) || 0) * 100)),
+            });
+          }
+        }
+        payload.items = items;
       }
 
       await api(`/courier/stops/${selectedStop.stopId}/intake`, {
@@ -896,6 +944,7 @@ export function CourierWorkspace({
   const deliveryNoteId = `${baseId}-delivery-note`;
 
   const showGarmentsEditor = intakeMode === "protected_items" || intakeMode === "mixed";
+  const declaredItems = orderDetails?.declaredItems ?? [];
   const orderGarments = orderDetails?.garments ?? [];
 
   return (
@@ -1411,126 +1460,61 @@ export function CourierWorkspace({
                   border: "1px solid var(--border, #d0d7de)",
                 }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 8,
-                  }}
-                >
-                  <strong>Поштучная опись вещей ({garments.length})</strong>
-                  <button
-                    type="button"
-                    className="secondary"
-                    style={TAP_STYLE}
-                    onClick={handleAddGarment}
-                  >
-                    <Plus size={16} aria-hidden="true" />
-                    <span>Добавить вещь</span>
-                  </button>
-                </div>
-
-                {garments.map((item, idx) => {
-                  const codeId = `${baseId}-garment-code-${item.localId}`;
-                  const catId = `${baseId}-garment-cat-${item.localId}`;
-                  const descId = `${baseId}-garment-desc-${item.localId}`;
-                  const valId = `${baseId}-garment-val-${item.localId}`;
-                  return (
-                    <div
-                      key={item.localId}
-                      className="card"
-                      style={{
-                        padding: 12,
-                        borderRadius: 8,
-                        border: "1px solid var(--border, #d0d7de)",
-                        display: "grid",
-                        gap: 10,
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          gap: 8,
-                        }}
-                      >
-                        <strong>Вещь #{idx + 1}</strong>
-                        <button
-                          type="button"
-                          className="secondary"
-                          style={{ ...TAP_STYLE, minWidth: 44 }}
-                          disabled={garments.length <= 1}
-                          aria-label={`Удалить вещь #${idx + 1}`}
-                          onClick={() => handleRemoveGarment(item.localId)}
-                        >
-                          <Trash2 size={16} aria-hidden="true" />
-                        </button>
-                      </div>
-
-                      <div
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                          gap: 10,
-                        }}
-                      >
-                        <div className="field">
-                          <label htmlFor={codeId}>Код вещи</label>
-                          <input
-                            id={codeId}
-                            style={TAP_STYLE}
-                            value={item.itemCode}
-                            onChange={e => handleGarmentChange(item.localId, "itemCode", e.target.value)}
-                            placeholder="GAR-001"
-                          />
-                        </div>
-
-                        <div className="field">
-                          <label htmlFor={catId}>Категория</label>
-                          <input
-                            id={catId}
-                            style={TAP_STYLE}
-                            value={item.category}
-                            onChange={e => handleGarmentChange(item.localId, "category", e.target.value)}
-                            placeholder="Пальто / Костюм"
-                          />
-                        </div>
-
-                        <div className="field">
-                          <label htmlFor={descId}>Описание</label>
-                          <input
-                            id={descId}
-                            style={TAP_STYLE}
-                            value={item.description}
-                            onChange={e =>
-                              handleGarmentChange(item.localId, "description", e.target.value)
-                            }
-                            placeholder="Цвет, материал, дефекты"
-                          />
-                        </div>
-
-                        <div className="field">
-                          <label htmlFor={valId}>Объявленная ценность (₽)</label>
-                          <input
-                            id={valId}
-                            type="number"
-                            min={0}
-                            step={1}
-                            style={TAP_STYLE}
-                            value={item.declaredValueRub}
-                            onChange={e =>
-                              handleGarmentChange(item.localId, "declaredValueRub", e.target.value)
-                            }
-                            placeholder="5000"
-                          />
-                        </div>
-                      </div>
+                {declaredItems.length > 0 && (
+                  <div className="panel panel-muted">
+                    <div className="panel-head">
+                      <h3 className="panel-title">Клиент заявил</h3>
                     </div>
-                  );
-                })}
+                    <ul className="garment-picked">
+                      {declaredItems.map((declared) => {
+                        const accepted = picked.find((item) => item.subtypeId === declared.subtypeId);
+                        const acceptedQuantity = accepted?.quantity ?? 0;
+                        const diff = acceptedQuantity - declared.quantity;
+                        return (
+                          <li key={declared.subtypeId}>
+                            <GarmentIcon icon={findSubtype(declared.subtypeId)?.icon ?? "bag"} size={22} />
+                            <span className="garment-picked-label">{declared.label}</span>
+                            <span className="garment-picked-qty">заявлено {declared.quantity}</span>
+                            <span className="garment-picked-qty">принято {acceptedQuantity}</span>
+                            {diff === 0 ? (
+                              <span className="pill ok">совпадает</span>
+                            ) : (
+                              <span className={`pill ${diff > 0 ? "warn" : "danger"}`}>
+                                {diff > 0 ? `+${diff}` : diff}
+                              </span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+
+                <GarmentPicker
+                  value={picked}
+                  onChange={handlePickedChange}
+                  title="Что приняли"
+                  hint="Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Только ценность и дефекты, если они есть."
+                  renderExtra={item => (
+                    <span className="garment-row-fields">
+                      <input
+                        type="number"
+                        min={0}
+                        step={100}
+                        value={itemMeta[item.subtypeId]?.declaredValueRub ?? "5000"}
+                        onChange={e => handleMetaChange(item.subtypeId, "declaredValueRub", e.target.value)}
+                        aria-label={`Объявленная ценность: ${item.label}`}
+                      />
+                      <input
+                        type="text"
+                        placeholder="дефекты, если есть"
+                        value={itemMeta[item.subtypeId]?.note ?? ""}
+                        onChange={e => handleMetaChange(item.subtypeId, "note", e.target.value)}
+                        aria-label={`Примечание: ${item.label}`}
+                      />
+                    </span>
+                  )}
+                />
               </div>
             )}
 
