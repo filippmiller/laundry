@@ -95,11 +95,13 @@ services:
       LOG_LEVEL: warn
     # The host's Traefik reaches the api through the shared `coolify` network by the
     # alias below. The api keeps the stack's own network to reach the database.
+    # Every entry uses the long form: compose v5 rejects a list that mixes the short
+    # (string) and long (map) syntaxes.
     networks:
-      - default
-      - coolify:
-          aliases:
-            - laundry-api
+      default: {}
+      coolify:
+        aliases:
+          - laundry-api
     mem_limit: 768m
     cpus: "1.00"
     healthcheck:
