@@ -10,6 +10,83 @@ import { seedDemoTenantBook, DEMO_PERSONAS } from "./demo-book.js";
 const DEMO_NAME = "Демо-прачечная";
 const TERMS = "offer-demo-2026-11";
 
+/**
+ * The demo tariff.
+ *
+ * `unitPriceKopeks` is per 100 g (the `gram_up_to_100` rounding rule), so 9_000 means 900 ₽ per
+ * kilogram. The figures are demonstrative, not an approved tariff, but they are deliberately in a
+ * plausible range: a partner's wholesale is 600 ₽/kg, so a demo price far below that would make
+ * every margin, receivable and take-rate figure in the product read as nonsense.
+ */
+const DEMO_PRICE_RULES = (
+  tariffVersionId: string,
+  ids: { wash: string; delicate: string; ironing: string; outerwear: string },
+) => [
+  { tariffVersionId, serviceId: ids.wash, tier: "economy" as const, unitPriceKopeks: 9_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+  { tariffVersionId, serviceId: ids.wash, tier: "protected" as const, unitPriceKopeks: 13_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+  { tariffVersionId, serviceId: ids.delicate, tier: "economy" as const, unitPriceKopeks: 12_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+  { tariffVersionId, serviceId: ids.delicate, tier: "protected" as const, unitPriceKopeks: 18_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+  { tariffVersionId, serviceId: ids.ironing, tier: "economy" as const, unitPriceKopeks: 15_000, minQuantity: 1, roundingRule: "exact" },
+  { tariffVersionId, serviceId: ids.ironing, tier: "protected" as const, unitPriceKopeks: 22_000, minQuantity: 1, roundingRule: "exact" },
+  { tariffVersionId, serviceId: ids.outerwear, tier: "economy" as const, unitPriceKopeks: 95_000, minQuantity: 1, roundingRule: "exact" },
+  { tariffVersionId, serviceId: ids.outerwear, tier: "protected" as const, unitPriceKopeks: 135_000, minQuantity: 1, roundingRule: "exact" },
+];
+
+/** The partner's wholesale: 600 ₽ per kilogram, expressed in kopeks like every other amount. */
+const DEMO_WHOLESALE = {
+  wholesalePerKgKopeks: 60_000,
+  wholesalePerPieceKopeks: 12_000,
+};
+
+/**
+ * Brings an existing demo tenant's economics in line with the demo tariff.
+ *
+ * A tenant seeded by an older build still carries that build's price rules and contract terms, so
+ * the demo book would otherwise be priced at whatever the old rules said — which for the original
+ * seed was about 1 ₽ per kilogram, making every financial figure in the product nonsense. This
+ * touches only the demo tenant.
+ */
+async function ensureDemoEconomics(db: Db, organizationId: string): Promise<void> {
+  const serviceRows = await db.select({ id: services.id, code: services.code }).from(services)
+    .where(eq(services.organizationId, organizationId));
+  const byCode = new Map(serviceRows.map(row => [row.code, row.id]));
+  const wash = byCode.get("wash");
+  const delicate = byCode.get("delicate");
+  const ironing = byCode.get("ironing");
+  const outerwear = byCode.get("outerwear");
+  if (!wash || !delicate || !ironing || !outerwear) return;
+
+  const [version] = await db.select({ id: tariffVersions.id }).from(tariffVersions)
+    .innerJoin(tariffPlans, eq(tariffVersions.planId, tariffPlans.id))
+    .where(and(
+      eq(tariffPlans.organizationId, organizationId),
+      eq(tariffVersions.published, true),
+    )).limit(1);
+  if (!version) return;
+
+  for (const rule of DEMO_PRICE_RULES(version.id, { wash, delicate, ironing, outerwear })) {
+    await db.insert(priceRules).values(rule).onConflictDoUpdate({
+      target: [priceRules.tariffVersionId, priceRules.serviceId, priceRules.tier],
+      set: {
+        unitPriceKopeks: rule.unitPriceKopeks,
+        minQuantity: rule.minQuantity,
+        roundingRule: rule.roundingRule,
+        active: true,
+      },
+    });
+  }
+
+  const [contract] = await db.select({ id: partnerContracts.id }).from(partnerContracts)
+    .innerJoin(partners, eq(partnerContracts.partnerId, partners.id))
+    .where(and(
+      eq(partners.organizationId, organizationId),
+      eq(partnerContracts.version, "v1"),
+    )).limit(1);
+  if (contract) {
+    await db.update(partnerContracts).set({ termsJson: DEMO_WHOLESALE }).where(eq(partnerContracts.id, contract.id));
+  }
+}
+
 export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }) {
   if (
     process.env.NODE_ENV === "production"
@@ -123,16 +200,9 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
   // deliberately in a plausible range: a partner's wholesale is 600 ₽/kg, so a demo price far
   // below that would make every margin, receivable and take-rate figure in the product read as
   // nonsense.
-  await db.insert(priceRules).values([
-    { tariffVersionId: version.id, serviceId: wash.id, tier: "economy", unitPriceKopeks: 9_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
-    { tariffVersionId: version.id, serviceId: wash.id, tier: "protected", unitPriceKopeks: 13_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
-    { tariffVersionId: version.id, serviceId: delicate.id, tier: "economy", unitPriceKopeks: 12_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
-    { tariffVersionId: version.id, serviceId: delicate.id, tier: "protected", unitPriceKopeks: 18_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
-    { tariffVersionId: version.id, serviceId: ironing.id, tier: "economy", unitPriceKopeks: 15_000, minQuantity: 1 },
-    { tariffVersionId: version.id, serviceId: ironing.id, tier: "protected", unitPriceKopeks: 22_000, minQuantity: 1 },
-    { tariffVersionId: version.id, serviceId: outerwear.id, tier: "economy", unitPriceKopeks: 95_000, minQuantity: 1 },
-    { tariffVersionId: version.id, serviceId: outerwear.id, tier: "protected", unitPriceKopeks: 135_000, minQuantity: 1 },
-  ]);
+  await db.insert(priceRules).values(DEMO_PRICE_RULES(version.id, {
+    wash: wash.id, delicate: delicate.id, ironing: ironing.id, outerwear: outerwear.id,
+  }));
   await db.insert(documentVersions).values({
     organizationId: org.id, kind: "offer", version: TERMS,
     contentHash: "demo-offer-hash", bodyText: "Демонстрационная оферта. Условия требуют проверки юристом.",
@@ -170,6 +240,7 @@ async function seedBookForTenant(db: Db, summary: Awaited<ReturnType<typeof demo
 }
 
 async function seedBookForExistingTenant(db: Db, organizationId: string) {
+  await ensureDemoEconomics(db, organizationId);
   const summary = await demoSummary(db, organizationId);
   const book = await seedBookForTenant(db, summary);
   return { ...summary, demoBook: book };
