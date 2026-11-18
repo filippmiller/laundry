@@ -11,7 +11,8 @@ import type { Db } from "../db/client.js";
 import { assertRole, hasRole, type Principal, type Role, ROLE_GROUPS } from "../core/context.js";
 import { AppError } from "../core/errors.js";
 import { hashRequest } from "../core/idempotency.js";
-import { demoLogin, logout, principalFromToken } from "../services/auth.js";
+import { demoLogin, logout, previewDemoLogin, principalFromToken } from "../services/auth.js";
+import { isPreviewProfileEnabled } from "../core/preview.js";
 import { listServices, listWindows, resolveAddress } from "../services/catalog.js";
 import { createQuote, getQuote } from "../services/quotes.js";
 import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, rescheduleOrder, scheduleOrder } from "../services/orders.js";
@@ -316,7 +317,11 @@ export function buildApp(db: Db) {
       partnerId: z.uuid().nullable().optional(),
     }),
     handler: async ctx => {
-      const result = await demoLogin(db, ctx.body);
+      // The isolated preview profile signs a visitor in as one of the seeded demo personas;
+      // everywhere else the ordinary demo login applies and refuses to run in production.
+      const result = isPreviewProfileEnabled()
+        ? await previewDemoLogin(db, ctx.body)
+        : await demoLogin(db, ctx.body);
       ctx.reply.setCookie(SESSION_COOKIE, result.token, {
         httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/",
         maxAge: 12 * 60 * 60,
@@ -413,6 +418,9 @@ export function buildApp(db: Db) {
   add({
     method: "POST", path: "/dev/seed", summary: "Create demo data (never in production)", tags: ["System"], public: true,
     handler: () => {
+      // The isolated preview profile may seed its own demo tenant in production; it creates
+      // synthetic rows only and never touches a real tenant.
+      if (isPreviewProfileEnabled()) return seedDemo(db, { previewAuthorized: true });
       if (process.env.NODE_ENV === "production" || process.env.ALLOW_DEMO_SEED === "false") throw new AppError("NOT_FOUND");
       return seedDemo(db);
     },

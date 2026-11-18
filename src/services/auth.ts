@@ -6,6 +6,7 @@ import {
 } from "../db/schema.js";
 import type { Principal, Role } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
+import { PREVIEW_TENANT_NAME, isPreviewProfileEnabled } from "../core/preview.js";
 
 export function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -94,6 +95,60 @@ export async function demoLogin(
     expiresAt: new Date(Date.now() + (input.ttlMinutes ?? 12 * 60) * 60_000),
   });
   return { token, userId: user.id, organizationId: input.organizationId, roles: input.roles };
+}
+
+/**
+ * Sign-in for the isolated preview deployment.
+ *
+ * In production the ordinary demo login is disabled, so a public preview instance would have
+ * no way in at all. This is the fenced replacement: it exists only when the preview profile
+ * is switched on, it only ever touches the seeded demo tenant, the identity must be one the
+ * demo seed created, and the granted roles must be roles that identity actually holds — the
+ * client cannot ask for anything else.
+ */
+export async function previewDemoLogin(
+  db: Db,
+  input: { organizationId: string; phone: string; roles: Role[] },
+) {
+  if (!isPreviewProfileEnabled()) throw new AppError("NOT_FOUND");
+
+  const [tenant] = await db.select().from(organizations)
+    .where(eq(organizations.name, PREVIEW_TENANT_NAME)).limit(1);
+  if (!tenant) throw errors.notFound("preview tenant");
+  if (input.organizationId !== tenant.id) throw errors.notFound("preview tenant");
+
+  const [membership] = await db.select({
+    userId: memberships.userId,
+    membershipId: memberships.id,
+    state: memberships.state,
+  })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(and(
+      eq(memberships.organizationId, tenant.id),
+      eq(users.phone, input.phone),
+    ))
+    .limit(1);
+  if (!membership) throw new AppError("FORBIDDEN", "PREVIEW_IDENTITY_NOT_ALLOWED");
+  if (membership.state !== "active") throw errors.forbidden("preview identity is not active");
+
+  const held = await db.select({ role: membershipRoles.role }).from(membershipRoles)
+    .where(eq(membershipRoles.membershipId, membership.membershipId));
+  const heldRoles = held.map(row => row.role);
+  // The client may narrow the roles it wants, but it can never widen them.
+  const granted = input.roles.length
+    ? input.roles.filter(role => heldRoles.includes(role))
+    : heldRoles;
+  if (!granted.length) throw new AppError("FORBIDDEN", "PREVIEW_ROLE_NOT_ALLOWED");
+
+  const token = randomBytes(32).toString("base64url");
+  await db.insert(sessions).values({
+    userId: membership.userId,
+    organizationId: tenant.id,
+    tokenHash: hashToken(token),
+    expiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000),
+  });
+  return { token, userId: membership.userId, organizationId: tenant.id, roles: granted };
 }
 
 export async function requestOtp(

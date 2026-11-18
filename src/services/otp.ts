@@ -6,7 +6,10 @@ import {
 } from "../db/schema.js";
 import type { Role } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
+import { PREVIEW_TENANT_NAME, previewRoles } from "../core/preview.js";
 import { ensureOrganization, hashToken, verifyPreviewKey } from "./auth.js";
+
+export { PREVIEW_TENANT_NAME, previewRoles };
 
 /**
  * Dev-only authentication surfaces: the phone OTP provider and the isolated preview unlock.
@@ -217,22 +220,6 @@ export async function verifyOtpChallenge(
 
   if (!outcome.ok) throw outcome.error;
   return outcome.value;
-}
-
-/** Name of the seeded demo tenant (src/services/seed.ts). The preview never leaves it. */
-const PREVIEW_TENANT_NAME = "Демо-прачечная";
-
-/** Roles a preview session may hold. Admin roles are only allowed in an isolated preview. */
-const PREVIEW_ROLES: Role[] = [
-  "customer", "courier", "dispatcher", "laundry_operator", "laundry_supervisor",
-  "partner_finance", "customer_support", "claims_investigator", "claims_approver", "platform_finance",
-];
-const PREVIEW_ADMIN_ROLES: Role[] = ["platform_admin", "security_auditor"];
-
-/** Server side allowlist: the client may ask for a role, it may not invent one. */
-export function previewRoles(): Role[] {
-  const isolatedPreview = process.env.PREVIEW_MODE === "enabled";
-  return isolatedPreview ? [...PREVIEW_ROLES, ...PREVIEW_ADMIN_ROLES] : PREVIEW_ROLES;
 }
 
 /**

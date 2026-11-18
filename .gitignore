@@ -20,3 +20,9 @@ coverage/
 *.err
 .DS_Store
 .beads.gate.lock
+
+# Local agent runtime configuration. `.agents/skills/` is part of the repository; these three
+# are machine-local hooks and rules that point at absolute paths outside this checkout.
+.agents/hooks.json
+.agents/rules/
+.agents/laundry-idle-continuation.cjs
