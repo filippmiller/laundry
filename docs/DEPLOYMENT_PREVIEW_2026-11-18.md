@@ -1,9 +1,13 @@
 # The isolated preview instance at laundry.filippmiller.com
 
 **Date:** 2026-11-18
-**Deployed commit:** `52ad21db181e305b9f3a8327a922bb7b6c62971c` (branch `docs/pr2-independent-audit-autonomous-wave`, PR #3, still Draft)
+**Code-bearing commit:** `54cfa47e3d9783decb04112bf0b52012a5c0401d` (branch `docs/pr2-independent-audit-autonomous-wave`, PR #3, still Draft)
 **Host:** `hetzner-prod` (`vps-main`, `89.167.42.128`) — a shared production VPS that fronts ~20 other services
 **Status:** live and verified end to end from outside the host
+
+> The instance is rebuilt from the PR head on every deploy, so the running image always matches the
+> branch tip. Commits after the one named above are documentation and tracker export only — no
+> runtime code changed.
 
 ---
 
@@ -131,7 +135,7 @@ TLS is a valid Let's Encrypt certificate for `laundry.filippmiller.com` (issued 
 | `npm audit --omit=dev` | 0 vulnerabilities |
 | `npm run db:generate` + drift check | no drift |
 | browser smoke (`scripts/smoke-local.mjs`) | 11/11 |
-| CI on the deployed head | **success** (run `44353926341`) |
+| CI on the deployed head | **success** (runs `44353926341`, `44355515170`, `44356292770`) |
 
 The CI failure that predates this work (`44349238184`, `ECONNREFUSED 127.0.0.1:55433`) is fixed: `vitest.config.ts` hardcoded the test database URL and `test.env` injected it into every worker, overriding the CI environment. The suite now takes the URL from `TEST_DATABASE_URL` when the environment provides it. It was proven against an external PostgreSQL on a different port (`scripts/verify-external-test-db.mjs` → `EXTERNAL_DATABASE_SUITE_OK`).
 
