@@ -1,7 +1,7 @@
-import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  claims, compensations, courierShifts, evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
+  claims, compensations, courierShifts, custodyEvents, evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
   orders, outboxEvents, sessions, supportThreads,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -93,6 +93,102 @@ export async function opsMetrics(db: Db, principal: Principal) {
 }
 
 /**
+ * A removed asset is parked in this state. The schema has no `deleted_at` column and the
+ * `evidence_state` enum has no tombstone value, so `expired` is the only state that means
+ * "no longer served"; the row itself survives so access events and legal holds keep their
+ * foreign key and the audit trail stays intact.
+ */
+const TOMBSTONE_STATUS = "expired" as const;
+
+type EvidenceOrderScope = { customerId: string; assignedPartnerId: string | null };
+
+/** Tenant-wide entitlement: support, admin and dispatch staff of the principal's own tenant. */
+function isEvidenceStaff(principal: Principal) {
+  return hasRole(principal, ...SUPPORT_ROLES, ...ROLE_GROUPS.dispatcher);
+}
+
+/** A partner is entitled to the orders custody was assigned to them — never to the whole tenant. */
+function isEvidencePartner(principal: Principal) {
+  return hasRole(principal, ...ROLE_GROUPS.partner);
+}
+
+async function loadScopedOrder(db: Db, principal: Principal, orderId: string): Promise<EvidenceOrderScope | undefined> {
+  const [order] = await db.select({
+    customerId: orders.customerId,
+    assignedPartnerId: orders.assignedPartnerId,
+  }).from(orders).where(and(
+    eq(orders.id, orderId),
+    eq(orders.organizationId, principal.organizationId),
+  )).limit(1);
+  return order;
+}
+
+/** Ownership of an order: its customer, the tenant's staff, or the partner custody was assigned to. */
+function entitledToOrder(principal: Principal, order: EvidenceOrderScope | undefined): boolean {
+  if (!order) return false;
+  if (isEvidenceStaff(principal)) return true;
+  if (hasRole(principal, "customer") && order.customerId === principal.userId) return true;
+  if (isEvidencePartner(principal) && principal.partnerId && order.assignedPartnerId === principal.partnerId) return true;
+  return false;
+}
+
+/**
+ * Resolves the ownership rule of an evidence owner for every owner type. Deny by default: an owner
+ * type without a resolved rule, an object outside the principal's tenant, and a principal without a
+ * matching entitlement are all refused.
+ */
+async function resolveEvidenceOwnership(
+  db: Db,
+  principal: Principal,
+  ownerType: string,
+  ownerId: string,
+): Promise<boolean> {
+  if (ownerType === "order") {
+    return entitledToOrder(principal, await loadScopedOrder(db, principal, ownerId));
+  }
+  if (ownerType === "claim") {
+    const [claim] = await db.select({ openedBy: claims.openedBy, orderId: claims.orderId }).from(claims).where(and(
+      eq(claims.id, ownerId),
+      eq(claims.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!claim) return false;
+    if (isEvidenceStaff(principal)) return true;
+    const order = await loadScopedOrder(db, principal, claim.orderId);
+    // A customer sees the evidence of a claim they opened, or of a claim on their own order.
+    if (hasRole(principal, "customer")
+      && (claim.openedBy === principal.userId || order?.customerId === principal.userId)) {
+      return true;
+    }
+    return entitledToOrder(principal, order);
+  }
+  if (ownerType === "custody_event") {
+    const [event] = await db.select({ orderId: custodyEvents.orderId }).from(custodyEvents).where(and(
+      eq(custodyEvents.id, ownerId),
+      eq(custodyEvents.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!event) return false;
+    if (isEvidenceStaff(principal)) return true;
+    return entitledToOrder(principal, await loadScopedOrder(db, principal, event.orderId));
+  }
+  return false;
+}
+
+/**
+ * Object-scoped authorization for a single evidence asset: the tenant must match and the owner
+ * object must belong to the principal. The uploader gains no extra right — access follows the
+ * owner object, never the person who happened to upload the file.
+ */
+async function authorizeEvidenceOwner(
+  db: Db,
+  principal: Principal,
+  asset: { id: string; organizationId: string; ownerType: string; ownerId: string },
+) {
+  if (asset.organizationId !== principal.organizationId) throw errors.notFound("evidence");
+  const entitled = await resolveEvidenceOwnership(db, principal, asset.ownerType, asset.ownerId);
+  if (!entitled) throw errors.notFound("evidence");
+}
+
+/**
  * Evidence registration without file storage: the caller registers the object key and hash of a
  * photo that already lives in object storage; the platform records who registered what for whom.
  */
@@ -112,13 +208,8 @@ export async function registerEvidence(
     organizationId: principal.organizationId, scope: "evidence:register", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    if (input.ownerType === "order") {
-      const [order] = await tx.select({ customerId: orders.customerId }).from(orders).where(and(
-        eq(orders.id, input.ownerId), eq(orders.organizationId, principal.organizationId),
-      )).limit(1);
-      if (!order) throw errors.notFound("order");
-      const staff = hasRole(principal, ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
-      if (!staff && order.customerId !== principal.userId) throw errors.notFound("order");
+    if (!await resolveEvidenceOwnership(tx, principal, input.ownerType, input.ownerId)) {
+      throw errors.notFound("evidence");
     }
     const [asset] = await tx.insert(evidenceAssets).values({
       organizationId: principal.organizationId,
@@ -138,17 +229,13 @@ export async function registerEvidence(
 
 export async function listEvidence(db: Db, principal: Principal, ownerType: string, ownerId: string) {
   assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
-  if (ownerType === "order") {
-    const [order] = await db.select({ customerId: orders.customerId }).from(orders).where(and(
-      eq(orders.id, ownerId), eq(orders.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!order) throw errors.notFound("order");
-    const staff = hasRole(principal, ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
-    if (!staff && order.customerId !== principal.userId) throw errors.notFound("order");
+  if (!await resolveEvidenceOwnership(db, principal, ownerType, ownerId)) {
+    throw errors.notFound("evidence");
   }
+  // The object storage key never leaves the service: the projection carries the digest and the
+  // metadata a client needs to fetch the file through an authorized endpoint, nothing more.
   const rows = await db.select({
     id: evidenceAssets.id,
-    objectKey: evidenceAssets.objectKey,
     sha256: evidenceAssets.sha256,
     purpose: evidenceAssets.purpose,
     mimeType: evidenceAssets.mimeType,
@@ -159,6 +246,7 @@ export async function listEvidence(db: Db, principal: Principal, ownerType: stri
     eq(evidenceAssets.organizationId, principal.organizationId),
     eq(evidenceAssets.ownerType, ownerType),
     eq(evidenceAssets.ownerId, ownerId),
+    ne(evidenceAssets.status, TOMBSTONE_STATUS),
   )).orderBy(desc(evidenceAssets.capturedAt));
   // Reading evidence is itself auditable: every list access is logged.
   if (rows.length) {
@@ -167,6 +255,45 @@ export async function listEvidence(db: Db, principal: Principal, ownerType: stri
     );
   }
   return rows;
+}
+
+/**
+ * Single-asset read with the same object-scoped rule as the listing, and without the storage key.
+ */
+export async function readEvidence(db: Db, principal: Principal, evidenceId: string) {
+  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  const [asset] = await db.select({
+    id: evidenceAssets.id,
+    organizationId: evidenceAssets.organizationId,
+    ownerType: evidenceAssets.ownerType,
+    ownerId: evidenceAssets.ownerId,
+    sha256: evidenceAssets.sha256,
+    purpose: evidenceAssets.purpose,
+    mimeType: evidenceAssets.mimeType,
+    sizeBytes: evidenceAssets.sizeBytes,
+    status: evidenceAssets.status,
+    capturedAt: evidenceAssets.capturedAt,
+  }).from(evidenceAssets).where(and(
+    eq(evidenceAssets.id, evidenceId),
+    eq(evidenceAssets.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!asset) throw errors.notFound("evidence");
+  await authorizeEvidenceOwner(db, principal, asset);
+  if (asset.status === TOMBSTONE_STATUS) throw errors.notFound("evidence");
+  await db.insert(evidenceAccessEvents).values({
+    assetId: asset.id, actorId: principal.userId, purpose: "owner_read",
+  });
+  return {
+    id: asset.id,
+    ownerType: asset.ownerType,
+    ownerId: asset.ownerId,
+    sha256: asset.sha256,
+    purpose: asset.purpose,
+    mimeType: asset.mimeType,
+    sizeBytes: asset.sizeBytes,
+    status: asset.status,
+    createdAt: asset.capturedAt,
+  };
 }
 
 export async function deleteEvidence(
@@ -188,17 +315,7 @@ export async function deleteEvidence(
     )).limit(1);
     if (!asset) throw errors.notFound("evidence");
 
-    if (!hasRole(principal, ...SUPPORT_ROLES)) {
-      let isOwner = asset.createdBy === principal.userId;
-      if (!isOwner && asset.ownerType === "order") {
-        const [order] = await tx.select({ customerId: orders.customerId }).from(orders).where(and(
-          eq(orders.id, asset.ownerId),
-          eq(orders.organizationId, principal.organizationId),
-        )).limit(1);
-        isOwner = Boolean(order && order.customerId === principal.userId && (!asset.createdBy || asset.createdBy === principal.userId));
-      }
-      if (!isOwner) throw errors.notFound("evidence");
-    }
+    await authorizeEvidenceOwner(tx, principal, asset);
 
     if (asset.status === "legal_hold") {
       throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id });
@@ -212,21 +329,22 @@ export async function deleteEvidence(
       throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id, holdId: activeHold.id });
     }
 
-    await tx.delete(evidenceAccessEvents).where(eq(evidenceAccessEvents.assetId, asset.id));
-    await tx.delete(evidenceLegalHolds).where(and(
-      eq(evidenceLegalHolds.organizationId, principal.organizationId),
-      eq(evidenceLegalHolds.assetId, asset.id),
-    ));
-    await tx.delete(evidenceAssets).where(and(
-      eq(evidenceAssets.id, asset.id),
-      eq(evidenceAssets.organizationId, principal.organizationId),
-    ));
+    // Tombstone, never erase: the asset row, its access events and its legal holds all stay, so
+    // the audit trail of who read or held this evidence survives the deletion.
+    if (asset.status === TOMBSTONE_STATUS) {
+      return { evidenceId: asset.id, deleted: true as const, alreadyDeleted: true as const };
+    }
+    await tx.update(evidenceAssets).set({
+      status: TOMBSTONE_STATUS,
+      retentionUntil: new Date(),
+    }).where(eq(evidenceAssets.id, asset.id));
     await appendEvent(tx, {
       principal,
       aggregateType: "evidence",
       aggregateId: asset.id,
       eventType: "evidence.deleted",
-      payload: { ownerType: asset.ownerType, ownerId: asset.ownerId, objectKey: asset.objectKey },
+      // The digest identifies the object for the audit trail; the storage key is never published.
+      payload: { ownerType: asset.ownerType, ownerId: asset.ownerId, sha256: asset.sha256 },
     });
     return { evidenceId: asset.id, deleted: true as const };
   });

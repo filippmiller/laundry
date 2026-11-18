@@ -40,9 +40,14 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Ten missing use cases", () => {
       bags: [{ containerCode: `BAG-${rid().slice(0, 6)}`, sealSerial: (await seedSeal(db, f.organizationId)).serial, weightGrams: 900 }],
       customerConfirmation: true, courierConfirmation: true, key: `intake-${rid()}`,
     });
-    await processOutbox(db, { limit: 500 });
-
-    const feed = await listNotifications(db, f.principal);
+    // Drain the outbox until this order's events have been turned into notifications.
+    // `processOutbox` claims a bounded batch of the oldest pending events, so a single
+    // call is not enough when the queue still holds events from earlier work.
+    let feed = await listNotifications(db, f.principal);
+    for (let attempt = 0; attempt < 20 && feed.length < 2; attempt += 1) {
+      await processOutbox(db, { limit: 500 });
+      feed = await listNotifications(db, f.principal);
+    }
     expect(feed.length).toBeGreaterThanOrEqual(2);
     expect(feed.every((row) => row.read === false)).toBe(true);
     expect(feed.map((row) => row.template)).toContain("intake_confirmed");

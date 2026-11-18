@@ -75,6 +75,42 @@ export async function setup() {
     }
   }
   await runMigrations(url, "./drizzle");
+  await resetTestData(url);
+}
+
+/**
+ * Empty every table of the `public` schema so that a test run always starts from the
+ * same state.
+ *
+ * The cluster is persistent, so without this the suite depends on how many times it has
+ * been run before: the `outbox_events` backlog grows with every run, `processOutbox`
+ * claims only the oldest 500 pending events, and the newest events of a late-running test
+ * file are never claimed — which made `npm test` fail on a repository that had simply been
+ * tested a few times. The migrations keep their own bookkeeping in the `drizzle` schema
+ * and are therefore left untouched.
+ */
+async function resetTestData(connectionString: string) {
+  const client = new Client({ connectionString });
+  try {
+    await client.connect();
+    await client.query(`
+      DO $reset$
+      DECLARE
+        target text;
+      BEGIN
+        SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
+          INTO target
+          FROM pg_tables
+         WHERE schemaname = 'public';
+        IF target IS NOT NULL THEN
+          EXECUTE 'TRUNCATE TABLE ' || target || ' CASCADE';
+        END IF;
+      END
+      $reset$;
+    `);
+  } finally {
+    await client.end().catch(() => undefined);
+  }
 }
 
 export async function teardown() {

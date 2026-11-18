@@ -1,17 +1,6 @@
-export type DemoConfig = {
-  organizationId: string;
-  buildingId?: string;
-  pickupWindowId?: string;
-  deliveryWindowId?: string;
-  tariffVersionId?: string;
-  serviceId?: string;
-  termsVersion: string;
-  shiftId?: string;
-  buildings?: Array<{ id: string; address: string; pickupWindowId: string | null; deliveryWindowId: string | null }>;
-  services?: Array<{ id: string; code: string; name: string; unit: string }>;
-  partners?: Array<{ id: string; name: string }>;
-  demoUsers: Array<{ role: string; phone: string; displayName?: string }>;
-};
+import type { DemoConfig } from "./types";
+
+export type { DemoConfig };
 
 export class ApiError extends Error {
   constructor(readonly code: string, readonly status: number, readonly details?: unknown) {

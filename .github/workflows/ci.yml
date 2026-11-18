@@ -13,6 +13,23 @@ jobs:
   quality:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    # The integration suite (authorization negatives, money invariants, custody, outbox) needs a
+    # real PostgreSQL. Without a database TEST_DATABASE_URL is unset and every
+    # `describe.skipIf(!process.env.TEST_DATABASE_URL)` block is SKIPPED — a green job that
+    # proved nothing. The service below makes those tests actually run.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: laundry
+          POSTGRES_PASSWORD: laundry_test_only
+          POSTGRES_DB: laundry_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U laundry -d laundry_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://laundry:laundry_test_only@127.0.0.1:5432/laundry_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,9 +37,12 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: Repo hygiene guard
+        run: npm run guard:hygiene
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm test
+      - name: Test suite (unit + integration against PostgreSQL)
+        run: npm test
       - run: npm run web:build
       - run: npm audit --omit=dev
       - name: Migration drift check

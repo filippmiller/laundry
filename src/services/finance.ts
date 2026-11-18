@@ -255,6 +255,11 @@ export async function capturePayment(
       eq(customerInvoices.orderId, order.id),
     )).limit(1);
     if (!invoice) throw new AppError("PAYMENT_PENDING", "INVOICE_REQUIRED");
+    // A voided invoice must never be captured: e.g. when a partner returns the order unprocessed
+    // the open invoice is cancelled and the customer must not become payable for it.
+    if (invoice.state !== "open") {
+      throw new AppError("FINANCIAL_HOLD", "INVOICE_NOT_PAYABLE", { state: invoice.state });
+    }
     if (input.amountKopeks !== invoice.totalKopeks) throw new AppError("VALIDATION_ERROR", "AMOUNT_MISMATCH");
 
     const [intent] = await tx.insert(paymentIntents).values({

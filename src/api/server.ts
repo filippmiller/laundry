@@ -18,9 +18,9 @@ import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, rescheduleOr
 import { recordIntake, registerCourierDevice, syncScanEvents } from "../services/intake.js";
 import {
   assignOrderToPartner, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
-  startInspection, startProcessing,
+  returnUnprocessedOrder, startInspection, startProcessing, partnerWorkspace,
 } from "../services/partner.js";
-import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt, startStop } from "../services/delivery.js";
+import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt, startStop, dispatchOverview } from "../services/delivery.js";
 import { decideClaim, getClaim, openClaim, reopenClaim } from "../services/claims.js";
 import {
   capturePayment, createCustomerInvoice, createPartnerInvoice, disputePartnerLine, handlePaymentWebhook,
@@ -28,7 +28,7 @@ import {
 } from "../services/finance.js";
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
 import {
-  grantRole, listAuditEvents, listMembers, memberRoles, revokeRole, revokeSession,
+  grantRole, listAuditEvents, listMembers, memberRoles, revokeRole, revokeSession, setMembershipState,
 } from "../services/admin.js";
 import { fraudSignals } from "../services/fraud.js";
 import { closeThread, getThread, listThreads, openThread, postMessage } from "../services/support.js";
@@ -44,6 +44,9 @@ import {
   registerEvidence, revokeOwnSession, searchOrders,
 } from "../services/workspace.js";
 import { seedDemo } from "../services/seed.js";
+import { apiFinanceOverview } from "../services/api-overview.js";
+import { renderDocument, type DocumentKind } from "../services/documents.js";
+import { requestOtpChallenge, unlockPreviewAccess, verifyOtpChallenge } from "../services/otp.js";
 import { and, eq, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
 
@@ -115,14 +118,20 @@ export function buildApp(db: Db) {
   const allowedOrigins = new Set(process.env.WEB_ORIGIN ? [process.env.WEB_ORIGIN] : []);
 
   /**
-   * Cookie-authenticated POSTs get an origin check on top of sameSite=lax: browsers always send
-   * Origin on cross-site POSTs, so a mismatch proves the request was not initiated by this site
-   * even if a legacy browser ignores SameSite. An absent Origin (curl, integration tests) carries
-   * no ambient-cookie risk and stays allowed. Signature-authenticated webhooks are exempt:
-   * payment providers are not browsers.
+   * Cookie-authenticated state-changing requests get an origin check on top of sameSite=lax:
+   * browsers always send Origin on cross-site requests, so a mismatch proves the request was not
+   * initiated by this site even if a legacy browser ignores SameSite. An absent Origin (curl,
+   * integration tests) carries no ambient-cookie risk and stays allowed. Signature-authenticated
+   * webhooks are exempt: payment providers are not browsers.
+   *
+   * The check covers every unsafe method — POST, PUT, PATCH and DELETE. It used to apply to POST
+   * only, which left the cookie-authenticated DELETE routes (addresses, review likes, admin role
+   * removals) open to a cross-site request.
    */
+  const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
   function assertTrustedOrigin(request: FastifyRequest) {
-    if (request.method !== "POST") return;
+    if (SAFE_METHODS.has(request.method)) return;
     const origin = request.headers.origin;
     if (typeof origin !== "string" || !origin) return;
     let authority: string;
@@ -170,6 +179,20 @@ export function buildApp(db: Db) {
       });
       return;
     }
+    // Abuse control and body parsing failures carry their own status; the envelope stays the same.
+    const status = (error as { statusCode?: unknown }).statusCode;
+    if (status === 429) {
+      reply.status(429).send({
+        error: { code: "RATE_LIMITED", message: "RATE_LIMITED", request_id: _request.id },
+      });
+      return;
+    }
+    if (status === 400) {
+      reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "VALIDATION_ERROR", request_id: _request.id },
+      });
+      return;
+    }
     app.log.error(error);
     reply.status(500).send({
       error: { code: "DEPENDENCY_UNAVAILABLE", message: "INTERNAL_ERROR", request_id: _request.id },
@@ -184,26 +207,30 @@ export function buildApp(db: Db) {
   }
 
   function add(def: RouteDef) {
-    app.route({
-      method: def.method,
-      url: `/api/v1${def.path}`,
-      config: def.rateLimit ? { rateLimit: def.rateLimit } : undefined,
-      preHandler: def.public
-        ? (def.method === "POST" && def.path !== "/webhooks/payments/:provider" ? originHook : undefined)
-        : authHook,
-      handler: async (request, reply) => {
-        const principal = (request as FastifyRequest & { principal?: Principal }).principal;
-        if (def.roles) assertRole(principal!, ...def.roles);
-        const ctx: Ctx = {
-          principal: principal!,
-          body: def.body ? def.body.parse(request.body ?? {}) : request.body,
-          params: (def.params ? def.params.parse(request.params) : request.params) as Record<string, string>,
-          query: (def.query ? def.query.parse(request.query) : request.query) as Record<string, unknown>,
-          request,
-          reply,
-        };
-        return def.handler(ctx);
-      },
+    // The route is mounted during the boot sequence: the abuse control plugin decorates the
+    // instance while it boots, so its per route hooks only reach routes that exist by then.
+    app.after(() => {
+      app.route({
+        method: def.method,
+        url: `/api/v1${def.path}`,
+        config: def.rateLimit ? { rateLimit: def.rateLimit } : undefined,
+        preHandler: def.public
+          ? (def.method === "POST" && def.path !== "/webhooks/payments/:provider" ? originHook : undefined)
+          : authHook,
+        handler: async (request, reply) => {
+          const principal = (request as FastifyRequest & { principal?: Principal }).principal;
+          if (def.roles) assertRole(principal!, ...def.roles);
+          const ctx: Ctx = {
+            principal: principal!,
+            body: def.body ? def.body.parse(request.body ?? {}) : request.body,
+            params: (def.params ? def.params.parse(request.params) : request.params) as Record<string, string>,
+            query: (def.query ? def.query.parse(request.query) : request.query) as Record<string, unknown>,
+            request,
+            reply,
+          };
+          return def.handler(ctx);
+        },
+      });
     });
 
     const jsonSchema = (schema?: z.ZodType) => {
@@ -254,6 +281,17 @@ export function buildApp(db: Db) {
     handler: () => ({ status: "ok", service: "laundry", time: new Date().toISOString() }),
   });
   add({
+    method: "GET", path: "/health/ready", summary: "Readiness", tags: ["System"], public: true,
+    handler: async () => {
+      try {
+        await db.execute(sql`SELECT 1`);
+        return { status: "ok", service: "laundry" };
+      } catch (e) {
+        return { status: "error", service: "laundry", error: e };
+      }
+    },
+  });
+  add({
     method: "GET", path: "/openapi.json", summary: "OpenAPI contract", tags: ["System"], public: true,
     handler: () => ({
       openapi: "3.1.0",
@@ -292,6 +330,59 @@ export function buildApp(db: Db) {
       const token = (ctx.request.cookies as Record<string, string | undefined>)[SESSION_COOKIE];
       ctx.reply.clearCookie(SESSION_COOKIE, { path: "/" });
       return logout(db, token);
+    },
+  });
+  add({
+    method: "POST", path: "/auth/otp/request", summary: "Request a phone OTP (fake provider, absent in production)", tags: ["Auth"],
+    public: true,
+    // Per IP budget for the OTP surface; the per phone budget lives in the service.
+    rateLimit: { max: Number(process.env.OTP_IP_RATE_LIMIT ?? 60), timeWindow: "1 minute" },
+    body: z.object({ organizationId: z.uuid(), phone: z.string().min(6).max(24) }),
+    handler: ctx => requestOtpChallenge(db, ctx.body),
+  });
+  add({
+    method: "POST", path: "/auth/otp/verify", summary: "Verify a phone OTP and open a session", tags: ["Auth"],
+    public: true,
+    rateLimit: { max: Number(process.env.OTP_IP_RATE_LIMIT ?? 60), timeWindow: "1 minute" },
+    body: z.object({ organizationId: z.uuid(), phone: z.string().min(6).max(24), code: z.string().min(4).max(12) }),
+    handler: async ctx => {
+      const result = await verifyOtpChallenge(db, ctx.body);
+      ctx.reply.setCookie(SESSION_COOKIE, result.token, {
+        httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/",
+        maxAge: 12 * 60 * 60,
+      });
+      return {
+        userId: result.userId,
+        organizationId: result.organizationId,
+        roles: result.roles,
+        provider: result.provider,
+      };
+    },
+  });
+  add({
+    method: "POST", path: "/auth/preview-unlock", summary: "Unlock the isolated demo preview (absent in production)", tags: ["Auth"],
+    public: true,
+    rateLimit: { max: 20, timeWindow: "10 minutes" },
+    body: z.object({
+      key: z.string().min(1).max(200),
+      organizationId: z.uuid().optional(),
+      phone: z.string().min(6).max(24).optional(),
+      role: z.string().min(2).max(40).optional(),
+    }),
+    handler: async ctx => {
+      const result = await unlockPreviewAccess(db, { ...ctx.body, requestId: ctx.request.id });
+      if (result.sessionToken) {
+        ctx.reply.setCookie(SESSION_COOKIE, result.sessionToken, {
+          httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/",
+          maxAge: 12 * 60 * 60,
+        });
+      }
+      return {
+        unlocked: result.unlocked,
+        previewEnabled: result.previewEnabled,
+        organizationId: result.organizationId,
+        previewRoles: result.previewRoles,
+      };
     },
   });
   add({
@@ -673,6 +764,15 @@ export function buildApp(db: Db) {
     handler: ctx => proposeAdjustment(db, ctx.principal, { orderId: ctx.params.id, ...ctx.body, key: idempotencyKey(ctx) }),
   });
   add({
+    method: "POST", path: "/partner/orders/:id/return-unprocessed", summary: "Return an order to the customer without processing", tags: ["Partner"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.partner, ...ROLE_GROUPS.dispatcher],
+    body: z.object({ reason: z.string().min(3).max(500), key: z.string().optional() }),
+    handler: ctx => returnUnprocessedOrder(db, ctx.principal, {
+      orderId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
     method: "POST", path: "/adjustments/:id/decision", summary: "Customer decision on an adjustment", tags: ["Customer"],
     params: idSchema,
     body: z.object({ accept: z.boolean(), quoteHash: z.string().length(64), key: z.string().optional() }),
@@ -720,6 +820,19 @@ export function buildApp(db: Db) {
     query: z.object({ reason: z.string().min(5), key: z.string().min(1) }),
     handler: ctx => revokeRole(db, ctx.principal, {
       userId: ctx.params.id, role: ctx.params.role as Role, reason: ctx.query.reason as string, key: ctx.query.key as string,
+    }),
+  });
+  add({
+    method: "POST", path: "/admin/members/:id/state", summary: "Suspend or reactivate a member", tags: ["Admin"],
+    params: idSchema,
+    roles: ["platform_admin"],
+    body: z.object({
+      state: z.enum(["active", "suspended", "revoked"]),
+      reason: z.string().min(5).max(500),
+      key: z.string().min(1).optional(),
+    }),
+    handler: ctx => setMembershipState(db, ctx.principal, {
+      userId: ctx.params.id, state: ctx.body.state, reason: ctx.body.reason, key: idempotencyKey(ctx),
     }),
   });
   add({
@@ -888,6 +1001,16 @@ export function buildApp(db: Db) {
     }),
   });
   add({
+    method: "GET", path: "/dispatch/overview", summary: "Dispatcher overview", tags: ["Dispatch"],
+    roles: [...ROLE_GROUPS.dispatcher],
+    handler: ctx => dispatchOverview(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/partner/workspace", summary: "Partner workspace", tags: ["Partner"],
+    roles: [...ROLE_GROUPS.partner],
+    handler: ctx => partnerWorkspace(db, ctx.principal),
+  });
+  add({
     method: "POST", path: "/finance/partner-invoice-lines/:id/disputes", summary: "Dispute an accrual line", tags: ["Finance"],
     params: idSchema, body: z.object({ reason: z.string().min(5), key: z.string().optional() }),
     handler: ctx => disputePartnerLine(db, ctx.principal, {
@@ -911,6 +1034,23 @@ export function buildApp(db: Db) {
       `);
       return result.rows[0];
     },
+  });
+  add({
+    method: "GET", path: "/finance/overview", summary: "Finance dashboard aggregate of this tenant", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance],
+    handler: ctx => apiFinanceOverview(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/documents/:kind/:id", summary: "Russian business document (never a fiscal receipt)", tags: ["Finance", "Customer"],
+    params: z.object({
+      kind: z.enum(["customer_invoice", "intake_receipt", "partner_act", "upd_draft"]),
+      id: z.uuid(),
+    }),
+    roles: ["customer", ...ROLE_GROUPS.partner, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin],
+    handler: ctx => renderDocument(db, ctx.principal, {
+      kind: ctx.params.kind as DocumentKind,
+      id: ctx.params.id,
+    }),
   });
   add({
     method: "GET", path: "/dispatch/pickup-queue", summary: "Scheduled orders awaiting courier assignment", tags: ["Dispatch"],

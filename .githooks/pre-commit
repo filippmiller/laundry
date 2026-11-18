@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Pre-commit hygiene guard.
+#
+# Refuses a commit while the INDEX (staged content) tracks PostgreSQL cluster
+# bytes, secrets, media/archives or oversized blobs. Only paths and reasons are
+# reported — file contents are never read or printed.
+#
+# Install once, for this repository only (does NOT touch global git config):
+#
+#   git config core.hooksPath .githooks
+#
+# The guard is also wired into CI (.github/workflows/ci.yml), so this hook is a
+# convenience for local work, not the only line of defence.
+exec node scripts/guard-repo-hygiene.mjs

@@ -1,0 +1,286 @@
+/**
+ * Generate the honest scenario status register from the audit's scenario catalog.
+ *
+ * The catalog is a *plan*: 217 described scenarios that have to be executed and evidenced.
+ * This script writes one register entry per scenario with a truthful status and never
+ * promotes a scenario to a passing state without an evidence pointer that exists on disk.
+ *
+ *   node scripts/generate-scenario-status.mjs [--check]
+ *
+ * `--check` verifies that the committed register is still in sync with the catalog and
+ * that no entry claims an executed status without real evidence. It is used by the test
+ * suite, so a fabricated pass cannot be committed unnoticed.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const CATALOG = "docs/audits/PR3_audit/laundry_PR3_audit_2026-11-17/02_SCENARIO_CATALOG.json";
+const REGISTER = "docs/coverage/PR3_SCENARIO_STATUS.json";
+const EXECUTION_CSV = "docs/coverage/PR3_SCENARIO_EXECUTION.csv";
+const PREVIOUS_CSV = "docs/coverage/PR3_SCENARIO_EXECUTION.csv";
+
+/** Statuses that mean "this scenario was actually executed and proved". */
+export const EXECUTED_STATUSES = new Set([
+  "UNIT_PASS",
+  "API_PASS",
+  "BROWSER_PASS",
+  "CROSS_ROLE_PASS",
+  "HARDWARE_PASS",
+]);
+
+/**
+ * The proof artefacts that exist in this repository right now. Each entry names the test
+ * file that executes it and what the test actually asserts — no scenario id is promoted
+ * on the strength of an adjacent test.
+ */
+const EXECUTED_PROOFS = [
+  {
+    area: "Customer ordering journey",
+    proves: "A customer quotes, holds both windows, books an order, gets an invoice and pays with the fake provider; the price comes from the server.",
+    test: "scripts/smoke-e2e.mjs",
+    command: "npm run smoke",
+    kind: "BROWSER_PASS",
+  },
+  {
+    area: "Evidence object scope (order / claim / custody_event) and privacy",
+    proves: "A customer cannot list or read another customer's claim or custody evidence, a partner cannot read an unassigned order's evidence, another tenant is denied, and the storage key never leaves the service.",
+    test: "test/security/evidence-abac.integration.test.ts",
+    command: "npx vitest run test/security/evidence-abac.integration.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "CSRF / origin enforcement on cookie-authenticated state changes",
+    proves: "DELETE, POST and other unsafe methods reject a cross-site Origin, while same-origin and originless clients are allowed.",
+    test: "test/security/csrf-unsafe-methods.integration.test.ts",
+    command: "npx vitest run test/security/csrf-unsafe-methods.integration.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "Money invariants — a voided invoice must never be captured",
+    proves: "A cancelled invoice is refused with FINANCIAL_HOLD and creates no payment intent, while an open invoice is captured exactly once.",
+    test: "test/api/finance-capture-invoice-state.test.ts",
+    command: "npx vitest run test/api/finance-capture-invoice-state.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "Finance dashboard contract",
+    proves: "GET /finance/overview returns the tenant aggregate, refuses a customer, hides another tenant's rows and refuses an unauthenticated call.",
+    test: "test/api/finance-overview.test.ts",
+    command: "npx vitest run test/api/finance-overview.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "Document rendering and the non-fiscal warning",
+    proves: "GET /documents/:kind/:id is object scoped, refuses a forbidden role and carries an explicit 'not a 54-FZ fiscal receipt' disclaimer.",
+    test: "test/api/documents.test.ts",
+    command: "npx vitest run test/api/documents.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "Partner returns an order unprocessed",
+    proves: "The order returns unprocessed, the customer is never charged, the held capacity is released, and a partner that is not assigned to the order sees nothing.",
+    test: "test/api/partner-return-unprocessed.test.ts",
+    command: "npx vitest run test/api/partner-return-unprocessed.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "Phone OTP (fake provider) and preview unlock",
+    proves: "Only a hash of the code is stored, the surface does not exist in production, attempts are bounded, the preview role allowlist is server side and every attempt is audited.",
+    test: "test/api/otp.test.ts, test/api/otp-rate-limit.test.ts, test/api/preview-unlock.test.ts",
+    command: "npx vitest run test/api",
+    kind: "API_PASS",
+  },
+  {
+    area: "Administrator member suspension",
+    proves: "Suspending a member revokes its sessions, another tenant is hidden, the last active administrator cannot be suspended away, and self-suspension is refused.",
+    test: "test/api/admin-member-state.test.ts",
+    command: "npx vitest run test/api/admin-member-state.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "Repository hygiene — no database bytes, secrets, media or oversized blobs tracked",
+    proves: "The guard exits non-zero on a planted PostgreSQL cluster, a secret, media and an oversized blob, and prints only paths, never contents.",
+    test: "test/ops/guard-repo-hygiene.test.ts",
+    command: "npx vitest run test/ops/guard-repo-hygiene.test.ts",
+    kind: "UNIT_PASS",
+  },
+];
+
+/**
+ * The 12 original end-to-end journeys (E2E-001..012) were tracked by an earlier wave in
+ * `docs/coverage/PR3_SCENARIO_EXECUTION.csv`, with statuses and a commit sha that are now
+ * stale. Their previous claim is preserved, but it is never presented as the current
+ * status: nothing in this wave re-executed them.
+ */
+function readPreviousE2eRows() {
+  if (!fs.existsSync(PREVIOUS_CSV)) return new Map();
+  const lines = fs.readFileSync(PREVIOUS_CSV, "utf8").split(/\r?\n/).filter(line => line.trim());
+  if (lines.length < 2) return new Map();
+  const header = lines[0].split(",");
+  const rows = new Map();
+  for (const line of lines.slice(1)) {
+    const cells = line.split(",");
+    const id = cells[0]?.trim();
+    if (!id || !id.startsWith("E2E-")) continue;
+    const column = name => cells[header.indexOf(name)]?.trim() ?? "";
+    rows.set(id, {
+      title: column("title"),
+      status: column("status"),
+      roles: column("role_paths_covered"),
+      evidence: column("api_service_evidence"),
+      browser: column("browser_evidence"),
+      commit: column("commit"),
+      gap: column("remaining_gap"),
+    });
+  }
+  return rows;
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function buildExecutionCsv(catalog, register) {
+  const previous = readPreviousE2eRows();
+  const rows = [["id", "title", "kind", "status", "roles", "evidence", "browser_evidence", "as_of", "previous_wave_status", "previous_wave_commit", "remaining_gap"]];
+
+  for (const [id, row] of previous) {
+    rows.push([
+      id,
+      row.title,
+      "original_e2e",
+      // Not re-verified in this wave — the previous claim is kept in its own column.
+      "NOT_REVERIFIED_CURRENT_HEAD",
+      row.roles,
+      row.evidence,
+      row.browser,
+      register.as_of,
+      row.status,
+      row.commit,
+      row.gap,
+    ]);
+  }
+
+  for (const flow of catalog.cross_role_flows ?? []) {
+    rows.push([
+      flow.id,
+      flow.flow,
+      "cross_role_flow",
+      "SPEC",
+      (flow.roles ?? []).join("+"),
+      "",
+      "",
+      register.as_of,
+      flow.status ?? "",
+      "",
+      "Cross-role journey described in the audit catalogue; not executed as a named journey test.",
+    ]);
+  }
+
+  for (const scenario of register.scenarios) {
+    rows.push([
+      scenario.id,
+      scenario.scenario,
+      "scenario",
+      scenario.status,
+      scenario.role_area,
+      "",
+      "",
+      register.as_of,
+      "NOT_RUN_CURRENT_HEAD",
+      "",
+      scenario.note,
+    ]);
+  }
+
+  return `${rows.map(row => row.map(csvCell).join(",")).join("\n")}\n`;
+}
+
+function build() {
+  const catalog = JSON.parse(fs.readFileSync(CATALOG, "utf8"));
+  const scenarios = catalog.scenarios.map(scenario => ({
+    id: scenario.id,
+    role_area: scenario.role_area,
+    priority: scenario.priority,
+    scenario: scenario.scenario,
+    required_acceptance: scenario.required_acceptance,
+    // The catalog itself says NOT_RUN_CURRENT_HEAD for every scenario; nothing in this
+    // repository executes a scenario *by its id*, so the register keeps that truth and
+    // records the executed proofs separately.
+    status: "SPEC",
+    evidence: null,
+    note: "Described in the audit catalog. Not executed as a named scenario test in this wave — see executed_proofs for the areas that do have real coverage.",
+  }));
+
+  return {
+    as_of: new Date().toISOString().slice(0, 10),
+    source_catalog: CATALOG,
+    catalog_baseline_sha: catalog.baseline_sha,
+    total: scenarios.length,
+    counts: scenarios.reduce((acc, scenario) => {
+      acc[scenario.status] = (acc[scenario.status] ?? 0) + 1;
+      return acc;
+    }, {}),
+    executed_proofs: EXECUTED_PROOFS,
+    scenarios,
+  };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  const check = process.argv.includes("--check");
+  const register = build();
+  if (check) {
+    if (!fs.existsSync(REGISTER)) {
+      console.error(`${REGISTER} is missing — run: node scripts/generate-scenario-status.mjs`);
+      process.exit(1);
+    }
+    const committed = JSON.parse(fs.readFileSync(REGISTER, "utf8"));
+    const catalogIds = register.scenarios.map(s => s.id).join(",");
+    const committedIds = committed.scenarios.map(s => s.id).join(",");
+    if (catalogIds !== committedIds) {
+      console.error(`${REGISTER} does not cover the catalog — run: node scripts/generate-scenario-status.mjs`);
+      process.exit(1);
+    }
+    const allowed = new Set([
+      "SPEC", "IMPLEMENTED_UNTESTED", "UNIT_PASS", "API_PASS", "BROWSER_PASS",
+      "CROSS_ROLE_PASS", "HARDWARE_PASS", "BLOCKED", "FAIL", "N/A",
+    ]);
+    for (const scenario of committed.scenarios) {
+      if (!allowed.has(scenario.status)) {
+        console.error(`${REGISTER}: ${scenario.id} has an unknown status "${scenario.status}"`);
+        process.exit(1);
+      }
+      if (EXECUTED_STATUSES.has(scenario.status) && !(scenario.evidence ?? []).length) {
+        console.error(`${REGISTER}: ${scenario.id} claims ${scenario.status} without evidence`);
+        process.exit(1);
+      }
+    }
+    console.log(`${REGISTER}: ${committed.scenarios.length} scenarios, counts ${JSON.stringify(committed.counts)}`);
+    if (!fs.existsSync(EXECUTION_CSV)) {
+      console.error(`${EXECUTION_CSV} is missing — run: node scripts/generate-scenario-status.mjs`);
+      process.exit(1);
+    }
+    const csv = fs.readFileSync(EXECUTION_CSV, "utf8");
+    const catalog = JSON.parse(fs.readFileSync(CATALOG, "utf8"));
+    const expectedRows = (catalog.cross_role_flows?.length ?? 0) + committed.scenarios.length + 12;
+    const actualRows = csv.split(/\r?\n/).filter(line => line.trim()).length - 1;
+    if (actualRows !== expectedRows) {
+      console.error(`${EXECUTION_CSV} has ${actualRows} rows, expected ${expectedRows} — run: node scripts/generate-scenario-status.mjs`);
+      process.exit(1);
+    }
+    if (csv.includes(catalog.baseline_sha)) {
+      console.log(`${EXECUTION_CSV}: ${actualRows} rows (as_of ${committed.as_of})`);
+    }
+  } else {
+    const catalog = JSON.parse(fs.readFileSync(CATALOG, "utf8"));
+    fs.mkdirSync(path.dirname(REGISTER), { recursive: true });
+    fs.writeFileSync(REGISTER, `${JSON.stringify(register, null, 2)}\n`, "utf8");
+    console.log(`wrote ${REGISTER}: ${register.total} scenarios, counts ${JSON.stringify(register.counts)}`);
+    // The execution CSV is written last so that the previous wave's E2E rows can still be read.
+    fs.writeFileSync(EXECUTION_CSV, buildExecutionCsv(catalog, register), "utf8");
+    const rows = fs.readFileSync(EXECUTION_CSV, "utf8").split(/\r?\n/).filter(line => line.trim()).length - 1;
+    console.log(`wrote ${EXECUTION_CSV}: ${rows} rows`);
+  }
+}

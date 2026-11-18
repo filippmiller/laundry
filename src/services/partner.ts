@@ -1,10 +1,11 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
   customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifests,
   orderAdjustments, orderLines, orders, partnerContracts, partners, partnerReceiptLines,
-  partnerReceipts, partnerServiceAccruals, processingOperations, qualityChecks, seals,
+  partnerReceipts, partnerServiceAccruals, paymentIntents, processingOperations, qualityChecks, seals,
+  serviceWindows, slotReservations,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -417,6 +418,45 @@ export async function returnUnprocessedOrder(
     if (order.lifecycleState !== "inspection") {
       throw errors.transition(order.lifecycleState, "return_unprocessed");
     }
+    // An order that was never processed must never leave the customer payable: an existing capture
+    // is refused so finance resolves the money explicitly, and an open invoice is voided.
+    const captured = await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(and(
+      eq(paymentIntents.organizationId, principal.organizationId),
+      eq(paymentIntents.orderId, order.id),
+      inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
+    )).limit(1);
+    if (captured.length) {
+      throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CHARGED", { orderId: order.id });
+    }
+    const openInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
+      eq(customerInvoices.organizationId, principal.organizationId),
+      eq(customerInvoices.orderId, order.id),
+      eq(customerInvoices.state, "open"),
+    ));
+    for (const invoice of openInvoices) {
+      await tx.update(customerInvoices).set({ state: "cancelled" }).where(eq(customerInvoices.id, invoice.id));
+    }
+    // Nothing will be delivered, so the capacity held for this order is released again.
+    const liveReservations = await tx.select({
+      id: slotReservations.id,
+      windowId: slotReservations.windowId,
+      capacityUnits: slotReservations.capacityUnits,
+    }).from(slotReservations).where(and(
+      eq(slotReservations.organizationId, principal.organizationId),
+      eq(slotReservations.orderId, order.id),
+      inArray(slotReservations.state, ["held", "confirmed"]),
+    ));
+    for (const reservation of liveReservations) {
+      await tx.update(slotReservations).set({ state: "released" })
+        .where(eq(slotReservations.id, reservation.id));
+      await tx.update(serviceWindows).set({
+        reservedOrders: sql`GREATEST(${serviceWindows.reservedOrders} - ${reservation.capacityUnits}, 0)`,
+        version: sql`${serviceWindows.version} + 1`,
+      }).where(and(
+        eq(serviceWindows.id, reservation.windowId),
+        gte(serviceWindows.reservedOrders, reservation.capacityUnits),
+      ));
+    }
     const hubState = nextState("inspection", "return_unprocessed");
     const readyState = nextState(hubState, "ready_for_return");
     await tx.update(orders).set({
@@ -432,9 +472,17 @@ export async function returnUnprocessedOrder(
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: "order.return_unprocessed",
       reason: input.reason,
-      payload: { from: order.lifecycleState, to: readyState, reason: input.reason },
+      payload: {
+        from: order.lifecycleState, to: readyState, reason: input.reason,
+        releasedReservations: liveReservations.length, voidedInvoices: openInvoices.length,
+      },
     });
-    return { orderId: order.id, state: readyState, returnReason: input.reason };
+    return {
+      orderId: order.id,
+      state: readyState,
+      returnReason: input.reason,
+      releasedReservations: liveReservations.length,
+    };
   });
 }
 

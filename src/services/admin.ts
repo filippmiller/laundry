@@ -152,6 +152,23 @@ export async function setMembershipState(
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
     const membership = await membershipFor(tx, principal, input.userId);
+    if (input.state !== "active") {
+      // Lock the admin rows before counting so two administrators cannot suspend each other at the
+      // same time and leave the tenant without a single active administrator.
+      const adminRows = await tx.select({ membershipId: memberships.id, state: memberships.state })
+        .from(membershipRoles)
+        .innerJoin(memberships, eq(memberships.id, membershipRoles.membershipId))
+        .where(and(
+          eq(memberships.organizationId, principal.organizationId),
+          eq(membershipRoles.role, "platform_admin"),
+        ))
+        .for("update");
+      const activeAdmins = adminRows.filter(row => row.state === "active");
+      const targetIsActiveAdmin = activeAdmins.some(row => row.membershipId === membership.id);
+      if (targetIsActiveAdmin && activeAdmins.length <= 1) {
+        throw new AppError("FORBIDDEN", "LAST_ADMIN");
+      }
+    }
     await tx.update(memberships)
       .set({ state: input.state })
       .where(eq(memberships.id, membership.id));
