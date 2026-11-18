@@ -30,16 +30,20 @@ x-app: &app
     context: ..
     dockerfile: infra/Dockerfile
   restart: unless-stopped
-  depends_on:
-    db:
-      condition: service_healthy
-    migrate:
-      condition: service_completed_successfully
   logging:
     driver: json-file
     options:
       max-size: "10m"
       max-file: "3"
+
+# The anchor deliberately carries no depends_on. migrate runs before the api and the
+# worker, so putting that dependency in the shared block would make migrate depend on
+# itself.
+x-app-depends: &app-depends
+  db:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
 
 services:
   db:
@@ -72,6 +76,9 @@ services:
     <<: *app
     restart: "no"
     command: npm run db:migrate
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
@@ -81,6 +88,7 @@ services:
   api:
     <<: *app
     command: npm run start:api
+    depends_on: *app-depends
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
@@ -114,6 +122,7 @@ services:
   worker:
     <<: *app
     command: npm run worker
+    depends_on: *app-depends
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
