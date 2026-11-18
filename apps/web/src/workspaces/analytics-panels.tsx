@@ -1,0 +1,783 @@
+import { useCallback, useEffect, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
+  Loader2,
+  RefreshCw,
+  Scale,
+  Shirt,
+  Wallet,
+} from "lucide-react";
+import { api, dt, money } from "../api";
+import { formatError, GARMENT_STATUS_LABELS, TIER_LABELS } from "../labels";
+
+/**
+ * Panels for the three money/volume questions the product could not answer before:
+ *
+ * - how much do customers owe us and for how long (finance);
+ * - how much have I spent, what do I still owe, what did the group window save me (customer);
+ * - what did we actually receive — items by category and weight against the quote (operations).
+ *
+ * Every figure comes from a live API read of the caller's own tenant. An empty tenant shows
+ * zeros; nothing here is a placeholder number.
+ */
+
+type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
+
+function Metric({
+  label,
+  value,
+  tone = "default",
+  hint,
+}: {
+  label: string;
+  value: string;
+  tone?: "default" | "good" | "warn" | "bad";
+  hint?: string;
+}) {
+  const color =
+    tone === "good" ? "var(--success-ink, #0A5645)"
+      : tone === "warn" ? "var(--warning-ink, #7C4A03)"
+        : tone === "bad" ? "var(--danger-ink, #9E1C18)"
+          : "inherit";
+  return (
+    <div style={{ border: "1px solid var(--border-strong)", borderRadius: 10, padding: 12 }}>
+      <div className="muted">{label}</div>
+      <div className="mono" style={{ fontSize: "1.35rem", fontWeight: 700, color }}>{value}</div>
+      {hint && <div className="muted" style={{ fontSize: "0.8125rem", marginBlockStart: 4 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function Loading({ error }: { error: string | null }) {
+  if (error) {
+    return (
+      <div className="notice error" role="alert">
+        <span>Не удалось загрузить данные: {error}</span>
+      </div>
+    );
+  }
+  return (
+    <p className="muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <Loader2 size={16} aria-hidden="true" />
+      <span>Загрузка…</span>
+    </p>
+  );
+}
+
+function ReloadButton({ onClick, busy }: { onClick: () => void; busy: boolean }) {
+  return (
+    <button type="button" className="ghost" onClick={onClick} disabled={busy}>
+      <RefreshCw size={16} aria-hidden="true" />
+      <span>{busy ? "Обновление…" : "Обновить"}</span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+// Finance: how much are we owed
+// ---------------------------------------------------------------------------------------
+
+type FinanceAnalyticsDto = {
+  receivables: {
+    invoicedKopeks: number;
+    netCollectedKopeks: number;
+    refundedKopeks: number;
+    receivableKopeks: number;
+    creditKopeks: number;
+    invoiceCount: number;
+    aging: Array<{ key: string; label: string; invoiceCount: number; receivableKopeks: number }>;
+    openInvoices: Array<{
+      invoiceNumber: string;
+      publicNumber: string;
+      customerName: string;
+      invoiceTotalKopeks: number;
+      netCollectedKopeks: number;
+      receivableKopeks: number;
+      ageDays: number;
+      issuedAt: string;
+    }>;
+    topDebtors: Array<{
+      customerId: string;
+      customerName: string;
+      customerPhone: string | null;
+      receivableKopeks: number;
+      invoiceCount: number;
+    }>;
+  };
+  payables: {
+    accruedKopeks: number;
+    estimatedKopeks: number;
+    invoicedKopeks: number;
+    disputedKopeks: number;
+    paidKopeks: number;
+    payableKopeks: number;
+    partners: Array<{
+      partnerId: string;
+      partnerName: string;
+      accruedKopeks: number;
+      invoicedKopeks: number;
+      estimatedKopeks: number;
+      disputedKopeks: number;
+      paidKopeks: number;
+      payableKopeks: number;
+    }>;
+  };
+  margin: {
+    netCollectedKopeks: number;
+    partnerCogsKopeks: number;
+    contributionKopeks: number;
+    takeRate: number | null;
+    note: string;
+  };
+  exposure: {
+    adjustmentsPendingConsentKopeks: number;
+    compensationsProposedKopeks: number;
+    compensationsApprovedKopeks: number;
+    chargebackAtRiskKopeks: number;
+  };
+  monthly: Array<{ month: string; invoicedKopeks: number; netCollectedKopeks: number }>;
+};
+
+export function FinanceMoneyPanel({ notify }: { notify: NotifyFn }) {
+  const [data, setData] = useState<FinanceAnalyticsDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setData(await api<FinanceAnalyticsDto>("/finance/analytics"));
+    } catch (err) {
+      setError(formatError(err));
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!data && !error) return <Loading error={null} />;
+  if (!data) return <Loading error={error} />;
+
+  const r = data.receivables;
+  const p = data.payables;
+  const maxMonth = Math.max(1, ...data.monthly.map(month => Math.max(month.invoicedKopeks, month.netCollectedKopeks)));
+
+  return (
+    <section className="panel" aria-labelledby="finance-money-heading">
+      <div className="panel-head">
+        <h3 id="finance-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <Wallet size={18} aria-hidden="true" />
+          <span>Денежный контур: дебиторка и кредиторка</span>
+        </h3>
+        <ReloadButton onClick={() => void load()} busy={busy} />
+      </div>
+
+      <h4 className="section-title">Дебиторка клиентов</h4>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <Metric label="Выставлено счетов" value={money(r.invoicedKopeks)} hint={`${r.invoiceCount} счетов`} />
+        <Metric label="Собрано" value={money(r.netCollectedKopeks)} tone="good" />
+        <Metric label="К оплате" value={money(r.receivableKopeks)} tone={r.receivableKopeks > 0 ? "warn" : "default"} />
+        <Metric label="Возвращено" value={money(r.refundedKopeks)} />
+        {r.creditKopeks > 0 && <Metric label="Переплата клиентов" value={money(r.creditKopeks)} tone="bad" />}
+      </div>
+
+      {r.aging.some(bucket => bucket.invoiceCount > 0) && (
+        <div className="table-wrap" style={{ marginBlockStart: 14 }}>
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>Возраст задолженности</th>
+                <th>Счетов</th>
+                <th>Сумма</th>
+              </tr>
+            </thead>
+            <tbody>
+              {r.aging.map(bucket => (
+                <tr key={bucket.key}>
+                  <td>{bucket.label}</td>
+                  <td className="mono">{bucket.invoiceCount}</td>
+                  <td className="mono">{money(bucket.receivableKopeks)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {r.topDebtors.length > 0 && (
+        <>
+          <h4 className="section-title">Кто должен</h4>
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Клиент</th>
+                  <th>Телефон</th>
+                  <th>Счетов</th>
+                  <th>Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.topDebtors.map(debtor => (
+                  <tr key={debtor.customerId}>
+                    <td>{debtor.customerName}</td>
+                    <td className="mono">{debtor.customerPhone ?? "—"}</td>
+                    <td className="mono">{debtor.invoiceCount}</td>
+                    <td className="mono">{money(debtor.receivableKopeks)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {r.openInvoices.length > 0 && (
+        <>
+          <h4 className="section-title">Счета клиентов</h4>
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Счёт</th>
+                  <th>Заказ</th>
+                  <th>Клиент</th>
+                  <th>Выставлено</th>
+                  <th>Собрано</th>
+                  <th>Долг</th>
+                  <th>Возраст</th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.openInvoices.map(invoice => (
+                  <tr key={invoice.invoiceNumber}>
+                    <td className="mono">{invoice.invoiceNumber}</td>
+                    <td className="mono">{invoice.publicNumber}</td>
+                    <td>{invoice.customerName}</td>
+                    <td className="mono">{money(invoice.invoiceTotalKopeks)}</td>
+                    <td className="mono">{money(invoice.netCollectedKopeks)}</td>
+                    <td className="mono">{invoice.receivableKopeks ? money(invoice.receivableKopeks) : "—"}</td>
+                    <td className="muted">{invoice.ageDays} дн.</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <h4 className="section-title" style={{ marginBlockStart: 18 }}>Кредиторка прачечных</h4>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <Metric label="Начислено" value={money(p.accruedKopeks)} />
+        <Metric label="Выставлено счетов" value={money(p.invoicedKopeks)} />
+        <Metric label="Не выставлено" value={money(p.estimatedKopeks)} hint="Ожидает формирования акта" />
+        <Metric label="Оспорено" value={money(p.disputedKopeks)} tone={p.disputedKopeks > 0 ? "warn" : "default"} />
+        <Metric label="Выплачено" value={money(p.paidKopeks)} tone="good" />
+        <Metric label="К выплате" value={money(p.payableKopeks)} tone={p.payableKopeks > 0 ? "warn" : "default"} />
+      </div>
+
+      {p.partners.length > 0 && (
+        <div className="table-wrap" style={{ marginBlockStart: 14 }}>
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>Прачечная</th>
+                <th>Начислено</th>
+                <th>Выставлено</th>
+                <th>Выплачено</th>
+                <th>К выплате</th>
+              </tr>
+            </thead>
+            <tbody>
+              {p.partners.map(partner => (
+                <tr key={partner.partnerId}>
+                  <td>{partner.partnerName}</td>
+                  <td className="mono">{money(partner.accruedKopeks)}</td>
+                  <td className="mono">{money(partner.invoicedKopeks)}</td>
+                  <td className="mono">{money(partner.paidKopeks)}</td>
+                  <td className="mono">{money(partner.payableKopeks)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h4 className="section-title" style={{ marginBlockStart: 18 }}>Вклад и деньги под риском</h4>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <Metric label="Собрано" value={money(data.margin.netCollectedKopeks)} />
+        <Metric label="Себестоимость прачечной" value={money(data.margin.partnerCogsKopeks)} />
+        <Metric
+          label="Вклад"
+          value={money(data.margin.contributionKopeks)}
+          tone={data.margin.contributionKopeks >= 0 ? "good" : "bad"}
+          hint={data.margin.takeRate === null ? undefined : `${(data.margin.takeRate * 100).toFixed(1)}% от сборов`}
+        />
+        <Metric label="Доплаты без согласия" value={money(data.exposure.adjustmentsPendingConsentKopeks)} />
+        <Metric label="Компенсации к выплате" value={money(data.exposure.compensationsApprovedKopeks)} />
+        <Metric label="Оспорено платежами" value={money(data.exposure.chargebackAtRiskKopeks)} />
+      </div>
+      <p className="muted" style={{ marginBlockStart: 8 }}>{data.margin.note}</p>
+
+      {data.monthly.length > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Помесячно</h4>
+          <div className="data-list">
+            {data.monthly.map(month => (
+              <div className="data-row" key={month.month}>
+                <span className="mono">{month.month}</span>
+                <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                  <span className="muted">выставлено {money(month.invoicedKopeks)}</span>
+                  <span className="muted">собрано {money(month.netCollectedKopeks)}</span>
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      display: "inline-block",
+                      width: 120,
+                      height: 8,
+                      borderRadius: 4,
+                      background: "var(--surface-muted, #EFF3F1)",
+                      position: "relative",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: "absolute",
+                        insetInlineStart: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: `${Math.round((month.netCollectedKopeks / maxMonth) * 100)}%`,
+                        background: "var(--accent, #0B6B58)",
+                      }}
+                    />
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+// Customer: my own money
+// ---------------------------------------------------------------------------------------
+
+type CustomerFinanceDto = {
+  totals: {
+    orderCount: number;
+    chargedKopeks: number;
+    netPaidKopeks: number;
+    refundedKopeks: number;
+    outstandingKopeks: number;
+    creditKopeks: number;
+    averageOrderKopeks: number;
+    sharedWindowSavingsKopeks: number;
+  };
+  byService: Array<{
+    serviceId: string;
+    serviceName: string;
+    unit: string;
+    tier: "economy" | "protected";
+    orderCount: number;
+    quantity: number;
+    amountKopeks: number;
+  }>;
+  byTier: Array<{ tier: "economy" | "protected"; orderCount: number; amountKopeks: number }>;
+  orders: Array<{
+    orderId: string;
+    publicNumber: string;
+    lifecycleState: string;
+    createdAt: string;
+    invoiceNumber: string | null;
+    chargedKopeks: number;
+    netPaidKopeks: number;
+    refundedKopeks: number;
+    outstandingKopeks: number;
+    sharedWindowSavingsKopeks: number;
+  }>;
+};
+
+export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
+  const [data, setData] = useState<CustomerFinanceDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setData(await api<CustomerFinanceDto>("/customer/finance"));
+    } catch (err) {
+      setError(formatError(err));
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!data && !error) return <Loading error={null} />;
+  if (!data) return <Loading error={error} />;
+
+  const t = data.totals;
+
+  return (
+    <section className="panel" aria-labelledby="customer-money-heading">
+      <div className="panel-head">
+        <h3 id="customer-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <Scale size={18} aria-hidden="true" />
+          <span>Мои расходы</span>
+        </h3>
+        <ReloadButton onClick={() => void load()} busy={busy} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <Metric label="Всего заказов" value={String(t.orderCount)} />
+        <Metric label="Выставлено счетов" value={money(t.chargedKopeks)} />
+        <Metric label="Оплачено" value={money(t.netPaidKopeks)} tone="good" />
+        <Metric label="К оплате" value={money(t.outstandingKopeks)} tone={t.outstandingKopeks > 0 ? "warn" : "default"} />
+        <Metric label="Возвращено" value={money(t.refundedKopeks)} />
+        <Metric label="Средний чек" value={money(t.averageOrderKopeks)} />
+        <Metric
+          label="Экономия на групповом окне"
+          value={money(t.sharedWindowSavingsKopeks)}
+          tone={t.sharedWindowSavingsKopeks > 0 ? "good" : "default"}
+          hint="Забор и доставка в общем окне вместо внеплановых"
+        />
+      </div>
+
+      {data.byTier.length > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>По тарифам</h4>
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Тариф</th>
+                  <th>Заказов</th>
+                  <th>Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.byTier.map(row => (
+                  <tr key={row.tier}>
+                    <td>{TIER_LABELS[row.tier] ?? row.tier}</td>
+                    <td className="mono">{row.orderCount}</td>
+                    <td className="mono">{money(row.amountKopeks)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {data.byService.length > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>По услугам</h4>
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Услуга</th>
+                  <th>Тариф</th>
+                  <th>Заказов</th>
+                  <th>Объём</th>
+                  <th>Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.byService.map(row => (
+                  <tr key={`${row.serviceId}-${row.tier}`}>
+                    <td>{row.serviceName}</td>
+                    <td>{TIER_LABELS[row.tier] ?? row.tier}</td>
+                    <td className="mono">{row.orderCount}</td>
+                    <td className="mono">{row.unit === "gram" ? `${(row.quantity / 1000).toFixed(1)} кг` : `${row.quantity} шт`}</td>
+                    <td className="mono">{money(row.amountKopeks)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {data.orders.length > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>История платежей</h4>
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Заказ</th>
+                  <th>Дата</th>
+                  <th>Выставлено</th>
+                  <th>Оплачено</th>
+                  <th>К оплате</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.orders.map(order => (
+                  <tr key={order.orderId}>
+                    <td className="mono">{order.publicNumber}</td>
+                    <td className="muted">{dt(order.createdAt)}</td>
+                    <td className="mono">{order.chargedKopeks ? money(order.chargedKopeks) : "—"}</td>
+                    <td className="mono">{order.netPaidKopeks ? money(order.netPaidKopeks) : "—"}</td>
+                    <td className="mono">{order.outstandingKopeks ? money(order.outstandingKopeks) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+// Operations: what did we actually receive
+// ---------------------------------------------------------------------------------------
+
+type ItemMixDto = {
+  windowDays: number;
+  categories: Array<{ category: string; itemCount: number; orderCount: number; rawCategories: string[] }>;
+  garmentStatus: Array<{ status: string; count: number }>;
+  tierSplit: {
+    protected: { orderCount: number; itemCount: number };
+    economy: { orderCount: number; receivedGrams: number; quotedGrams: number };
+  };
+  weight: {
+    quotedGrams: number;
+    receivedGrams: number;
+    deltaGrams: number;
+    ordersWithOverReceipt: number;
+    ordersWithUnderReceipt: number;
+    ordersWithIntake: number;
+  };
+  daily: Array<{ date: string; itemCount: number; receivedGrams: number; orderCount: number }>;
+  topVariance: Array<{
+    orderId: string;
+    publicNumber: string;
+    quotedGrams: number;
+    receivedGrams: number;
+    deltaGrams: number;
+    itemCount: number;
+  }>;
+  note: string;
+};
+
+const KG = (grams: number) => `${(grams / 1000).toFixed(2)} кг`;
+
+export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
+  const [days, setDays] = useState(90);
+  const [data, setData] = useState<ItemMixDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setData(await api<ItemMixDto>(`/ops/item-mix?days=${days}`));
+    } catch (err) {
+      setError(formatError(err));
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, [days, notify]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!data && !error) return <Loading error={null} />;
+  if (!data) return <Loading error={error} />;
+
+  const w = data.weight;
+  const maxDaily = Math.max(1, ...data.daily.map(day => day.receivedGrams));
+
+  return (
+    <section className="panel" aria-labelledby="item-mix-heading">
+      <div className="panel-head">
+        <h3 id="item-mix-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <Shirt size={18} aria-hidden="true" />
+          <span>Что приняли: вещи и вес</span>
+        </h3>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <label className="muted" htmlFor="item-mix-window">Период</label>
+          <select
+            id="item-mix-window"
+            value={days}
+            onChange={event => setDays(Number(event.target.value))}
+            style={{ minBlockSize: 44 }}
+          >
+            <option value={30}>30 дней</option>
+            <option value={90}>90 дней</option>
+            <option value={180}>180 дней</option>
+            <option value={365}>365 дней</option>
+          </select>
+          <ReloadButton onClick={() => void load()} busy={busy} />
+        </div>
+      </div>
+
+      <div className="alert-banner" role="status" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
+        <span>{data.note}</span>
+      </div>
+
+      <h4 className="section-title" style={{ marginBlockStart: 16 }}>Вес: сколько сдали против сколько посчитали</h4>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <Metric label="Посчитано в заказе" value={KG(w.quotedGrams)} />
+        <Metric label="Принято на весах" value={KG(w.receivedGrams)} />
+        <Metric
+          label="Расхождение"
+          value={`${w.deltaGrams > 0 ? "+" : ""}${KG(w.deltaGrams)}`}
+          tone={w.deltaGrams > 0 ? "warn" : w.deltaGrams < 0 ? "default" : "default"}
+          hint="Расхождение не списывается автоматически — только по согласию клиента"
+        />
+        <Metric label="Заказов с перебором" value={String(w.ordersWithOverReceipt)} tone={w.ordersWithOverReceipt > 0 ? "warn" : "default"} />
+        <Metric label="Заказов с недобором" value={String(w.ordersWithUnderReceipt)} />
+        <Metric label="Заказов с приёмкой" value={String(w.ordersWithIntake)} />
+      </div>
+
+      {data.tierSplit.protected.itemCount > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Поштучно (тариф «Защищённый»)</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+            <Metric label="Заказов с описью" value={String(data.tierSplit.protected.orderCount)} />
+            <Metric label="Вещей по описи" value={String(data.tierSplit.protected.itemCount)} />
+          </div>
+          <div className="table-wrap" style={{ marginBlockStart: 12 }}>
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Категория</th>
+                  <th>Вещей</th>
+                  <th>Заказов</th>
+                  <th>Как записано клиентом</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.categories.map(row => (
+                  <tr key={row.category}>
+                    <td>{row.category}</td>
+                    <td className="mono">{row.itemCount}</td>
+                    <td className="mono">{row.orderCount}</td>
+                    <td className="muted">{row.rawCategories.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {data.garmentStatus.length > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Статус вещей</h4>
+          <div className="button-row">
+            {data.garmentStatus.map(row => (
+              <span className="pill" key={row.status}>
+                {GARMENT_STATUS_LABELS[row.status] ?? row.status}: <span className="mono">{row.count}</span>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      {data.daily.length > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Приёмка по дням</h4>
+          <div className="data-list">
+            {data.daily.slice(-14).map(day => (
+              <div className="data-row" key={day.date}>
+                <span className="mono">{day.date}</span>
+                <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                  <span className="muted">заказов: {day.orderCount}</span>
+                  <span className="muted">вещей: {day.itemCount}</span>
+                  <span className="muted">вес: {KG(day.receivedGrams)}</span>
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      display: "inline-block",
+                      width: 120,
+                      height: 8,
+                      borderRadius: 4,
+                      background: "var(--surface-muted, #EFF3F1)",
+                      position: "relative",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: "absolute",
+                        insetInlineStart: 0,
+                        top: 0,
+                        bottom: 0,
+                        width: `${Math.round((day.receivedGrams / maxDaily) * 100)}%`,
+                        background: "var(--accent, #0B6B58)",
+                      }}
+                    />
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {data.topVariance.length > 0 && (
+        <>
+          <h4 className="section-title" style={{ marginBlockStart: 18 }}>
+            <BarChart3 size={16} aria-hidden="true" style={{ verticalAlign: "-3px", marginInlineEnd: 6 }} />
+            Заказы с наибольшим расхождением веса
+          </h4>
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Заказ</th>
+                  <th>Посчитано</th>
+                  <th>Принято</th>
+                  <th>Расхождение</th>
+                  <th>Вещей</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.topVariance.map(row => (
+                  <tr key={row.orderId}>
+                    <td className="mono">{row.publicNumber}</td>
+                    <td className="mono">{KG(row.quotedGrams)}</td>
+                    <td className="mono">{KG(row.receivedGrams)}</td>
+                    <td className="mono" style={{ color: row.deltaGrams > 0 ? "var(--warning-ink, #7C4A03)" : "inherit" }}>
+                      {row.deltaGrams > 0 ? <ArrowUpRight size={13} aria-hidden="true" /> : <ArrowDownRight size={13} aria-hidden="true" />}
+                      {" "}{row.deltaGrams > 0 ? "+" : ""}{KG(row.deltaGrams)}
+                    </td>
+                    <td className="mono">{row.itemCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}

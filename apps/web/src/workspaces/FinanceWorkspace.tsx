@@ -17,6 +17,7 @@ import { api, DemoConfig, dt, money } from "../api";
 import { DocumentKind, DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
 import { formatError, PAYMENT_STATE_LABELS } from "../labels";
+import { FinanceMoneyPanel } from "./analytics-panels";
 
 type InvoiceItem = {
   id: string;
@@ -333,6 +334,9 @@ export function FinanceWorkspace({
           <span>{loading ? "Обновление..." : "Обновить данные"}</span>
         </button>
       </div>
+
+      {/* 0. Денежный контур: дебиторка, кредиторка, вклад */}
+      <FinanceMoneyPanel notify={notify} />
 
       {/* 1. Финансовая сверка и дрифт */}
       <section className="panel" aria-labelledby="finance-reconciliation-heading">

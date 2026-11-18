@@ -125,6 +125,22 @@ export const PAYMENT_STATE_LABELS: Record<string, string> = {
   chargeback_lost: "Чарджбэк проигран",
 };
 
+export const GARMENT_STATUS_LABELS: Record<string, string> = {
+  declared: "Заявлена",
+  accepted: "Принята",
+  inspected: "Осмотрена",
+  processing: "В обработке",
+  packed: "Упакована",
+  delivered: "Выдана клиенту",
+  returned_unprocessed: "Возвращена без обработки",
+  lost: "Утрачена",
+};
+
+export const TIER_LABELS: Record<string, string> = {
+  economy: "Эконом",
+  protected: "Защищённый",
+};
+
 export const ERROR_LABELS: Record<string, string> = {
   UNAUTHORIZED: "Требуется вход в систему",
   FORBIDDEN: "Недостаточно прав для этого действия",

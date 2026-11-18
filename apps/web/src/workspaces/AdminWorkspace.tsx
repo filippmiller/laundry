@@ -14,6 +14,7 @@ import {
 import { api, dt, money, newKey } from "../api";
 import { EVENT_LABELS, ROLE_LABELS, formatError } from "../labels";
 import { ModalDialog } from "../components/ModalDialog";
+import { FinanceMoneyPanel } from "./analytics-panels";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -342,6 +343,9 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
 
   return (
     <div className="workspace-stack">
+      {/* 0. Денежный контур: сколько нам должны и сколько должны мы */}
+      <FinanceMoneyPanel notify={notify} />
+
       {/* 1. Сводка и метрики платформы */}
       <section className="panel">
         <div className="panel-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>

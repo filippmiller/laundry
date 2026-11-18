@@ -5,22 +5,10 @@ import {
   organizations, partnerContracts, partners, priceRules, seals, serviceWindows, services,
   tariffPlans, tariffVersions, users,
 } from "../db/schema.js";
-import type { Role } from "../core/context.js";
 import { AppError } from "../core/errors.js";
-
+import { seedDemoTenantBook, DEMO_PERSONAS } from "./demo-book.js";
 const DEMO_NAME = "Демо-прачечная";
 const TERMS = "offer-demo-2026-11";
-
-const DEMO_PERSONAS: Array<{ role: Role; phone: string; displayName: string }> = [
-  { role: "customer", phone: "+79990000001", displayName: "Анна" },
-  { role: "courier", phone: "+79990000002", displayName: "Курьер Илья" },
-  { role: "dispatcher", phone: "+79990000003", displayName: "Диспетчер Мария" },
-  { role: "laundry_operator", phone: "+79990000004", displayName: "Прачечная" },
-  { role: "platform_finance", phone: "+79990000005", displayName: "Финансы" },
-  { role: "claims_approver", phone: "+79990000006", displayName: "Претензии" },
-  { role: "customer_support", phone: "+79990000007", displayName: "Поддержка Ольга" },
-  { role: "platform_admin", phone: "+79990000008", displayName: "Администратор" },
-];
 
 export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }) {
   if (
@@ -30,7 +18,7 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
     throw new AppError("UNAUTHORIZED", "DEMO_SEED_DISABLED");
   }
   const [existing] = await db.select().from(organizations).where(eq(organizations.name, DEMO_NAME)).limit(1);
-  if (existing) return demoSummary(db, existing.id);
+  if (existing) return seedBookForExistingTenant(db, existing.id);
 
   const [org] = await db.insert(organizations).values({ name: DEMO_NAME, legalName: "ООО «Демо»" }).returning();
   const [city] = await db.insert(cities).values({ organizationId: org.id, name: "Москва" }).returning();
@@ -85,7 +73,10 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
   await db.insert(partnerContracts).values({
     partnerId: partner.id, version: "v1",
     effectiveFrom: new Date("2026-01-01T00:00:00Z"), signed: true,
-    termsJson: { wholesalePerKgKopeks: 600 },
+    // Wholesale is 600 ₽ per kilogram — expressed in kopeks, like every other amount in the
+    // system. The demo retail tariff is 900–1300 ₽/kg, so a demo order shows a plausible margin
+    // instead of an absurd one.
+    termsJson: { wholesalePerKgKopeks: 60_000, wholesalePerPieceKopeks: 12_000 },
   });
   const [courierUser] = await db.select().from(users).where(eq(users.phone, "+79990000002")).limit(1);
   const [existingShift] = await db.select().from(courierShifts).where(and(
@@ -127,11 +118,16 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
     offSchedulePickupKopeks: 50_000, offScheduleDeliveryKopeks: 50_000,
     snapshotJson: { currency: "RUB", note: "Цены демонстрационные, не утверждённый тариф" },
   }).returning();
+  // Demo tariff. `unitPriceKopeks` is per 100 g (the `gram_up_to_100` rounding rule), so 9_000
+  // means 900 ₽ per kilogram. The figures are demonstrative, not an approved tariff, but they are
+  // deliberately in a plausible range: a partner's wholesale is 600 ₽/kg, so a demo price far
+  // below that would make every margin, receivable and take-rate figure in the product read as
+  // nonsense.
   await db.insert(priceRules).values([
-    { tariffVersionId: version.id, serviceId: wash.id, tier: "economy", unitPriceKopeks: 10, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
-    { tariffVersionId: version.id, serviceId: wash.id, tier: "protected", unitPriceKopeks: 18, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
-    { tariffVersionId: version.id, serviceId: delicate.id, tier: "economy", unitPriceKopeks: 16, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
-    { tariffVersionId: version.id, serviceId: delicate.id, tier: "protected", unitPriceKopeks: 24, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+    { tariffVersionId: version.id, serviceId: wash.id, tier: "economy", unitPriceKopeks: 9_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+    { tariffVersionId: version.id, serviceId: wash.id, tier: "protected", unitPriceKopeks: 13_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+    { tariffVersionId: version.id, serviceId: delicate.id, tier: "economy", unitPriceKopeks: 12_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
+    { tariffVersionId: version.id, serviceId: delicate.id, tier: "protected", unitPriceKopeks: 18_000, minQuantity: 1_000, roundingRule: "gram_up_to_100" },
     { tariffVersionId: version.id, serviceId: ironing.id, tier: "economy", unitPriceKopeks: 15_000, minQuantity: 1 },
     { tariffVersionId: version.id, serviceId: ironing.id, tier: "protected", unitPriceKopeks: 22_000, minQuantity: 1 },
     { tariffVersionId: version.id, serviceId: outerwear.id, tier: "economy", unitPriceKopeks: 95_000, minQuantity: 1 },
@@ -143,10 +139,40 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
     publishedAt: new Date(),
   });
 
-  return demoSummary(db, org.id, {
+  const summary = await demoSummary(db, org.id, {
     buildingId: building1.id, pickupWindowId: pickup1.id, deliveryWindowId: delivery1.id,
     tariffVersionId: version.id, serviceId: wash.id, ironingServiceId: ironing.id, termsVersion: TERMS,
   });
+  const book = await seedBookForTenant(db, summary);
+  return { ...summary, demoBook: book };
+}
+
+/**
+ * Seeds the demo book of business on top of the base tenant seed.
+ *
+ * The base seed creates the tenant, the catalogue and the personas but no orders, so every
+ * dashboard reads zero. The book is driven through the real domain services, so the rows it
+ * produces are indistinguishable in shape from real rows — and every scenario reuses a stable
+ * idempotency key, so a second run replays instead of duplicating.
+ */
+async function seedBookForTenant(db: Db, summary: Awaited<ReturnType<typeof demoSummary>>) {
+  const partnerId = summary.partners[0]?.id;
+  if (!partnerId) return { orders: 0, customers: 0, protectedOrders: 0, garments: 0, invoices: 0, captures: 0, refunds: 0, claims: 0 };
+  return seedDemoTenantBook(db, {
+    organizationId: summary.organizationId,
+    buildings: summary.buildings,
+    tariffVersionId: summary.tariffVersionId,
+    termsVersion: summary.termsVersion,
+    serviceId: summary.serviceId,
+    shiftId: summary.shiftId,
+    partnerId,
+  });
+}
+
+async function seedBookForExistingTenant(db: Db, organizationId: string) {
+  const summary = await demoSummary(db, organizationId);
+  const book = await seedBookForTenant(db, summary);
+  return { ...summary, demoBook: book };
 }
 
 async function demoSummary(

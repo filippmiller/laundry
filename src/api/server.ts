@@ -46,6 +46,9 @@ import {
 } from "../services/workspace.js";
 import { seedDemo } from "../services/seed.js";
 import { apiFinanceOverview } from "../services/api-overview.js";
+import { financeAnalytics } from "../services/finance-analytics.js";
+import { customerFinance } from "../services/customer-finance.js";
+import { itemMix } from "../services/item-mix.js";
 import { renderDocument, type DocumentKind } from "../services/documents.js";
 import { requestOtpChallenge, unlockPreviewAccess, verifyOtpChallenge } from "../services/otp.js";
 import { and, eq, sql } from "drizzle-orm";
@@ -1095,6 +1098,23 @@ export function buildApp(db: Db) {
     handler: async ctx => db.select().from(fiscalReceipts)
       .where(eq(fiscalReceipts.organizationId, ctx.principal.organizationId)).limit(50),
   });
+  add({
+    method: "GET", path: "/finance/analytics", summary: "Receivables, payables, margin and money at risk for this tenant", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    handler: ctx => financeAnalytics(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/customer/finance", summary: "My own spend, outstanding balance and refunds", tags: ["Customer"],
+    roles: ["customer"],
+    handler: ctx => customerFinance(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/ops/item-mix", summary: "Items received by category and weight variance against the quote", tags: ["Dispatch", "Partner"],
+    roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.partner],
+    query: z.object({ days: z.coerce.number().int().min(1).max(365).optional() }),
+    handler: ctx => itemMix(db, ctx.principal, { days: ctx.query.days as number | undefined }),
+  });
+
   add({
     method: "GET", path: "/orders", summary: "Scoped order list", tags: ["Customer", "Dispatch"],
     roles: ["customer", ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.support, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.partner],

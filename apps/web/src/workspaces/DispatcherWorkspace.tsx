@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { api, dt } from '../api';
-import { 
-  Truck, 
-  Package, 
-  AlertTriangle 
+import {
+  Truck,
+  Package,
+  AlertTriangle
 } from 'lucide-react';
+import { ItemMixPanel } from './analytics-panels';
 
 type Shift = { id: string; courierId: string; courierName: string; vehiclePlate: string; capacityWeightGrams: number; state: string; startsAt: string; endsAt: string };
 type Partner = { id: string; name: string; status: string };
@@ -31,68 +32,123 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
 
   useEffect(() => { fetchData(); }, []);
 
-  if (!data || !metrics) return <div>Загрузка...</div>;
+  if (!data || !metrics) return <div className="muted">Загрузка…</div>;
 
   return (
-    <div className="p-4 space-y-6">
-      <h1 className="text-2xl font-bold">Диспетчерский пульт</h1>
-      
-      {/* 1. Операционная сводка и ёмкость */}
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold">Операционная сводка и ёмкость</h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div style={{ display: "grid", gap: 18 }}>
+      <section className="panel">
+        <h2 className="panel-title" style={{ margin: 0 }}>Диспетчерский пульт</h2>
+
+        {/* 1. Операционная сводка и ёмкость */}
+        <h3 className="section-title" style={{ marginBlockStart: 16 }}>Операционная сводка и ёмкость</h3>
+        <div className="stat-grid">
           <StatCard title="Активные смены" value={metrics.activeShifts} icon={<Truck />} />
           <StatCard title="Очередь забора" value={data.pickupQueue.length} icon={<Package />} />
           <StatCard title="Готовы к доставке" value={data.deliveryQueue.length} icon={<Truck />} />
           <StatCard title="Возвраты без обработки" value={data.returnOrders.length} icon={<AlertTriangle />} />
-          <StatCard title="Расхождения ёмкости" value="—" icon={<AlertTriangle />} />
           <StatCard title="Инциденты приёмки" value={data.openDiscrepancies.length} icon={<AlertTriangle />} />
+          <StatCard title="Открытые претензии" value={metrics.openClaims} icon={<AlertTriangle />} />
         </div>
       </section>
 
-      {/* 2. Назначение курьера на забор и фабрики-прачечной */}
-      <section className="space-y-4 border-t pt-4">
-        <h2 className="text-xl font-semibold">Назначение курьера на забор и фабрики-прачечной</h2>
-        {/* Implementation omitted for brevity in thought, will add functionality if requested */}
+      {/* 2. Объём: что приняли и сколько весит */}
+      <ItemMixPanel notify={notify} />
+
+      {/* 3. Назначение курьера на забор и фабрики-прачечной */}
+      <section className="panel">
+        <h3 className="section-title">Назначение курьера на забор и фабрики-прачечной</h3>
+        {data.shifts.length === 0 ? (
+          <p className="muted">Активных смен нет.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Курьер</th>
+                  <th>Автомобиль</th>
+                  <th>Грузоподъёмность</th>
+                  <th>Смена</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.shifts.map(shift => (
+                  <tr key={shift.id}>
+                    <td>{shift.courierName}</td>
+                    <td className="mono">{shift.vehiclePlate}</td>
+                    <td className="mono">{Math.round(shift.capacityWeightGrams / 1000)} кг</td>
+                    <td className="muted">{dt(shift.startsAt)} — {dt(shift.endsAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
-      {/* 3. Оптимизация маршрута */}
-      <section className="space-y-4 border-t pt-4">
-        <h2 className="text-xl font-semibold">Оптимизация маршрута (VRPTW / VROOM)</h2>
-        <div className="space-y-2">
-           <label htmlFor="shift-select">Выберите смену</label>
-           <select id="shift-select" className="border p-2">
-             {data.shifts.map(s => <option key={s.id} value={s.id}>{s.courierName} ({s.vehiclePlate})</option>)}
-           </select>
+      {/* 4. Очереди забора и доставки */}
+      <section className="panel">
+        <h3 className="section-title">Очереди забора и доставки</h3>
+        <div className="grid-two">
+          <div>
+            <h4 className="section-title">Ожидают забора</h4>
+            {data.pickupQueue.length === 0 ? (
+              <p className="muted">Очередь пуста.</p>
+            ) : (
+              <div className="data-list">
+                {data.pickupQueue.map(order => (
+                  <div className="data-row" key={order.id}>
+                    <span className="mono">{order.publicNumber}</span>
+                    <span className="muted">{order.address}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <h4 className="section-title">Готовы к доставке</h4>
+            {data.deliveryQueue.length === 0 ? (
+              <p className="muted">Очередь пуста.</p>
+            ) : (
+              <div className="data-list">
+                {data.deliveryQueue.map(order => (
+                  <div className="data-row" key={order.id}>
+                    <span className="mono">{order.publicNumber}</span>
+                    <span className="muted">{order.address}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-      </section>
-
-      {/* 4. Назначение доставки и возвратов */}
-      <section className="space-y-4 border-t pt-4">
-        <h2 className="text-xl font-semibold">Назначение доставки и возвратов</h2>
       </section>
 
       {/* 5. Инциденты приёмки и расхождения */}
-      <section className="space-y-4 border-t pt-4">
-        <h2 className="text-xl font-semibold">Инциденты приёмки и расхождения</h2>
-        <table className="w-full border">
-            <thead>
+      <section className="panel">
+        <h3 className="section-title">Инциденты приёмки и расхождения</h3>
+        {data.openDiscrepancies.length === 0 ? (
+          <p className="muted">Открытых расхождений нет.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
                 <tr>
-                    <th className="border p-2">Номер</th>
-                    <th className="border p-2">Тип</th>
-                    <th className="border p-2">Дата</th>
+                  <th>Номер</th>
+                  <th>Тип</th>
+                  <th>Дата</th>
                 </tr>
-            </thead>
-            <tbody>
+              </thead>
+              <tbody>
                 {data.openDiscrepancies.map(d => (
-                    <tr key={d.id}>
-                        <td className="border p-2">{d.publicNumber}</td>
-                        <td className="border p-2">{d.kind}</td>
-                        <td className="border p-2">{dt(d.openedAt)}</td>
-                    </tr>
+                  <tr key={d.id}>
+                    <td className="mono">{d.publicNumber}</td>
+                    <td>{d.kind}</td>
+                    <td className="muted">{dt(d.openedAt)}</td>
+                  </tr>
                 ))}
-            </tbody>
-        </table>
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -100,12 +156,10 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
 
 function StatCard({ title, value, icon }: { title: string; value: string | number; icon: React.ReactNode }) {
   return (
-    <div className="border p-4 rounded shadow flex items-center gap-4">
-      <div className="text-blue-500">{icon}</div>
-      <div>
-        <div className="text-sm text-gray-500">{title}</div>
-        <div className="text-xl font-bold">{value}</div>
-      </div>
+    <div className="stat-card">
+      <span>{title}</span>
+      <strong>{value}</strong>
+      <span aria-hidden="true" style={{ color: "var(--ink-secondary)" }}>{icon}</span>
     </div>
   );
 }

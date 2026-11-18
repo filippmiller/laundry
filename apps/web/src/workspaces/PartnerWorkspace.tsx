@@ -20,6 +20,7 @@ import { api, dt, money } from "../api";
 import { DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
 import { formatError, ORDER_STATE_LABELS } from "../labels";
+import { ItemMixPanel } from "./analytics-panels";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -486,6 +487,9 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
 
   return (
     <div style={{ display: "grid", gap: 20 }}>
+      {/* What we actually received: items by category and weight against the quote */}
+      <ItemMixPanel notify={notify} />
+
       {/* Header */}
       <section className="panel" style={{ padding: 16 }}>
         <div

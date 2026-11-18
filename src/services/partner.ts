@@ -16,6 +16,17 @@ import { nextState, type OrderState } from "../domain/order-state.js";
 export type ActualBag = { containerCode: string; sealSerial: string; actualWeightGrams: number };
 
 /**
+ * Fallback wholesale rates when a contract does not carry them.
+ *
+ * 600 ₽ per kilogram is the figure the operating documents use for a partner's wholesale price.
+ * A piece-priced service has no agreed default: a flat rate for ironing and for dry cleaning
+ * would be wrong in both directions, so the fallback is zero and the line accrues nothing until
+ * the contract states a rate.
+ */
+const DEFAULT_WHOLESALE_PER_KG_KOPEKS = 60_000;
+const DEFAULT_WHOLESALE_PER_PIECE_KOPEKS = 0;
+
+/**
  * Partner actions are only valid for the partner that custody was assigned to. An unassigned
  * order is never implicitly claimed by the partner making the request.
  */
@@ -171,14 +182,27 @@ export async function receiveHandoff(
     const lines = await tx.select().from(orderLines).where(eq(orderLines.orderId, input.orderId));
     const [contract] = await tx.select().from(partnerContracts).where(eq(partnerContracts.partnerId, principal.partnerId!)).limit(1);
     if (contract) {
+      // The wholesale rate comes from the signed contract, not from a constant in the code.
+      // `wholesalePerKgKopeks` is the price of one kilogram in kopeks; a gram-priced line is
+      // billed per kilogram, a piece-priced line per piece. A line whose unit the contract does
+      // not price yet accrues nothing rather than a nonsensical amount.
+      const terms = (contract.termsJson ?? {}) as {
+        wholesalePerKgKopeks?: number;
+        wholesalePerPieceKopeks?: number;
+      };
+      const wholesalePerKgKopeks = terms.wholesalePerKgKopeks ?? DEFAULT_WHOLESALE_PER_KG_KOPEKS;
+      const wholesalePerPieceKopeks = terms.wholesalePerPieceKopeks ?? DEFAULT_WHOLESALE_PER_PIECE_KOPEKS;
       for (const line of lines) {
+        const amountKopeks = line.unit === "gram"
+          ? Math.ceil(line.quotedQuantity * wholesalePerKgKopeks / 1000)
+          : line.quotedQuantity * wholesalePerPieceKopeks;
         await tx.insert(partnerServiceAccruals).values({
           organizationId: principal.organizationId,
           partnerId: principal.partnerId!,
           orderLineId: line.id,
           contractId: contract.id,
           quantity: line.quotedQuantity,
-          amountKopeks: Math.ceil(line.quotedQuantity * 600 / 1000),
+          amountKopeks,
           status: "estimated",
         });
       }

@@ -14,10 +14,12 @@ import {
   Send,
   ShoppingBag,
   Trash2,
+  Wallet,
 } from "lucide-react";
 import { api, ApiError, dt, money } from "../api";
 import { ModalDialog } from "../components/ModalDialog";
 import { QrCodeBadge } from "../components/QrCodeBadge";
+import { CustomerMoneyPanel } from "./analytics-panels";
 import {
   CLAIM_STATE_LABELS,
   ERROR_LABELS,
@@ -239,6 +241,7 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: 
   const tabs = [
     { id: "new", label: "Новый заказ", icon: ShoppingBag },
     { id: "my", label: "Мои заказы", icon: ListOrdered },
+    { id: "spending", label: "Мои расходы", icon: Wallet },
     { id: "addresses", label: "Адресная книга", icon: MapPin },
     { id: "support", label: "Отзывы и поддержка", icon: MessageSquare },
   ];
@@ -277,6 +280,7 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: 
         >
           {tab.id === "new" && <NewOrderTab demo={demo} notify={notify} onOpenAddresses={() => setActiveTab("addresses")} />}
           {tab.id === "my" && <MyOrdersTab demo={demo} notify={notify} />}
+          {tab.id === "spending" && <CustomerMoneyPanel notify={notify} />}
           {tab.id === "addresses" && <AddressesTab demo={demo} notify={notify} />}
           {tab.id === "support" && <SupportTab notify={notify} />}
         </div>
