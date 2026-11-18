@@ -1,13 +1,12 @@
 # The isolated preview instance at laundry.filippmiller.com
 
 **Date:** 2026-11-18
-**Code-bearing commit:** `54cfa47e3d9783decb04112bf0b52012a5c0401d` (branch `docs/pr2-independent-audit-autonomous-wave`, PR #3, still Draft)
+**Code-bearing commit:** `ea7bcb2` — иконографическая сдача и приёмка (branch `docs/pr2-independent-audit-autonomous-wave`, PR #3, still Draft)
 **Host:** `hetzner-prod` (`vps-main`, `89.167.42.128`) — a shared production VPS that fronts ~20 other services
 **Status:** live and verified end to end from outside the host
 
 > The instance is rebuilt from the PR head on every deploy, so the running image always matches the
-> branch tip. Commits after the one named above are documentation and tracker export only — no
-> runtime code changed.
+> branch tip. Earlier deploys of this preview are described further down this file.
 
 ---
 
@@ -158,3 +157,40 @@ Host load average moved from **6.57 to 4.35** across the deployment window, avai
 - The preview profile is a **demo profile**, and the demo database contains synthetic rows only. It is not a pilot.
 - `/dev/seed` is reachable publicly while the preview profile is on. It is idempotent — the second call is a no-op — and it writes only to the seeded demo tenant, but it is a public write endpoint by design and should be disabled when the instance is retired.
 - The residual 170 MB copy of the previously exposed cluster at `%LOCALAPPDATA%\Temp\pgdrill` still needs manual removal. It contains synthetic data only, classified `TEST_ONLY` in bead `lnd-9l7`.
+
+---
+
+## Redeploy: the icon-based handover (commit `ea7bcb2`, 2026-11-18)
+
+The preview was rebuilt on `ea7bcb2` with `scripts/deploy-preview.sh` (same `.env`, same database
+volume, same stack). The API answered `/health/ready` after 2 attempts.
+
+What changed in the running product:
+
+- **The handover interface exists.** The courier's route sheet now lists stops (it never did before —
+  the web expected `{stops:[…]}` while the endpoint answers with an array), and the acceptance form
+  sends the payload the API actually expects (`bags` / `items`, not `containerCode` / `garments`).
+- **The customer's declaration rides in the quote.** Scenario `s15` of the demo book creates a
+  protected order whose customer declared 3 t-shirts, 1 pair of socks and 1 pair of trousers; the
+  stop waits on the courier's route with the acceptance still open, so the reconciliation can be
+  seen live: «Клиент заявил» against «фактически приняли».
+- **The demo book grew from 14 to 15 orders** without duplicating anything: the previous fourteen
+  scenarios replayed on their idempotency keys, and the new one has its own key.
+
+Verified from outside the host, against the public URL:
+
+```
+npm run smoke:live   -> 18/18 PASS, LIVE_PREVIEW_OK
+POST /api/v1/dev/seed -> 200, demoBook { orders: 15, customers: 4, protectedOrders: 4,
+                                         garments: 14, invoices: 12, captures: 11,
+                                         refunds: 1, claims: 1 }
+```
+
+Repository gates on the deployed commit: `lint` clean, `typecheck` clean, `npm test` **232 passed /
+32 files**, `web:build` pass, `guard:hygiene` OK (266 files), `db:generate` — no schema changes.
+
+The acceptance was also walked through in a real browser against the public URL: the icon grid, the
+subtype overlay, the quantity slider, the wheel gesture and the live reconciliation all behave as
+described, and one acceptance was recorded end to end (`LA-20261118-944751C6` locally: three garments,
+canonical category `футболка`, `subtypeId` recorded in `condition_json`).
+
