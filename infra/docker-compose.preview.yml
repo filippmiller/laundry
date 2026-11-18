@@ -79,6 +79,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # The image's healthcheck probes an HTTP endpoint. This container runs migrations and
+    # exits, so it can never pass one; leaving it on marks a completed job unhealthy.
+    healthcheck:
+      disable: true
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
@@ -123,6 +127,10 @@ services:
     <<: *app
     command: npm run worker
     depends_on: *app-depends
+    # The worker is a poller and serves no HTTP endpoint, so the image's HTTP healthcheck
+    # can never pass. Disable it rather than leave a permanently unhealthy container.
+    healthcheck:
+      disable: true
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
