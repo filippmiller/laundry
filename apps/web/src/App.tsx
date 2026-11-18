@@ -23,7 +23,18 @@ function App() {
       .catch(() => undefined);
     api<Me>("/me").then(setMe).catch(() => undefined);
   }, []);
-  
+
+  // Only the identities the demo seed created can sign in. Offering the full role list would
+  // let a visitor pick a role their identity does not hold and be refused for it.
+  const demoIdentities = demo?.demoUsers ?? [];
+  const phoneForRole = (value: string) =>
+    demoIdentities.find(user => user.role === value)?.phone ?? "";
+
+  function pickRole(value: string) {
+    setRole(value);
+    setPhone(phoneForRole(value));
+  }
+
   async function login() {
     if (!demo) return setNotice({ kind: "error", text: "Демо-данные ещё не готовы" });
     try {
@@ -48,12 +59,17 @@ function App() {
       {!me ? (
         <main className="auth-card">
           <h1>Вход в демо</h1>
-          <p className="muted">Это локальная среда. В продакшене вход по телефону заменяется реальным провайдером аутентификации.</p>
+          <p className="muted">
+            Демонстрационная среда: данные синтетические, оплата тестовая, юридические гейты не пройдены.
+            В продакшене вход по телефону заменяется реальным провайдером аутентификации.
+          </p>
           <label htmlFor="phone-input">Телефон</label>
           <input id="phone-input" value={phone} onChange={event => setPhone(event.target.value)} placeholder="+79990000001" />
           <label htmlFor="role-input">Роль</label>
-          <select id="role-input" value={role} onChange={event => setRole(event.target.value)}>
-            {Object.entries(ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          <select id="role-input" value={role} onChange={event => pickRole(event.target.value)}>
+            {demoIdentities.map(user => (
+              <option key={user.role} value={user.role}>{ROLE_LABELS[user.role] ?? user.role}</option>
+            ))}
           </select>
           <button onClick={login}>Войти</button>
         </main>
