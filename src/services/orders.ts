@@ -1,12 +1,12 @@
 import { randomBytes, randomInt } from "node:crypto";
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  containerAssignments, containers, customerAddresses, documentVersions, garments,
-  intakeManifestLines, intakeManifests, orderAdjustments, orderLines, orders, quotes,
-  routeStops, seals, serviceWindows, slotReservations,
+  containerAssignments, containers, customerAddresses, documentVersions, evidenceAssets,
+  garmentEvidence, garments, intakeManifestLines, intakeManifests, orderAdjustments, orderLines,
+  orders, quotes, routeStops, seals, serviceWindows, slotReservations,
 } from "../db/schema.js";
-import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idempotency.js";
@@ -17,6 +17,7 @@ import type { DeclaredItem } from "../../shared/garment-taxonomy.js";
 
 type QuoteSnapshot = {
   addressId?: string;
+  termsVersion?: string;
   lines: Array<{ kind: string; serviceId?: string; tier?: "economy" | "protected"; quantity: number; unit: string; amountKopeks: number }>;
   declaredItems?: DeclaredItem[];
 };
@@ -43,6 +44,12 @@ export async function createOrder(
     )).limit(1);
     if (!document?.publishedAt) throw new AppError("VALIDATION_ERROR", "TERMS_NOT_PUBLISHED");
     const snapshot = quote.snapshotJson as QuoteSnapshot;
+    if (!snapshot.termsVersion || snapshot.termsVersion !== input.termsVersion) {
+      throw new AppError("CONFLICT_VERSION", "TERMS_VERSION_MISMATCH", {
+        expected: snapshot.termsVersion ?? null,
+        received: input.termsVersion,
+      });
+    }
     const serviceLines = snapshot.lines.filter(line => line.kind === "service");
     if (!serviceLines.length) throw new AppError("VALIDATION_ERROR", "NO_SERVICE_LINES");
 
@@ -122,10 +129,12 @@ export async function scheduleOrder(
     // Each leg must be the order customer's own held capacity for the order's building and kind.
     await confirmLeg(tx as Db, principal, order, address.buildingId, input.pickupReservationId, "pickup", input.key, input.now);
     await confirmLeg(tx as Db, principal, order, address.buildingId, input.deliveryReservationId, "delivery", input.key, input.now);
-    await tx.update(orders).set({
+    const updated = await tx.update(orders).set({
       lifecycleState: "scheduled",
       version: sql`${orders.version} + 1`,
-    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ id: orders.id });
+    if (!updated.length) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.scheduled",
       payload: { pickupReservationId: input.pickupReservationId, deliveryReservationId: input.deliveryReservationId },
@@ -213,9 +222,11 @@ export async function cancelOrder(
     // nextState enforces both the lifecycle edge and the role allowed to take it.
     nextState(order.lifecycleState as OrderState, "cancel", principal);
     const released = await releaseOrderReservations(tx, principal, order.id, input.reason, input.key);
-    await tx.update(orders).set({
+    const updated = await tx.update(orders).set({
       lifecycleState: "cancelled", version: sql`${orders.version} + 1`,
-    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ id: orders.id });
+    if (!updated.length) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.cancelled",
       payload: { from: order.lifecycleState, releasedReservations: released }, reason: input.reason,
@@ -243,8 +254,10 @@ export async function rescheduleOrder(
     await releaseOrderReservations(tx, principal, order.id, "reschedule", `reschedule-${input.key}`);
     await confirmLeg(tx, principal, order, buildingId, input.pickupReservationId, "pickup", input.key, input.now);
     await confirmLeg(tx, principal, order, buildingId, input.deliveryReservationId, "delivery", input.key, input.now);
-    await tx.update(orders).set({ version: sql`${orders.version} + 1` })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const updated = await tx.update(orders).set({ version: sql`${orders.version} + 1` })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ id: orders.id });
+    if (!updated.length) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.rescheduled",
       payload: { pickupReservationId: input.pickupReservationId, deliveryReservationId: input.deliveryReservationId },
@@ -276,16 +289,33 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
   );
   const isOwnerCustomer = hasRole(principal, "customer") && order.customerId === principal.userId;
 
+  const isAssignedPartner = hasRole(principal, ...ROLE_GROUPS.partner)
+    && Boolean(principal.partnerId)
+    && order.assignedPartnerId === principal.partnerId;
+
   if (!staff && !isOwnerCustomer) {
     if (hasRole(principal, ...ROLE_GROUPS.partner)) {
-      if (!principal.partnerId || order.assignedPartnerId !== principal.partnerId) throw errors.notFound("order");
+      authorize(principal, {
+        resource: "order",
+        action: "read",
+        organizationId: order.organizationId,
+        partnerId: order.assignedPartnerId,
+        resourceId: order.id,
+      });
     } else if (hasRole(principal, "courier")) {
       const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
         eq(routeStops.organizationId, principal.organizationId),
         eq(routeStops.orderId, order.id),
         eq(routeStops.assignedCourierId, principal.userId),
+        inArray(routeStops.state, ["pending", "en_route", "arrived"]),
       )).limit(1);
-      if (!stop) throw errors.notFound("order");
+      authorize(principal, {
+        resource: "order",
+        action: "read",
+        organizationId: order.organizationId,
+        allow: Boolean(stop),
+        resourceId: order.id,
+      });
     } else {
       throw errors.forbidden("no order view for this role");
     }
@@ -412,6 +442,38 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     };
   });
 
+  const canSeeRetailFinancials = isOwnerCustomer || staff;
+  const canSeeEvidenceLinks = isOwnerCustomer || staff || isAssignedPartner;
+
+  const garmentIds = garmentRows.map(g => g.id);
+  const evidenceByGarment = new Map<string, string[]>();
+  if (canSeeEvidenceLinks && garmentIds.length > 0) {
+    const linkedEvidence = await db.select({
+      garmentId: garmentEvidence.garmentId,
+      evidenceAssetId: garmentEvidence.evidenceAssetId,
+    }).from(garmentEvidence)
+      .innerJoin(evidenceAssets, eq(evidenceAssets.id, garmentEvidence.evidenceAssetId))
+      .where(and(
+        eq(garmentEvidence.organizationId, principal.organizationId),
+        inArray(garmentEvidence.garmentId, garmentIds),
+        ne(evidenceAssets.status, "expired"),
+      ));
+    for (const link of linkedEvidence) {
+      const list = evidenceByGarment.get(link.garmentId) ?? [];
+      list.push(link.evidenceAssetId);
+      evidenceByGarment.set(link.garmentId, list);
+    }
+  }
+
+  const garmentsView = garmentRows.map(garment => {
+    const { declaredValueKopeks, ...rest } = garment;
+    return {
+      ...rest,
+      ...(canSeeRetailFinancials ? { declaredValueKopeks } : {}),
+      ...(canSeeEvidenceLinks ? { evidenceAssetIds: evidenceByGarment.get(garment.id) ?? [] } : {}),
+    };
+  });
+
   return {
     id: order.id,
     publicNumber: order.publicNumber,
@@ -421,8 +483,8 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     assignedPartnerId: order.assignedPartnerId,
     termsVersion: order.termsVersion,
     returnReason: order.returnReason ?? null,
-    totalKopeks,
-    garments: garmentRows,
+    ...(canSeeRetailFinancials ? { totalKopeks } : {}),
+    garments: garmentsView,
     declaredItems,
     containers: containersView,
     adjustments,

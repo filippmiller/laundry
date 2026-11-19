@@ -58,11 +58,31 @@ export const ORDER_TRANSITIONS: Record<OrderState, Record<string, Transition>> =
   cancelled: {},
 };
 
-export function nextState(from: OrderState, command: string, principal?: Principal): OrderState {
+export function nextState(from: OrderState, command: string, principal: Principal): OrderState {
   const transition = ORDER_TRANSITIONS[from]?.[command];
   if (!transition) throw errors.transition(from, command);
-  if (principal && !hasRole(principal, ...transition.roles)) {
+  if (!principal || !Array.isArray(principal.roles) || principal.roles.length === 0) {
+    throw errors.forbidden(`command ${command} requires an authenticated principal`);
+  }
+  if (!hasRole(principal, ...transition.roles)) {
     throw errors.forbidden(`command ${command} requires ${transition.roles.join(" or ")}`);
+  }
+  return transition.to;
+}
+
+/**
+ * Explicit system-level transition for documented server-side escalations (e.g. automatic QC
+ * rewash or customer-declined unprocessed return) after caller authorization has been verified.
+ */
+export function nextStateAsSystem(
+  from: OrderState,
+  command: string,
+  context: { systemActor: string; reason: string },
+): OrderState {
+  const transition = ORDER_TRANSITIONS[from]?.[command];
+  if (!transition) throw errors.transition(from, command);
+  if (!context?.systemActor?.trim() || !context?.reason?.trim()) {
+    throw errors.forbidden(`system transition ${command} requires systemActor and reason`);
   }
   return transition.to;
 }

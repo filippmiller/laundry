@@ -98,7 +98,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("The handover declaration", () =
       unitPriceKopeks: 15,
       minQuantity: 1,
       roundingRule: "gram_up_to_100",
-    });
+    }).onConflictDoNothing();
     await db.insert(customerAddresses).values({
       organizationId: tenant.organizationId,
       customerId: tenant.userId,
@@ -266,7 +266,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Courier acceptance", () => {
   });
 
   it("takes the category from the taxonomy, not from the request", async () => {
-    const f = await seedFullOrder(db, { state: "pickup_assigned" });
+    const f = await seedFullOrder(db, { state: "pickup_assigned", tier: "protected" });
     const seal = await seedSeal(db, f.organizationId);
     const containerCode = `BAG-${rid().slice(0, 8)}`;
     await recordIntake(db, f.courier, {
@@ -293,7 +293,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Courier acceptance", () => {
   });
 
   it("refuses an acceptance that names a subtype the taxonomy does not know", async () => {
-    const f = await seedFullOrder(db, { state: "pickup_assigned" });
+    const f = await seedFullOrder(db, { state: "pickup_assigned", tier: "protected" });
     const seal = await seedSeal(db, f.organizationId);
     await expect(recordIntake(db, f.courier, {
       orderId: f.orderId,

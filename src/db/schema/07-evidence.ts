@@ -1,7 +1,7 @@
 import { pgTable, uuid, text, integer, timestamp, jsonb, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { organizations, users } from "./01-identity.js";
 import { orders } from "./04-orders.js";
-import { containers } from "./06-items.js";
+import { containers, garments } from "./06-items.js";
 import { scanSyncState, evidenceState, disputeState } from "./enums.js";
 
 export const scanEvents = pgTable("scan_events", {
@@ -87,3 +87,14 @@ export const evidenceLegalHolds = pgTable("evidence_legal_holds", {
   releasedAt: timestamp("released_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [index("evidence_holds_asset_idx").on(t.assetId, t.releasedAt)]);
+
+export const garmentEvidence = pgTable("garment_evidence", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id),
+  garmentId: uuid("garment_id").notNull().references(() => garments.id, { onDelete: "cascade" }),
+  evidenceAssetId: uuid("evidence_asset_id").notNull().references(() => evidenceAssets.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [
+  uniqueIndex("garment_evidence_garment_asset_unique").on(t.garmentId, t.evidenceAssetId),
+  index("garment_evidence_org_garment_idx").on(t.organizationId, t.garmentId),
+]);

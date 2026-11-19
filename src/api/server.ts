@@ -42,8 +42,8 @@ import {
 } from "../services/customer.js";
 import { completeShift, currentShift, openShift } from "../services/courier-shift.js";
 import {
-  decideCompensation, listEvidence, listMySessions, opsMetrics, proposeCompensation,
-  registerEvidence, revokeOwnSession, searchOrders,
+  decideCompensation, deleteEvidence, listEvidence, listMySessions, opsMetrics, proposeCompensation,
+  readEvidence, registerEvidence, revokeOwnSession, searchOrders,
 } from "../services/workspace.js";
 import { seedDemo } from "../services/seed.js";
 import { apiFinanceOverview } from "../services/api-overview.js";
@@ -938,6 +938,19 @@ export function buildApp(db: Db) {
     method: "GET", path: "/evidence/:ownerType/:ownerId", summary: "Evidence registered for an order or claim", tags: ["Customer"],
     params: z.object({ ownerType: z.enum(["order", "claim", "custody_event"]), ownerId: z.uuid() }),
     handler: ctx => listEvidence(db, ctx.principal, ctx.params.ownerType, ctx.params.ownerId),
+  });
+  add({
+    method: "GET", path: "/evidence/:id", summary: "Read single evidence metadata by id", tags: ["Customer"],
+    params: idSchema,
+    handler: ctx => readEvidence(db, ctx.principal, ctx.params.id),
+  });
+  add({
+    method: "DELETE", path: "/evidence/:id", summary: "Delete evidence asset unless under legal hold", tags: ["Customer", "Support"],
+    params: idSchema,
+    handler: ctx => deleteEvidence(db, ctx.principal, {
+      evidenceId: ctx.params.id,
+      key: idempotencyKey(ctx),
+    }),
   });
   add({
     method: "POST", path: "/claims/:id/compensations", summary: "Propose a compensation on a decided claim", tags: ["Support"],

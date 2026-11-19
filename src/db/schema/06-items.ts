@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, integer, bigint, timestamp, jsonb, boolean, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, bigint, timestamp, jsonb, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { organizations, users } from "./01-identity.js";
 import { orders, orderLines } from "./04-orders.js";
 import { manifestMode, sealState } from "./enums.js";
@@ -22,10 +22,13 @@ export const garments = pgTable("garments", {
 export const containers = pgTable("containers", {
   id: uuid("id").primaryKey().defaultRandom(),
   organizationId: uuid("organization_id").notNull().references(() => organizations.id),
-  code: text("code").notNull().unique(),
+  code: text("code").notNull(),
   kind: text("kind").notNull().default("bag"),
   active: boolean("active").notNull().default(true),
-}, t => [index("containers_org_idx").on(t.organizationId)]);
+}, t => [
+  uniqueIndex("containers_org_code_unique").on(t.organizationId, t.code),
+  index("containers_org_idx").on(t.organizationId),
+]);
 
 export const seals = pgTable("seals", {
   id: uuid("id").primaryKey().defaultRandom(),

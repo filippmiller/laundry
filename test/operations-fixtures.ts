@@ -13,7 +13,10 @@ import { holdSlot } from "../src/domain/slot-reservation.js";
 import type { Principal } from "../src/core/context.js";
 
 export const COURIER_DEVICE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pickup_assigned" } = {}) {
+export async function seedFullOrder(
+  db: Db,
+  options: { state?: "scheduled" | "pickup_assigned"; tier?: "economy" | "protected" } = {},
+) {
   const seed = await seedWindow(db, { capacity: 3 });
   const deliveryWindowId = await seedDeliveryWindow(db, seed);
   const catalog = await seedCatalog(db, seed.organizationId);
@@ -36,7 +39,7 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
     deliveryWindowId,
     tariffVersionId: catalog.tariffVersionId,
     key: `quote-${Math.random().toString(36).slice(2)}`,
-    lines: [{ serviceId: catalog.serviceId, tier: "economy", quantity: 1_000, unit: "gram" }],
+    lines: [{ serviceId: catalog.serviceId, tier: options.tier ?? "economy", quantity: 1_000, unit: "gram" }],
   });
   const order = await createOrder(db, principal, {
     quoteId: quote.id,

@@ -1,8 +1,9 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets, garments,
-  intakeManifestLines, intakeManifests, notifications, routeStops, seals, scanEvents, orders,
+  containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets,
+  garmentEvidence, garments, intakeManifestLines, intakeManifests, notifications, orders, quotes,
+  routeStops, scanEvents, seals,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -75,8 +76,33 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.orderId, input.orderId),
       eq(routeStops.assignedCourierId, principal.userId),
+      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
     )).limit(1);
     if (!stop) throw errors.forbidden("courier is not assigned to this stop");
+
+    const [quote] = await tx.select({ snapshotJson: quotes.snapshotJson }).from(quotes).where(and(
+      eq(quotes.id, order.quoteId),
+      eq(quotes.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!quote) throw errors.notFound("quote");
+    const quoteSnapshot = (quote.snapshotJson ?? {}) as {
+      lines?: Array<{ kind?: string; tier?: "economy" | "protected" }>;
+    };
+    const quotedTiers = new Set(
+      (quoteSnapshot.lines ?? [])
+        .filter(line => line.kind === "service" && line.tier)
+        .map(line => line.tier!),
+    );
+    if (!quotedTiers.has("protected") && (
+      input.mode === "protected_items"
+      || input.mode === "mixed"
+      || (input.items?.length ?? 0) > 0
+    )) {
+      throw new AppError("VALIDATION_ERROR", "INTAKE_MODE_EXCEEDS_QUOTED_TIER", {
+        mode: input.mode,
+        quotedTiers: [...quotedTiers],
+      });
+    }
     if (input.handoffCode) {
       if (!order.handoffCode || input.handoffCode.trim() !== order.handoffCode) {
         throw new AppError("FORBIDDEN", "HANDOFF_PIN_MISMATCH");
@@ -111,14 +137,13 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
     }).returning();
 
     for (const bag of input.bags) {
-      // `containers.code` is unique: a bag that comes back into circulation would violate that
-      // constraint on a fresh insert and surface as a 500. The container is the physical bag and
-      // outlives the order, so an existing one is reused.
+      // `containers` is unique per `(organization_id, code)`: a physical bag outlives the order
+      // within its tenant, so an existing one in the same organization is reused.
       let [container] = await tx.select().from(containers)
-        .where(eq(containers.code, bag.containerCode)).limit(1);
-      if (container && container.organizationId !== principal.organizationId) {
-        throw new AppError("CUSTODY_CONFLICT", "CONTAINER_CODE_IN_USE", { code: bag.containerCode });
-      }
+        .where(and(
+          eq(containers.organizationId, principal.organizationId),
+          eq(containers.code, bag.containerCode),
+        )).limit(1);
       if (!container) {
         [container] = await tx.insert(containers).values({
           organizationId: principal.organizationId, code: bag.containerCode,
@@ -184,6 +209,11 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
           eq(evidenceAssets.status, "verified"),
         )).limit(1);
         if (!asset) throw errors.notFound("evidence asset");
+        await tx.insert(garmentEvidence).values({
+          organizationId: principal.organizationId,
+          garmentId: garment.id,
+          evidenceAssetId: asset.id,
+        }).onConflictDoNothing();
       }
       await tx.insert(intakeManifestLines).values({
         manifestId: manifest.id,
@@ -307,6 +337,7 @@ async function scanRejection(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.orderId, event.scannedId),
       eq(routeStops.assignedCourierId, principal.userId),
+      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
     )).limit(1);
     return stop ? undefined : "ORDER_NOT_ASSIGNED";
   }
@@ -316,6 +347,7 @@ async function scanRejection(
       .innerJoin(containers, eq(containers.id, containerAssignments.containerId))
       .where(and(
         eq(containerAssignments.organizationId, principal.organizationId),
+        eq(containers.organizationId, principal.organizationId),
         eq(containers.code, event.scannedId),
       )).limit(1);
     if (!row) return "CONTAINER_NOT_ASSIGNED";
@@ -323,6 +355,7 @@ async function scanRejection(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.orderId, row.orderId),
       eq(routeStops.assignedCourierId, principal.userId),
+      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
     )).limit(1);
     return stop ? undefined : "CONTAINER_NOT_ASSIGNED";
   }
@@ -339,6 +372,7 @@ async function scanRejection(
     eq(routeStops.organizationId, principal.organizationId),
     eq(routeStops.orderId, sealRow.orderId),
     eq(routeStops.assignedCourierId, principal.userId),
+    inArray(routeStops.state, ["pending", "en_route", "arrived"]),
   )).limit(1);
   return sealStop ? undefined : "SEAL_NOT_ASSIGNED";
 }

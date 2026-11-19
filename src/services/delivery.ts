@@ -28,6 +28,17 @@ export async function assignPickup(
       eq(courierShifts.id, input.shiftId), eq(courierShifts.organizationId, principal.organizationId),
     )).limit(1);
     if (!shift || shift.state !== "active") throw errors.notFound("shift");
+    const isReassign = order.lifecycleState === "pickup_assigned";
+    const to: OrderState = isReassign
+      ? "pickup_assigned"
+      : nextState(order.lifecycleState as "scheduled", "assign_pickup", principal);
+    // Supersede any active pickup stop so a reassigned courier immediately loses access.
+    await tx.update(routeStops).set({ state: "rescheduled" }).where(and(
+      eq(routeStops.organizationId, principal.organizationId),
+      eq(routeStops.orderId, order.id),
+      eq(routeStops.kind, "pickup"),
+      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
+    ));
     const [route] = await tx.insert(routes).values({
       organizationId: principal.organizationId,
       shiftId: shift.id,
@@ -43,7 +54,6 @@ export async function assignPickup(
       sequence: 1,
       assignedCourierId: shift.courierId,
     }).returning();
-    const to = nextState(order.lifecycleState as "scheduled", "assign_pickup", principal);
     const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
       .returning({ version: orders.version });
@@ -119,12 +129,22 @@ export async function assignDelivery(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
-    if (order.lifecycleState !== "ready") throw errors.transition(order.lifecycleState, "dispatch");
+    const isReassign = order.lifecycleState === "out_for_delivery";
+    if (!isReassign && order.lifecycleState !== "ready") {
+      throw errors.transition(order.lifecycleState, "dispatch");
+    }
     const [shift] = await tx.select().from(courierShifts).where(and(
       eq(courierShifts.id, input.shiftId), eq(courierShifts.organizationId, principal.organizationId),
     )).limit(1);
     if (!shift || shift.state !== "active") throw errors.notFound("shift");
 
+    // Supersede any active delivery stop so a reassigned courier immediately loses access.
+    await tx.update(routeStops).set({ state: "rescheduled" }).where(and(
+      eq(routeStops.organizationId, principal.organizationId),
+      eq(routeStops.orderId, order.id),
+      eq(routeStops.kind, "delivery"),
+      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
+    ));
     const [route] = await tx.insert(routes).values({
       organizationId: principal.organizationId,
       shiftId: shift.id,
@@ -143,7 +163,9 @@ export async function assignDelivery(
       windowStart: input.windowStart,
       windowEnd: input.windowEnd,
     }).returning();
-    const to = nextState("ready", "dispatch", principal);
+    const to: OrderState = isReassign
+      ? "out_for_delivery"
+      : nextState("ready", "dispatch", principal);
     const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
       .returning({ version: orders.version });

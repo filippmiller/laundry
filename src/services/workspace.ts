@@ -2,9 +2,9 @@ import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   claims, compensations, courierShifts, custodyEvents, evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
-  orders, outboxEvents, sessions, supportThreads,
+  garmentEvidence, garments, orders, outboxEvents, sessions, supportThreads,
 } from "../db/schema.js";
-import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -183,9 +183,19 @@ async function authorizeEvidenceOwner(
   principal: Principal,
   asset: { id: string; organizationId: string; ownerType: string; ownerId: string },
 ) {
-  if (asset.organizationId !== principal.organizationId) throw errors.notFound("evidence");
+  authorize(principal, {
+    resource: "evidence",
+    action: "read",
+    organizationId: asset.organizationId,
+    resourceId: asset.id,
+  });
   const entitled = await resolveEvidenceOwnership(db, principal, asset.ownerType, asset.ownerId);
-  if (!entitled) throw errors.notFound("evidence");
+  authorize(principal, {
+    resource: "evidence",
+    action: "read",
+    allow: entitled,
+    resourceId: asset.id,
+  });
 }
 
 /**
@@ -252,6 +262,53 @@ export async function listEvidence(db: Db, principal: Principal, ownerType: stri
   if (rows.length) {
     await db.insert(evidenceAccessEvents).values(
       rows.map(row => ({ assetId: row.id, actorId: principal.userId, purpose: "owner_listing" })),
+    );
+  }
+  return rows;
+}
+
+/**
+ * Lists non-expired evidence assets linked to a specific garment via `garment_evidence`,
+ * enforcing the owning order's ABAC rules and never exposing `objectKey`.
+ */
+export async function listGarmentEvidence(db: Db, principal: Principal, garmentId: string) {
+  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  const [garment] = await db.select({
+    id: garments.id,
+    organizationId: garments.organizationId,
+    orderId: garments.orderId,
+  }).from(garments).where(and(
+    eq(garments.id, garmentId),
+    eq(garments.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!garment) throw errors.notFound("garment");
+  const entitled = entitledToOrder(principal, await loadScopedOrder(db, principal, garment.orderId));
+  authorize(principal, {
+    resource: "evidence",
+    action: "list",
+    organizationId: garment.organizationId,
+    allow: entitled,
+    resourceId: garment.id,
+  });
+  const rows = await db.select({
+    id: evidenceAssets.id,
+    sha256: evidenceAssets.sha256,
+    purpose: evidenceAssets.purpose,
+    mimeType: evidenceAssets.mimeType,
+    sizeBytes: evidenceAssets.sizeBytes,
+    status: evidenceAssets.status,
+    createdAt: evidenceAssets.capturedAt,
+  }).from(garmentEvidence)
+    .innerJoin(evidenceAssets, eq(evidenceAssets.id, garmentEvidence.evidenceAssetId))
+    .where(and(
+      eq(garmentEvidence.organizationId, principal.organizationId),
+      eq(garmentEvidence.garmentId, garment.id),
+      ne(evidenceAssets.status, TOMBSTONE_STATUS),
+    ))
+    .orderBy(desc(evidenceAssets.capturedAt));
+  if (rows.length) {
+    await db.insert(evidenceAccessEvents).values(
+      rows.map(row => ({ assetId: row.id, actorId: principal.userId, purpose: "garment_listing" })),
     );
   }
   return rows;

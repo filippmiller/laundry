@@ -1,6 +1,6 @@
 import { and, eq, gt, gte, isNull, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { buildings, serviceWindows, slotReservations } from "../db/schema.js";
+import { buildings, orders, serviceWindows, slotReservations } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
@@ -108,7 +108,7 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
       version: sql`${serviceWindows.version} + 1`,
     }).where(and(
       eq(serviceWindows.id, input.windowId),
-      sql`${serviceWindows.capacityOrders} - ${serviceWindows.reservedOrders} >= ${units}`,
+      sql`${serviceWindows.capacityOrders} - ${serviceWindows.safetyBufferOrders} - ${serviceWindows.reservedOrders} >= ${units}`,
     )).returning({ id: serviceWindows.id });
     if (!changed.length) throw new AppError("CAPACITY_UNAVAILABLE");
 
@@ -181,7 +181,7 @@ async function terminate(
   const now = input.now ?? new Date();
   assertRole(input.principal, ...(target === "expired"
     ? ROLE_GROUPS.worker
-    : [...ROLE_GROUPS.dispatcher, "customer" as const]));
+    : [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.partner, "customer" as const]));
   if (target === "released" && !input.reason?.trim()) throw new AppError("VALIDATION_ERROR", "REASON_REQUIRED");
   const result = await withIdempotency(db, {
     organizationId: input.principal.organizationId,
@@ -195,8 +195,20 @@ async function terminate(
       eq(slotReservations.organizationId, input.principal.organizationId),
     )).limit(1);
     if (!reservation) throw errors.notFound("reservation");
-    if (target === "released" && hasRole(input.principal, "customer") && reservation.principalId !== input.principal.userId) {
-      throw errors.notFound("reservation");
+    if (target === "released" && !hasRole(input.principal, ...ROLE_GROUPS.dispatcher)) {
+      if (hasRole(input.principal, "customer") && reservation.principalId !== input.principal.userId) {
+        throw errors.notFound("reservation");
+      }
+      if (hasRole(input.principal, ...ROLE_GROUPS.partner) && !hasRole(input.principal, "customer")) {
+        if (!input.principal.partnerId || !reservation.orderId) throw errors.notFound("reservation");
+        const [order] = await tx.select({ assignedPartnerId: orders.assignedPartnerId }).from(orders).where(and(
+          eq(orders.id, reservation.orderId),
+          eq(orders.organizationId, input.principal.organizationId),
+        )).limit(1);
+        if (!order || order.assignedPartnerId !== input.principal.partnerId) {
+          throw errors.notFound("reservation");
+        }
+      }
     }
     if (reservation.state === target) return { reservationId: reservation.id, state: target, changed: false };
     const condition = target === "expired"
@@ -269,8 +281,9 @@ export async function reconcileCapacity(db: Db, organizationId: string): Promise
     FROM service_windows w
     LEFT JOIN slot_reservations r ON r.window_id = w.id
     WHERE w.organization_id = ${organizationId}
-    GROUP BY w.id, w.reserved_orders
+    GROUP BY w.id, w.reserved_orders, w.capacity_orders, w.safety_buffer_orders
     HAVING w.reserved_orders <> COALESCE(SUM(CASE WHEN r.state IN ('held','confirmed') THEN r.capacity_units ELSE 0 END), 0)
+        OR w.reserved_orders > GREATEST(w.capacity_orders - w.safety_buffer_orders, 0)
   `);
   return (rows.rows as unknown as Array<{ windowId: string; stored: number; actual: number | string }>)
     .map(row => ({ windowId: row.windowId, stored: Number(row.stored), actual: Number(row.actual) }));

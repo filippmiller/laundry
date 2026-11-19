@@ -363,7 +363,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PR3 P0/P1 security regressions"
 
   describe("LND3-P0-06 claim object binding", () => {
     async function orderWithItems() {
-      const f = await seedFullOrder(db, { state: "pickup_assigned" });
+      const f = await seedFullOrder(db, { state: "pickup_assigned", tier: "protected" });
       const seal = await seedSeal(db, f.organizationId);
       const intake = await recordIntake(db, f.courier, {
         orderId: f.orderId, mode: "protected_items",
@@ -491,7 +491,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PR3 P0/P1 security regressions"
 
   describe("LND3-P1-01 exact-set delivery", () => {
     async function deliveredOrder() {
-      const f = await seedFullOrder(db, { state: "pickup_assigned" });
+      const f = await seedFullOrder(db, { state: "pickup_assigned", tier: "protected" });
       const seal = await seedSeal(db, f.organizationId);
       const partner = await seedPartnerForOrder(db, f);
       const containerCode = bag("BAG-EXACT");

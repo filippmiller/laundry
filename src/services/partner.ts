@@ -1,17 +1,18 @@
-import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, or } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
   customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifestLines, intakeManifests,
   orderAdjustments, orderLines, orders, partnerContracts, partnerCreditNotes, partnerInvoiceLines,
   partnerPriceVersions, partners, partnerReceiptLines, partnerReceipts, partnerServiceAccruals,
-  paymentIntents, processingOperations, qualityChecks, seals, serviceWindows, slotReservations,
+  paymentIntents, processingOperations, qualityChecks, seals, slotReservations,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idempotency.js";
-import { nextState, type OrderState } from "../domain/order-state.js";
+import { nextState, nextStateAsSystem, type OrderState } from "../domain/order-state.js";
+import { releaseSlot } from "../domain/slot-reservation.js";
 import {
   describeWeightVariance, measureOrderWeightVariance,
   WEIGHT_VARIANCE_MIN_GRAMS, WEIGHT_VARIANCE_MIN_RATIO,
@@ -342,8 +343,14 @@ export async function receiveHandoff(
 
       for (const bag of input.actual) {
         const expectedBag = expected.find(row => row.containerCode === bag.containerCode);
-        const [container] = await tx.select().from(containers).where(eq(containers.code, bag.containerCode)).limit(1);
-        const [seal] = await tx.select().from(seals).where(eq(seals.serialNumber, bag.sealSerial)).limit(1);
+        const [container] = await tx.select().from(containers).where(and(
+          eq(containers.organizationId, principal.organizationId),
+          eq(containers.code, bag.containerCode),
+        )).limit(1);
+        const [seal] = await tx.select().from(seals).where(and(
+          eq(seals.organizationId, principal.organizationId),
+          eq(seals.serialNumber, bag.sealSerial),
+        )).limit(1);
         if (!seal || seal.state !== "assigned") {
           throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_INTACT", {
             containerCode: bag.containerCode,
@@ -765,8 +772,14 @@ export async function decideAdjustment(
     const inspected = nextState(order.lifecycleState as "awaiting_approval", "decline_change", principal);
     await applyWeightDecision(tx as Db, adjustment, false);
     if (input.returnUnprocessed === true) {
-      const hubState = nextState(inspected, "return_unprocessed");
-      const readyState = nextState(hubState, "ready_for_return");
+      const hubState = nextStateAsSystem(inspected, "return_unprocessed", {
+        systemActor: "decideAdjustment",
+        reason: "customer declined adjustment and requested unprocessed return",
+      });
+      const readyState = nextStateAsSystem(hubState, "ready_for_return", {
+        systemActor: "decideAdjustment",
+        reason: "customer declined adjustment and requested unprocessed return",
+      });
       const reason = "Отказ клиента: возврат без обработки";
       await voidPartnerAccrualsForOrder(tx, principal.organizationId, order.id, reason);
       await tx.update(orders).set({
@@ -854,28 +867,29 @@ export async function returnUnprocessedOrder(
       input.reason,
     );
     // Nothing will be delivered, so the capacity held for this order is released again.
-    const liveReservations = await tx.select({
-      id: slotReservations.id,
-      windowId: slotReservations.windowId,
-      capacityUnits: slotReservations.capacityUnits,
-    }).from(slotReservations).where(and(
+    const liveReservations = await tx.select({ id: slotReservations.id }).from(slotReservations).where(and(
       eq(slotReservations.organizationId, principal.organizationId),
       eq(slotReservations.orderId, order.id),
       inArray(slotReservations.state, ["held", "confirmed"]),
     ));
+    let releasedReservations = 0;
     for (const reservation of liveReservations) {
-      await tx.update(slotReservations).set({ state: "released" })
-        .where(eq(slotReservations.id, reservation.id));
-      await tx.update(serviceWindows).set({
-        reservedOrders: sql`GREATEST(${serviceWindows.reservedOrders} - ${reservation.capacityUnits}, 0)`,
-        version: sql`${serviceWindows.version} + 1`,
-      }).where(and(
-        eq(serviceWindows.id, reservation.windowId),
-        gte(serviceWindows.reservedOrders, reservation.capacityUnits),
-      ));
+      const released = await releaseSlot(tx as Db, {
+        principal,
+        reservationId: reservation.id,
+        reason: input.reason,
+        key: `return-${input.key}-${reservation.id}`,
+      });
+      if (released.changed) releasedReservations += 1;
     }
-    const hubState = nextState("inspection", "return_unprocessed");
-    const readyState = nextState(hubState, "ready_for_return");
+    const hubState = nextStateAsSystem("inspection", "return_unprocessed", {
+      systemActor: "returnUnprocessedOrder",
+      reason: input.reason,
+    });
+    const readyState = nextStateAsSystem(hubState, "ready_for_return", {
+      systemActor: "returnUnprocessedOrder",
+      reason: input.reason,
+    });
     await tx.update(orders).set({
       lifecycleState: readyState,
       returnReason: input.reason,
@@ -891,7 +905,7 @@ export async function returnUnprocessedOrder(
       reason: input.reason,
       payload: {
         from: order.lifecycleState, to: readyState, reason: input.reason,
-        releasedReservations: liveReservations.length, voidedInvoices: openInvoices.length,
+        releasedReservations, voidedInvoices: openInvoices.length,
         voidedAccruals, creditedAccruals,
       },
     });
@@ -899,7 +913,7 @@ export async function returnUnprocessedOrder(
       orderId: order.id,
       state: readyState,
       returnReason: input.reason,
-      releasedReservations: liveReservations.length,
+      releasedReservations,
     };
   });
 }
@@ -1015,7 +1029,10 @@ export async function recordQualityCheck(
     } else {
       // A QC failure is a rewash, never a delivery and never a customer surcharge.
       // The escalation itself is automatic, so it is not blocked by supervisor-only command roles.
-      finalState = nextState("quality_check", "rewash");
+      finalState = nextStateAsSystem("quality_check", "rewash", {
+        systemActor: "recordQualityCheck",
+        reason: "automatic rewash after quality check failure",
+      });
       await tx.update(orders).set({ lifecycleState: finalState, version: order.version + 2 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
     }
@@ -1077,7 +1094,6 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
       description: garments.description,
       status: garments.status,
       brandMark: garments.brandMark,
-      declaredValueKopeks: garments.declaredValueKopeks,
     }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId),
       inArray(garments.orderId, orderIds),
