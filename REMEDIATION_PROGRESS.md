@@ -1,46 +1,35 @@
-# Remediation progress — PR #3 remediation wave (2026-11-18)
+# Remediation progress — PR #3 audit & remediation (2026-11-19)
 
-**AS-OF 2026-11-18, working tree of branch `docs/pr2-independent-audit-autonomous-wave`.**
-Canonical task tracker: Beads (`bd ready`, `bd show <id>`). Status dashboard: `docs/audits/PR3_GAP_REPORT_2026-11-18.md`.
-Audit source: `docs/audits/PR3_audit/laundry_PR3_audit_2026-11-17/` (findings LAU-R2-001..016).
+**AS-OF 2026-11-19, commit `b6ae600` on branch `docs/pr2-independent-audit-autonomous-wave`.**  
+Canonical task tracker: Beads (`bd list --status=open`, `bd show <id>`).  
+Independent dual audit record: [`docs/reports/PR3_INDEPENDENT_REVIEW.md`](docs/reports/PR3_INDEPENDENT_REVIEW.md).  
+Scenario status register: [`docs/coverage/PR3_SCENARIO_STATUS.json`](docs/coverage/PR3_SCENARIO_STATUS.json) and [`docs/coverage/PR3_SCENARIO_EXECUTION.csv`](docs/coverage/PR3_SCENARIO_EXECUTION.csv).
 
-> This file previously carried `[x]` checkmarks that the code did not support — most notably a
-> claim that `listEvidence` had been refactored to use `authorizeEvidenceOwner` when it had not
-> (it re-implemented an order-only check inline and returned `objectKey` to the API). Every entry
-> below is now backed by a file:line or a test that actually runs.
+## Current verified baseline
 
-## Verified fixed in this wave
+| Dimension | Verified State | Evidence |
+| --- | --- | --- |
+| Schema & migrations | **83 tables**, **25 migrations (`0000`–`0024`)**, **zero schema drift** | `drizzle/meta/0024_snapshot.json`, `drizzle/0024_backfill_legal_holds_and_paid_invoices.sql` |
+| Remediation Beads | **25 / 25 code-closable Beads closed** (`88` closed total; `bd list --status=open` shows **3** owner-only decisions) | `.beads/issues.jsonl` (`lnd-9l7`, `lnd-5me`, `lnd-8ev` open) |
+| Dual independent red-team audit | **20 / 20 P0/P1 findings closed** (Cold Red-Team Reviewer `pro` + OpenAI Codex `gpt-6.2-sol` over `bd48e57..388ddee`, fixed in `b6ae600`) | [`docs/reports/PR3_INDEPENDENT_REVIEW.md`](docs/reports/PR3_INDEPENDENT_REVIEW.md), `test/wave4b-remediation.integration.test.ts` |
+| Cross-role flows (`F01..F36`) | **30 / 36 `CROSS_ROLE_PASS`** (`2 BLOCKED` external routing/DR, `4 SPEC`) | `test/scenarios/cross-role-flows.integration.test.ts`, `test/scenarios/adversarial-business-edge-cases.integration.test.ts` |
+| Catalog scenarios (217 total) | **137 / 217 verified** (`82 CROSS_ROLE_PASS`, `50 API_PASS`, `4 BROWSER_PASS`, `1 UNIT_PASS`); `10 BLOCKED` on external hardware/providers; `70 SPEC` | `docs/coverage/PR3_SCENARIO_STATUS.json` |
+| Web UI & accessibility | UI primitive system (`apps/web/src/components/ui/`), WCAG 2.2 AA, lazy workspace code-splitting (`index.js` **385 kB**) | `docs/UI_SYSTEM.md`, `apps/web/src/workspaces/registry.ts`, `dist/web/assets/` |
+| Browser & viewport gates | **25 / 25 mobile/tablet/print views** verified; **11 / 11 browser smoke checks (`SMOKE_OK`)** | `scripts/verify-mobile-ui.mjs`, `scripts/smoke-e2e.mjs` |
 
-| Item | Evidence | Verified by |
-|---|---|---|
-| `.pgdata-drill/` ignore rule repaired (the old rule was UTF-16 and inert) | `.gitignore:17`; `git check-ignore -v .pgdata-drill` → exit 0 | controller, directly |
-| Repo hygiene guard added to CI | `scripts/guard-repo-hygiene.mjs`, `.github/workflows/ci.yml` | `test/ops/guard-repo-hygiene.test.ts` (7 tests, both pass and fail cases) |
-| Evidence object scope for `claim` / `custody_event` (was order-only) | `src/services/workspace.ts:135-189` | `test/security/evidence-abac.integration.test.ts` (13 tests) |
-| `objectKey` no longer returned by evidence listing / reading | `src/services/workspace.ts:230-258` | same, asserted on the serialised response body |
-| Evidence delete no longer destroys audit history (tombstone instead) | `src/services/workspace.ts:299-351` | same, test 12 |
-| Missing HTTP contracts implemented (7) | `src/api/server.ts` | `test/api/**` (49 tests) |
-| Fake customer portal replaced by a real journey | `apps/web/src/workspaces/CustomerWorkspace.tsx` (~2000 lines) | Playwright 11/11 + API 27/27 (Lane B report) |
-| `DemoConfig` consolidated into one definition | `apps/web/src/types.ts` | `npm run typecheck` |
-| Route limits now actually enforced (they never were) | `src/api/server.ts` | `test/api/otp-rate-limit.test.ts` |
-| Malformed body now answers 400 instead of 500 | `src/api/server.ts` error handler | `test/api/**` |
-| Voided invoice can no longer be captured | `src/services/finance.ts` | `test/api/finance-capture-invoice-state.test.ts` |
-| Lint loophole closed (`varsIgnorePattern: "^_"`) | `eslint.config.mjs:12` | `npm run lint` → 0 errors |
-| Test database reset per run (removed run-count dependence) | `test/global-setup.ts` | `npm test` |
-| CI runs the integration suite against a real PostgreSQL | `.github/workflows/ci.yml` | — |
+## Remediation waves completed
 
-## Open / not done
+1. **Initial Wave (2026-11-18):** `.gitignore` UTF-16 repair + `scripts/guard-repo-hygiene.mjs`, evidence ABAC (`order`/`claim`/`custody_event`) & `objectKey` removal, 7 missing HTTP contracts, real `CustomerWorkspace`, route rate limits in `app.after`, CSRF on `POST/PUT/PATCH/DELETE`, voided-invoice capture block, `eslint` loophole closure, per-run DB reset, CI PostgreSQL 16 job.
+2. **UI System & Dispatcher Wave (`bd48e57`, `5319e78`):** Complete `apps/web/src/components/ui/` primitive system, `apps/web/src/labels.ts` Russian state/event mapping, WCAG 2.2 AA focus/keyboard/motion hardening, lazy workspace code-splitting, wired `DispatcherWorkspace` (`lnd-50x`), and 25/25 mobile/tablet/print verification (`scripts/verify-mobile-ui.mjs`).
+3. **Group A — Finance & Partner (`3d8353b`):** Exact gram-per-kg rounding, partner wholesale contract selection, receipt actual-vs-expected weight variance, broken-seal discrepancy opening, accrual correction & unprocessed-return voiding, supplemental invoice on paid orders (`lnd-irv`, `lnd-5or`, `lnd-nuq`, `lnd-5zs`, `lnd-epd`, `lnd-apw`, `lnd-pny`).
+4. **Group B — Orders, Capacity & Security (`e5488f8`):** Tenant-scoped container uniqueness, intake mode bound to tariff tier, optimistic lock checks on schedule/cancel/reschedule, versioned terms acceptance, role-projected order view, garment evidence linkage, `releaseSlot` reuse, mandatory principal in `nextState`, `safety_buffer_orders` arithmetic (`lnd-8vs`, `lnd-6tf`, `lnd-mw8`, `lnd-7c3`, `lnd-7l3`, `lnd-kdc`, `lnd-kje`, `lnd-5nx`, `lnd-qfy`, `lnd-7vq`).
+5. **Group C — Reliability & Infra (`8ceb503`):** Legal hold release trigger repair (`0023`), evidence upload/tombstone/retention pipeline, per-event transactional payment inbox, outbox backoff/DLQ, `SIMULATION_ONLY` routing gate, PG16 restore drill in CI (`lnd-ek8`, `lnd-ikt`, `lnd-pfj`, `lnd-0g5`, `lnd-wzt`, `lnd-23v`).
+6. **Scenario Execution Wave (`388ddee`):** Executed 30/36 cross-role journeys + adversarial business edge cases + API/OpenAPI contract sync, updating `PR3_SCENARIO_STATUS.json` (`lnd-2c0`).
+7. **Wave 4B Dual Red-Team Remediation (`b6ae600`):** Closed all 20 P0/P1 findings from independent `pro` + OpenAI Codex `gpt-6.2-sol` review (concurrency locks, partial delivery recovery, pickup stop completion on handoff, evidence ownership/order-scope/tombstones, backfill `0024`, inbox/outbox stale-processing lease reclaim, `GET /orders` ordering, `Router` `demo === null`, supplemental invoice payment, `smoke-e2e.mjs` toast selectors).
 
-- **Auth is not production-ready.** The OTP surface is a `fake` provider that returns `404` in
-  production; `AuthLanding` stays unmounted on purpose. A real SMS provider is required.
-- **Routing still fabricates geography** (`src/services/routing.ts:59-69` hashes a building id into
-  fictitious Moscow coordinates and is not gated as `SIMULATION_ONLY`).
-- **The outbox is a delivery fiction** (`src/services/outbox.ts`): a DB row marked `push` is not a
-  delivered notification; there is no backoff, dead-letter or provider receipt.
-- **The payment inbox is not per-event atomic** (`src/services/payment-inbox.ts:27`).
-- **Backup is not disaster recovery** (`scripts/upgrade-restore-drill.ts` clones a template on the
-  same cluster; CI never runs `npm run db:drill`).
-- **Evidence has no upload pipeline and no retention job**; `retention_until` is written but never
-  read. There is no tombstone column, so `expired` is overloaded as the tombstone marker.
-- **217 scenarios / 36 cross-role journeys are still a test plan, not executed coverage.**
-- **No git remote is configured in this working tree**, so nothing could be pushed to PR #3.
-- **G7 (legal/54-FZ/KKT/OFD/152-FZ) cannot be signed by a coding agent.**
+## Remaining open gates (external / owner-only)
+
+- **`lnd-9l7` (Owner decision):** GitHub unreachable-object purge / credential rotation decision for prior `.pgdata-drill` exposure (classified `TEST_ONLY`, branch history already clean), manual deletion of local `%LOCALAPPDATA%/Temp/pgdrill`, and real SMS provider authorization.
+- **`lnd-5me` (Owner decision):** Lifecycle of the public preview instance (`https://laundry.filippmiller.com`) and sign-off on real pilot prerequisites (real auth/SMS, live acquiring, 54-FZ KKT/OFD, real geocoding/routing, off-host PITR/DR).
+- **`lnd-8ev` (Owner/Legal decision):** Russian legal/compliance gates (consumer law, principal/agent role, 54-FZ/OFD, 152-FZ & video retention, partner terms, refund policy, unit economics).
+- **10 `BLOCKED` external-dependency scenarios:** Real SMS carrier (`AU-014`), road-network routing/geocoding (`F31`, `CO-004`, `DI-008`, `DI-010`), camera hardware (`CO-015`), live 54-FZ KKT/OFD (`FI-016`, `FI-017`, `AD-015`), and off-host PG16 PITR/DR (`F33`, `AD-019`, `OP-004`).
