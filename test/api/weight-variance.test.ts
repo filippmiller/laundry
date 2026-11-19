@@ -128,7 +128,10 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("The automatic weight adjustment
     // Nothing is billed before the customer agrees.
     const invoices = await db.select().from(customerInvoices).where(eq(customerInvoices.orderId, f.orderId));
     expect(invoices).toHaveLength(0);
-    const lines = await db.select().from(customerInvoiceLines);
+    const lines = await db.select({ kind: customerInvoiceLines.kind })
+      .from(customerInvoiceLines)
+      .innerJoin(customerInvoices, eq(customerInvoiceLines.invoiceId, customerInvoices.id))
+      .where(eq(customerInvoices.orderId, f.orderId));
     expect(lines.filter(line => line.kind === "adjustment")).toHaveLength(0);
   });
 

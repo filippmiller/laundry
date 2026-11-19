@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateQuote } from "../src/domain/pricing.js";
+import { calculateQuote, priceServiceAmount } from "../src/domain/pricing.js";
 import { nextState, projectUiState } from "../src/domain/order-state.js";
 import { hashRequest } from "../src/core/idempotency.js";
 import { makePrincipal } from "./fixtures.js";
@@ -33,6 +33,25 @@ describe("pricing", () => {
       lines: [{ serviceId: "wash", tier: "economy" as const, quantity: 2_150, unit: "gram" as const, unitPriceKopeks: 10, roundingRule: "gram_up_to_100" }],
     });
     expect(quote.lines[0].amountKopeks).toBe(220);
+  });
+
+  it("distinguishes exact, gram_up_to_100, and gram_up_to_1000 rounding rules for gram lines", () => {
+    // 1500g at 1000 RUB/kg (100_000 kopeks/kg): exact = 1500 RUB, kg-ceil = 2000 RUB.
+    expect(priceServiceAmount({
+      quantity: 1_500, unit: "gram", unitPriceKopeks: 100_000, roundingRule: "exact",
+    })).toBe(150_000);
+    expect(priceServiceAmount({
+      quantity: 1_550, unit: "gram", unitPriceKopeks: 100_000, roundingRule: "exact",
+    })).toBe(155_000);
+    expect(priceServiceAmount({
+      quantity: 1_500, unit: "gram", unitPriceKopeks: 10_000, roundingRule: "gram_up_to_100",
+    })).toBe(150_000);
+    expect(priceServiceAmount({
+      quantity: 1_550, unit: "gram", unitPriceKopeks: 10_000, roundingRule: "gram_up_to_100",
+    })).toBe(160_000);
+    expect(priceServiceAmount({
+      quantity: 1_500, unit: "gram", unitPriceKopeks: 100_000, roundingRule: "gram_up_to_1000",
+    })).toBe(200_000);
   });
 
   it("binds the hash to price and expiry", () => {

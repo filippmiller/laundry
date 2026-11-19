@@ -2,7 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   buildings, cities, courierShifts, customerAddresses, documentVersions, membershipRoles, memberships,
-  organizations, partnerContracts, partners, priceRules, seals, serviceWindows, services,
+  organizations, partnerContracts, partnerPriceVersions, partners, priceRules, seals, serviceWindows, services,
   tariffPlans, tariffVersions, users,
 } from "../db/schema.js";
 import { AppError } from "../core/errors.js";
@@ -84,6 +84,15 @@ async function ensureDemoEconomics(db: Db, organizationId: string): Promise<void
     )).limit(1);
   if (contract) {
     await db.update(partnerContracts).set({ termsJson: DEMO_WHOLESALE }).where(eq(partnerContracts.id, contract.id));
+    await db.insert(partnerPriceVersions).values({
+      contractId: contract.id,
+      version: "v1",
+      effectiveFrom: new Date("2026-01-01T00:00:00Z"),
+      pricesJson: DEMO_WHOLESALE,
+    }).onConflictDoUpdate({
+      target: [partnerPriceVersions.contractId, partnerPriceVersions.version],
+      set: { pricesJson: DEMO_WHOLESALE },
+    });
   }
 }
 
@@ -147,13 +156,19 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
     }).returning();
     await db.insert(membershipRoles).values({ membershipId: membership.id, role: demo.role });
   }
-  await db.insert(partnerContracts).values({
+  const [demoContract] = await db.insert(partnerContracts).values({
     partnerId: partner.id, version: "v1",
     effectiveFrom: new Date("2026-01-01T00:00:00Z"), signed: true,
     // Wholesale is 600 ₽ per kilogram — expressed in kopeks, like every other amount in the
     // system. The demo retail tariff is 900–1300 ₽/kg, so a demo order shows a plausible margin
     // instead of an absurd one.
-    termsJson: { wholesalePerKgKopeks: 60_000, wholesalePerPieceKopeks: 12_000 },
+    termsJson: DEMO_WHOLESALE,
+  }).returning();
+  await db.insert(partnerPriceVersions).values({
+    contractId: demoContract.id,
+    version: "v1",
+    effectiveFrom: new Date("2026-01-01T00:00:00Z"),
+    pricesJson: DEMO_WHOLESALE,
   });
   const [courierUser] = await db.select().from(users).where(eq(users.phone, "+79990000002")).limit(1);
   const [existingShift] = await db.select().from(courierShifts).where(and(

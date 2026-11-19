@@ -101,14 +101,26 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
         (
           SELECT json_agg(json_build_object('kind', il.kind, 'source', il.source, 'amount_kopeks', il.amount_kopeks))
           FROM customer_invoice_lines il
-          WHERE il.invoice_id = i.id AND il.kind IN ('pickup_fee', 'delivery_fee')
+          JOIN customer_invoices ci ON ci.id = il.invoice_id
+          WHERE ci.order_id = o.id
+            AND ci.organization_id = o.organization_id
+            AND ci.state IS DISTINCT FROM 'cancelled'
+            AND il.kind IN ('pickup_fee', 'delivery_fee')
         ) AS fee_lines
       FROM orders o
-      LEFT JOIN customer_invoices i
-        ON i.order_id = o.id AND i.organization_id = o.organization_id
+      LEFT JOIN LATERAL (
+        SELECT
+          MIN(ci.id::text) AS id,
+          STRING_AGG(ci.number, ', ' ORDER BY ci.created_at) AS number,
+          SUM(ci.total_kopeks) AS total_kopeks,
+          CASE WHEN BOOL_OR(ci.state = 'open') THEN 'open' ELSE MAX(ci.state) END AS state
+        FROM customer_invoices ci
+        WHERE ci.order_id = o.id
+          AND ci.organization_id = o.organization_id
           -- A voided invoice is not a debt. Counting it would tell the customer they owe the
           -- full amount of an order that was returned unprocessed and never charged.
-          AND i.state IS DISTINCT FROM 'cancelled'
+          AND ci.state IS DISTINCT FROM 'cancelled'
+      ) i ON TRUE
       LEFT JOIN quotes q ON q.id = o.quote_id
       LEFT JOIN tariff_versions tv ON tv.id = q.tariff_version_id
       LEFT JOIN LATERAL (

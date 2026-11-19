@@ -2,6 +2,8 @@ import { hashRequest } from "../core/idempotency.js";
 import { assertKopeks } from "./money.js";
 import type { DeclaredItem } from "../../shared/garment-taxonomy.js";
 
+export type RoundingRule = "exact" | "gram_up_to_100" | "gram_up_to_1000";
+
 export type ServiceLineInput = {
   serviceId: string;
   tier: "economy" | "protected";
@@ -9,7 +11,7 @@ export type ServiceLineInput = {
   unit: "piece" | "gram";
   unitPriceKopeks: number;
   minQuantity?: number;
-  roundingRule?: "exact" | "gram_up_to_100";
+  roundingRule?: RoundingRule;
 };
 
 export type QuoteInput = {
@@ -50,13 +52,14 @@ export type QuoteLine = {
    * priced by the very same formula instead of by today's tariff.
    */
   unitPriceKopeks?: number;
-  roundingRule?: "exact" | "gram_up_to_100";
+  roundingRule?: RoundingRule;
   minQuantity?: number;
 };
 
 /**
- * The one pricing formula of the platform: a piece is priced per piece, a gram-priced
- * line is priced in tariff steps (a kilogram, or a hundred grams when the rule says so).
+ * The one pricing formula of the platform: a piece is priced per piece; a gram-priced
+ * line is priced either proportionally per kilogram (`exact`), rounded up to 100 g steps
+ * (`gram_up_to_100`), or rounded up to whole kilograms (`gram_up_to_1000`).
  * Every amount that ever reaches a customer is produced here, so a recalculation of an
  * existing quote is guaranteed to agree with the original one.
  */
@@ -65,13 +68,17 @@ export function priceServiceAmount(input: {
   unit: "piece" | "gram";
   unitPriceKopeks: number;
   minQuantity?: number;
-  roundingRule?: "exact" | "gram_up_to_100";
+  roundingRule?: RoundingRule;
 }): number {
   const quantity = Math.max(input.quantity, input.minQuantity ?? 1);
-  const units = input.unit === "gram"
-    ? (input.roundingRule === "gram_up_to_100" ? Math.ceil(quantity / 100) : Math.ceil(quantity / 1000))
-    : quantity;
-  return assertKopeks(Math.ceil(units * input.unitPriceKopeks));
+  if (input.unit === "gram") {
+    if (input.roundingRule === "exact") {
+      return assertKopeks(Math.round((quantity * input.unitPriceKopeks) / 1000));
+    }
+    const step = input.roundingRule === "gram_up_to_100" ? 100 : 1000;
+    return assertKopeks(Math.ceil(quantity / step) * input.unitPriceKopeks);
+  }
+  return assertKopeks(Math.ceil(quantity * input.unitPriceKopeks));
 }
 
 export type QuoteResult = {

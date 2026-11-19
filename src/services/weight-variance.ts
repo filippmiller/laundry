@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { orderLines, orders, partnerReceiptLines, partnerReceipts } from "../db/schema.js";
-import { priceServiceAmount } from "../domain/pricing.js";
+import { priceServiceAmount, type RoundingRule } from "../domain/pricing.js";
 
 /**
  * "The laundry weighs more than the quote promised."
@@ -34,7 +34,7 @@ export type GramLineBasis = {
   quotedAmountKopeks: number;
   /** The tariff price of one tariff step; missing on lines quoted before the basis was kept. */
   unitPriceKopeks?: number;
-  roundingRule?: "exact" | "gram_up_to_100";
+  roundingRule?: RoundingRule;
   minQuantity?: number;
 };
 
@@ -145,7 +145,7 @@ function lineBasis(line: {
   tariffSnapshotJson: unknown;
 }): GramLineBasis {
   const snapshot = (line.tariffSnapshotJson ?? {}) as {
-    line?: { unitPriceKopeks?: number; roundingRule?: "exact" | "gram_up_to_100"; minQuantity?: number };
+    line?: { unitPriceKopeks?: number; roundingRule?: RoundingRule; minQuantity?: number };
   };
   return {
     lineId: line.id,

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, notInArray, or, sql, sum } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, notInArray, or, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   compensations, customerApprovals, customerInvoiceLines, customerInvoices, fiscalReceipts,
@@ -240,25 +240,40 @@ export async function capturePayment(
     )).limit(1);
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
-    // Serialize captures for one order: a second key must not create a second full capture.
+    // Serialize captures for one order: a second key must not double-capture the same invoice,
+    // while an open supplemental invoice issued for an accepted adjustment remains collectible.
     await tx.execute(sql`
       SELECT id FROM orders WHERE id = ${order.id} AND organization_id = ${principal.organizationId} FOR UPDATE
     `);
-    const captured = await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(and(
-      eq(paymentIntents.organizationId, principal.organizationId),
-      eq(paymentIntents.orderId, order.id),
-      inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
-    )).limit(1);
-    if (captured.length) throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CAPTURED", { orderId: order.id });
-    const [invoice] = await tx.select().from(customerInvoices).where(and(
+    const invoices = await tx.select().from(customerInvoices).where(and(
       eq(customerInvoices.organizationId, principal.organizationId),
       eq(customerInvoices.orderId, order.id),
-    )).limit(1);
-    if (!invoice) throw new AppError("PAYMENT_PENDING", "INVOICE_REQUIRED");
-    // A voided invoice must never be captured: e.g. when a partner returns the order unprocessed
-    // the open invoice is cancelled and the customer must not become payable for it.
-    if (invoice.state !== "open") {
-      throw new AppError("FINANCIAL_HOLD", "INVOICE_NOT_PAYABLE", { state: invoice.state });
+    )).orderBy(asc(customerInvoices.createdAt));
+    if (!invoices.length) throw new AppError("PAYMENT_PENDING", "INVOICE_REQUIRED");
+
+    const [capturedTotals] = await tx.select({ total: sum(paymentIntents.amountKopeks) })
+      .from(paymentIntents)
+      .where(and(
+        eq(paymentIntents.organizationId, principal.organizationId),
+        eq(paymentIntents.orderId, order.id),
+        inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
+      ));
+    const capturedTotal = Number(capturedTotals?.total ?? 0);
+
+    const invoice = invoices.find(inv => inv.state === "open");
+    if (!invoice) {
+      if (invoices.some(inv => inv.state === "paid") || capturedTotal > 0) {
+        throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CAPTURED", { orderId: order.id });
+      }
+      // A voided invoice must never be captured: e.g. when a partner returns the order unprocessed
+      // the open invoice is cancelled and the customer must not become payable for it.
+      throw new AppError("FINANCIAL_HOLD", "INVOICE_NOT_PAYABLE", { state: invoices[0].state });
+    }
+    const totalPayable = invoices
+      .filter(inv => inv.state !== "cancelled")
+      .reduce((acc, inv) => acc + inv.totalKopeks, 0);
+    if (capturedTotal >= totalPayable || capturedTotal + input.amountKopeks > totalPayable) {
+      throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CAPTURED", { orderId: order.id });
     }
     if (input.amountKopeks !== invoice.totalKopeks) throw new AppError("VALIDATION_ERROR", "AMOUNT_MISMATCH");
 
@@ -271,6 +286,7 @@ export async function capturePayment(
       idempotencyKey: input.key,
       providerIntentId: input.providerEventId ?? `fake-${input.key}`,
     }).returning();
+    await tx.update(customerInvoices).set({ state: "paid" }).where(eq(customerInvoices.id, invoice.id));
     await tx.insert(paymentEvents).values({
       organizationId: principal.organizationId,
       provider: "fake",
@@ -295,7 +311,12 @@ export async function capturePayment(
       principal, aggregateType: "payment", aggregateId: intent.id,
       eventType: "payment.captured", payload: { orderId: order.id, amountKopeks: input.amountKopeks, invoiceId: invoice.id },
     });
-    return { paymentIntentId: intent.id, state: "captured" as const, fiscalState: "pending_registration" as const };
+    return {
+      paymentIntentId: intent.id,
+      invoiceId: invoice.id,
+      state: "captured" as const,
+      fiscalState: "pending_registration" as const,
+    };
   });
 }
 
@@ -400,10 +421,11 @@ export async function refundPayment(
 export async function orderFinance(db: Db, principal: Principal, orderId: string) {
   assertRole(principal, "customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
   const order = await loadOrder(db, principal, orderId);
-  const [invoice] = await db.select().from(customerInvoices).where(and(
+  const orderInvoices = await db.select().from(customerInvoices).where(and(
     eq(customerInvoices.organizationId, principal.organizationId),
     eq(customerInvoices.orderId, order.id),
-  )).limit(1);
+  )).orderBy(asc(customerInvoices.createdAt));
+  const invoice = orderInvoices.find(inv => inv.state === "open") ?? orderInvoices[orderInvoices.length - 1] ?? null;
   const payments = await db.select({
     id: paymentIntents.id, amountKopeks: paymentIntents.amountKopeks,
     state: paymentIntents.state, provider: paymentIntents.provider, createdAt: paymentIntents.createdAt,
@@ -465,7 +487,9 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
     partnerId: principal.partnerId,
     accruals,
     invoices,
-    estimatedTotalKopeks: accruals.reduce((total, accrual) => total + accrual.amountKopeks, 0),
+    estimatedTotalKopeks: accruals
+      .filter(accrual => accrual.status !== "voided")
+      .reduce((total, accrual) => total + accrual.amountKopeks, 0),
   };
 }
 
@@ -495,6 +519,7 @@ export async function createPartnerInvoice(  db: Db,
          AND partner_id = ${input.partnerId}
          AND status = 'estimated'
          AND disputed = FALSE
+         AND amount_kopeks <> 0
          AND created_at BETWEEN ${input.periodStart} AND ${input.periodEnd}
       RETURNING id, amount_kopeks
     `);

@@ -1,18 +1,21 @@
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import type { Db, Tx } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
   customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifestLines, intakeManifests,
-  orderAdjustments, orderLines, orders, partnerContracts, partners, partnerReceiptLines,
-  partnerReceipts, partnerServiceAccruals, paymentIntents, processingOperations, qualityChecks, seals,
-  serviceWindows, slotReservations,
+  orderAdjustments, orderLines, orders, partnerContracts, partnerCreditNotes, partnerInvoiceLines,
+  partnerPriceVersions, partners, partnerReceiptLines, partnerReceipts, partnerServiceAccruals,
+  paymentIntents, processingOperations, qualityChecks, seals, serviceWindows, slotReservations,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idempotency.js";
 import { nextState, type OrderState } from "../domain/order-state.js";
-import { describeWeightVariance, measureOrderWeightVariance } from "./weight-variance.js";
+import {
+  describeWeightVariance, measureOrderWeightVariance,
+  WEIGHT_VARIANCE_MIN_GRAMS, WEIGHT_VARIANCE_MIN_RATIO,
+} from "./weight-variance.js";
 
 export type ActualBag = { containerCode: string; sealSerial: string; actualWeightGrams: number };
 
@@ -26,6 +29,183 @@ export type ActualBag = { containerCode: string; sealSerial: string; actualWeigh
  */
 const DEFAULT_WHOLESALE_PER_KG_KOPEKS = 60_000;
 const DEFAULT_WHOLESALE_PER_PIECE_KOPEKS = 0;
+
+type WholesaleTerms = {
+  wholesalePerKgKopeks?: number;
+  wholesalePerPieceKopeks?: number;
+};
+
+/**
+ * Selects the latest active, signed wholesale contract for a partner and its active
+ * `partner_price_versions` row (if any). Unsigned, future, and expired contracts are excluded.
+ */
+async function resolveActivePartnerContract(tx: Tx, partnerId: string, now = new Date()) {
+  const [contract] = await tx.select().from(partnerContracts).where(and(
+    eq(partnerContracts.partnerId, partnerId),
+    eq(partnerContracts.signed, true),
+    lte(partnerContracts.effectiveFrom, now),
+    or(isNull(partnerContracts.effectiveTo), gte(partnerContracts.effectiveTo, now)),
+  )).orderBy(desc(partnerContracts.version), desc(partnerContracts.effectiveFrom)).limit(1);
+  if (!contract) return null;
+
+  const [priceVersion] = await tx.select().from(partnerPriceVersions).where(and(
+    eq(partnerPriceVersions.contractId, contract.id),
+    lte(partnerPriceVersions.effectiveFrom, now),
+  )).orderBy(desc(partnerPriceVersions.effectiveFrom), desc(partnerPriceVersions.version)).limit(1);
+
+  const priceTerms = (priceVersion?.pricesJson ?? {}) as WholesaleTerms;
+  const contractTerms = (contract.termsJson ?? {}) as WholesaleTerms;
+  return {
+    contract,
+    priceVersion: priceVersion ?? null,
+    wholesalePerKgKopeks: priceTerms.wholesalePerKgKopeks
+      ?? contractTerms.wholesalePerKgKopeks
+      ?? DEFAULT_WHOLESALE_PER_KG_KOPEKS,
+    wholesalePerPieceKopeks: priceTerms.wholesalePerPieceKopeks
+      ?? contractTerms.wholesalePerPieceKopeks
+      ?? DEFAULT_WHOLESALE_PER_PIECE_KOPEKS,
+  };
+}
+
+async function resolveWholesaleRatesForAccrual(
+  tx: Tx,
+  contractId: string,
+  contractPriceVersionId: string | null,
+) {
+  const [contract] = await tx.select().from(partnerContracts)
+    .where(eq(partnerContracts.id, contractId)).limit(1);
+  const [priceVersion] = contractPriceVersionId
+    ? await tx.select().from(partnerPriceVersions)
+      .where(eq(partnerPriceVersions.id, contractPriceVersionId)).limit(1)
+    : [undefined];
+  const priceTerms = (priceVersion?.pricesJson ?? {}) as WholesaleTerms;
+  const contractTerms = (contract?.termsJson ?? {}) as WholesaleTerms;
+  return {
+    wholesalePerKgKopeks: priceTerms.wholesalePerKgKopeks
+      ?? contractTerms.wholesalePerKgKopeks
+      ?? DEFAULT_WHOLESALE_PER_KG_KOPEKS,
+    wholesalePerPieceKopeks: priceTerms.wholesalePerPieceKopeks
+      ?? contractTerms.wholesalePerPieceKopeks
+      ?? DEFAULT_WHOLESALE_PER_PIECE_KOPEKS,
+  };
+}
+
+/**
+ * Reconciles `partner_service_accruals` for gram-priced order lines once actual received weight
+ * is finalized. Unbilled accruals are updated in place; already-invoiced accruals receive a
+ * delta accrual row so partner settlement matches the actual weighed quantity.
+ */
+async function reconcilePartnerAccrualsForOrder(tx: Tx, organizationId: string, orderId: string) {
+  const lines = await tx.select().from(orderLines).where(and(
+    eq(orderLines.orderId, orderId),
+    eq(orderLines.unit, "gram"),
+  ));
+  for (const line of lines) {
+    if (line.actualQuantity == null) continue;
+    const accruals = await tx.select().from(partnerServiceAccruals).where(and(
+      eq(partnerServiceAccruals.organizationId, organizationId),
+      eq(partnerServiceAccruals.orderLineId, line.id),
+      ne(partnerServiceAccruals.status, "voided"),
+    ));
+    if (!accruals.length) continue;
+
+    const primary = accruals[0];
+    const rates = await resolveWholesaleRatesForAccrual(
+      tx,
+      primary.contractId,
+      primary.contractPriceVersionId,
+    );
+    const targetAmountKopeks = Math.ceil((line.actualQuantity * rates.wholesalePerKgKopeks) / 1000);
+    const currentTotalAmount = accruals.reduce((sum, row) => sum + row.amountKopeks, 0);
+    const currentTotalQty = accruals.reduce((sum, row) => sum + row.quantity, 0);
+    if (targetAmountKopeks === currentTotalAmount && line.actualQuantity === currentTotalQty) {
+      continue;
+    }
+
+    const hasInvoiced = accruals.some(row => row.status === "accrued");
+    if (!hasInvoiced) {
+      await tx.update(partnerServiceAccruals).set({
+        quantity: line.actualQuantity,
+        amountKopeks: targetAmountKopeks,
+      }).where(eq(partnerServiceAccruals.id, primary.id));
+    } else {
+      const deltaAmountKopeks = targetAmountKopeks - currentTotalAmount;
+      const deltaQuantity = line.actualQuantity - currentTotalQty;
+      if (deltaAmountKopeks !== 0) {
+        await tx.insert(partnerServiceAccruals).values({
+          organizationId,
+          partnerId: primary.partnerId,
+          orderLineId: line.id,
+          contractId: primary.contractId,
+          contractPriceVersionId: primary.contractPriceVersionId,
+          quantity: deltaQuantity,
+          amountKopeks: deltaAmountKopeks,
+          status: "estimated",
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Voids unbilled partner accruals when an order is returned unprocessed, and creates an
+ * offsetting credit accrual (and partner credit note when an invoice line exists) for any
+ * accrual that was already billed on a partner invoice.
+ */
+async function voidPartnerAccrualsForOrder(
+  tx: Tx,
+  organizationId: string,
+  orderId: string,
+  reason: string,
+) {
+  const lines = await tx.select({ id: orderLines.id }).from(orderLines)
+    .where(eq(orderLines.orderId, orderId));
+  if (!lines.length) return { voidedAccruals: 0, creditedAccruals: 0 };
+
+  const lineIds = lines.map(row => row.id);
+  const accruals = await tx.select().from(partnerServiceAccruals).where(and(
+    eq(partnerServiceAccruals.organizationId, organizationId),
+    inArray(partnerServiceAccruals.orderLineId, lineIds),
+    ne(partnerServiceAccruals.status, "voided"),
+  ));
+
+  let voidedAccruals = 0;
+  let creditedAccruals = 0;
+  for (const accrual of accruals) {
+    if (accrual.status === "estimated") {
+      await tx.update(partnerServiceAccruals).set({
+        status: "voided",
+        amountKopeks: 0,
+      }).where(eq(partnerServiceAccruals.id, accrual.id));
+      voidedAccruals += 1;
+    } else if (accrual.status === "accrued" && accrual.amountKopeks > 0) {
+      const [invoiceLine] = await tx.select().from(partnerInvoiceLines)
+        .where(eq(partnerInvoiceLines.accrualId, accrual.id)).limit(1);
+      if (invoiceLine) {
+        await tx.insert(partnerCreditNotes).values({
+          organizationId,
+          invoiceId: invoiceLine.invoiceId,
+          originalLineId: invoiceLine.id,
+          amountKopeks: accrual.amountKopeks,
+          reason,
+          state: "draft",
+        });
+      }
+      await tx.insert(partnerServiceAccruals).values({
+        organizationId,
+        partnerId: accrual.partnerId,
+        orderLineId: accrual.orderLineId,
+        contractId: accrual.contractId,
+        contractPriceVersionId: accrual.contractPriceVersionId,
+        quantity: -accrual.quantity,
+        amountKopeks: -accrual.amountKopeks,
+        status: "estimated",
+      });
+      creditedAccruals += 1;
+    }
+  }
+  return { voidedAccruals, creditedAccruals };
+}
 
 /**
  * Partner actions are only valid for the partner that custody was assigned to. An unassigned
@@ -78,156 +258,219 @@ export async function receiveHandoff(
   input: { orderId: string; manifestId: string; actual: ActualBag[]; key: string },
 ) {
   assertRole(principal, ...ROLE_GROUPS.partner);
-  const result = await withIdempotency(db, {
-    organizationId: principal.organizationId,
-    scope: "partner:receipt",
-    key: input.key,
-    actorId: principal.userId,
-    requestHash: hashRequest({ ...input, actorId: principal.userId }),
-  }, async tx => {
-    const [order] = await tx.select().from(orders).where(and(
-      eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!order) throw errors.notFound("order");
-    assertAssignedPartner(order, principal);
-    if (!["picked_up", "at_hub"].includes(order.lifecycleState)) {
-      throw new AppError("INVALID_TRANSITION", "ORDER_NOT_AWAITING_RECEIPT", { state: order.lifecycleState });
-    }
-    const [manifest] = await tx.select().from(intakeManifests).where(and(
-      eq(intakeManifests.id, input.manifestId),
-      eq(intakeManifests.organizationId, principal.organizationId),
-      eq(intakeManifests.orderId, input.orderId),
-    )).limit(1);
-    if (!manifest) throw errors.notFound("manifest");
-
-    const expected = await tx.select({
-      containerCode: containers.code,
-      sealSerial: seals.serialNumber,
-    }).from(containerAssignments)
-      .innerJoin(containers, eq(containerAssignments.containerId, containers.id))
-      .innerJoin(seals, eq(containerAssignments.sealId, seals.id))
-      .where(and(
-        eq(containerAssignments.organizationId, principal.organizationId),
-        eq(containerAssignments.orderId, input.orderId),
-      ));
-    const expectedKeys = expected.map(row => `${row.containerCode}:${row.sealSerial}`).sort();
-    const actualKeys = input.actual.map(row => `${row.containerCode}:${row.sealSerial}`).sort();
-    const expectedHash = hashRequest(expectedKeys);
-    const actualHash = hashRequest(actualKeys);
-    const mismatch = expectedHash !== actualHash;
-
-    const [receipt] = await tx.insert(partnerReceipts).values({
+  try {
+    const result = await withIdempotency(db, {
       organizationId: principal.organizationId,
-      partnerId: principal.partnerId!,
-      orderId: input.orderId,
-      manifestId: input.manifestId,
-      expectedHash,
-      actualHash,
-      state: mismatch ? "discrepancy" : "accepted",
-      receivedBy: principal.userId,
-      receivedAt: new Date(),
-    }).returning();
+      scope: "partner:receipt",
+      key: input.key,
+      actorId: principal.userId,
+      requestHash: hashRequest({ ...input, actorId: principal.userId }),
+    }, async tx => {
+      const [order] = await tx.select().from(orders).where(and(
+        eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
+      )).limit(1);
+      if (!order) throw errors.notFound("order");
+      assertAssignedPartner(order, principal);
+      if (!["picked_up", "at_hub"].includes(order.lifecycleState)) {
+        throw new AppError("INVALID_TRANSITION", "ORDER_NOT_AWAITING_RECEIPT", { state: order.lifecycleState });
+      }
+      const [manifest] = await tx.select().from(intakeManifests).where(and(
+        eq(intakeManifests.id, input.manifestId),
+        eq(intakeManifests.organizationId, principal.organizationId),
+        eq(intakeManifests.orderId, input.orderId),
+      )).limit(1);
+      if (!manifest) throw errors.notFound("manifest");
 
-    let incidentId: string | null = null;
-    if (mismatch) {
-      const [incident] = await tx.insert(custodyDiscrepancies).values({
+      const expected = await tx.select({
+        containerCode: containers.code,
+        sealSerial: seals.serialNumber,
+      }).from(containerAssignments)
+        .innerJoin(containers, eq(containerAssignments.containerId, containers.id))
+        .innerJoin(seals, eq(containerAssignments.sealId, seals.id))
+        .where(and(
+          eq(containerAssignments.organizationId, principal.organizationId),
+          eq(containerAssignments.orderId, input.orderId),
+        ));
+      const expectedKeys = expected.map(row => `${row.containerCode}:${row.sealSerial}`).sort();
+      const actualKeys = input.actual.map(row => `${row.containerCode}:${row.sealSerial}`).sort();
+      const expectedHash = hashRequest(expectedKeys);
+      const actualHash = hashRequest(actualKeys);
+      const mismatch = expectedHash !== actualHash;
+
+      const [receipt] = await tx.insert(partnerReceipts).values({
+        organizationId: principal.organizationId,
+        partnerId: principal.partnerId!,
+        orderId: input.orderId,
+        manifestId: input.manifestId,
+        expectedHash,
+        actualHash,
+        state: mismatch ? "discrepancy" : "accepted",
+        receivedBy: principal.userId,
+        receivedAt: new Date(),
+      }).returning();
+
+      let incidentId: string | null = null;
+      if (mismatch) {
+        const [incident] = await tx.insert(custodyDiscrepancies).values({
+          organizationId: principal.organizationId,
+          orderId: input.orderId,
+          kind: "manifest_mismatch",
+          detailsJson: { expectedKeys, actualKeys },
+          openedBy: principal.userId,
+        }).returning();
+        incidentId = incident.id;
+        await tx.update(partnerReceipts).set({ discrepancyId: incident.id }).where(eq(partnerReceipts.id, receipt.id));
+        await appendEvent(tx, {
+          principal, aggregateType: "order", aggregateId: input.orderId,
+          eventType: "custody.discrepancy", reason: "manifest mismatch",
+          payload: { incidentId, expectedHash, actualHash },
+        });
+        return { status: "discrepancy" as const, incidentId, receiptId: receipt.id };
+      }
+
+      const manifestBagWeights = await tx.select({
+        description: intakeManifestLines.description,
+        weightGrams: intakeManifestLines.weightGrams,
+      }).from(intakeManifestLines).where(eq(intakeManifestLines.manifestId, manifest.id));
+      // Every bag has its own weight in the manifest; the manifest total is only the sum
+      // of them, so a receipt line must never claim the whole order's weight.
+      const expectedWeightByCode = new Map(
+        manifestBagWeights
+          .filter(line => line.description.startsWith("bag:"))
+          .map(line => [line.description.slice(4), line.weightGrams]),
+      );
+
+      for (const bag of input.actual) {
+        const expectedBag = expected.find(row => row.containerCode === bag.containerCode);
+        const [container] = await tx.select().from(containers).where(eq(containers.code, bag.containerCode)).limit(1);
+        const [seal] = await tx.select().from(seals).where(eq(seals.serialNumber, bag.sealSerial)).limit(1);
+        if (!seal || seal.state !== "assigned") {
+          throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_INTACT", {
+            containerCode: bag.containerCode,
+            serial: bag.sealSerial,
+            state: seal?.state ?? "unknown",
+          });
+        }
+        const expectedWeightGrams = expectedWeightByCode.get(bag.containerCode)
+          ?? (input.actual.length > 0 && manifest.weightGrams != null
+            ? Math.round(manifest.weightGrams / input.actual.length)
+            : manifest.weightGrams);
+        const absDiff = expectedWeightGrams != null
+          ? Math.abs(bag.actualWeightGrams - expectedWeightGrams)
+          : 0;
+        const weightMismatch = expectedWeightGrams != null
+          && expectedWeightGrams > 0
+          && absDiff >= WEIGHT_VARIANCE_MIN_GRAMS
+          && absDiff / expectedWeightGrams >= WEIGHT_VARIANCE_MIN_RATIO;
+
+        await tx.insert(partnerReceiptLines).values({
+          receiptId: receipt.id,
+          containerId: container.id,
+          expectedSealId: seal.id,
+          actualSealId: seal.id,
+          expectedWeightGrams,
+          actualWeightGrams: bag.actualWeightGrams,
+          status: weightMismatch ? "weight_mismatch" : "matched",
+        });
+
+        if (weightMismatch) {
+          const [incident] = await tx.insert(custodyDiscrepancies).values({
+            organizationId: principal.organizationId,
+            orderId: input.orderId,
+            kind: "weight_mismatch",
+            detailsJson: {
+              containerCode: bag.containerCode,
+              expectedWeightGrams,
+              actualWeightGrams: bag.actualWeightGrams,
+              deltaGrams: bag.actualWeightGrams - expectedWeightGrams,
+            },
+            openedBy: principal.userId,
+          }).returning();
+          if (!incidentId) {
+            incidentId = incident.id;
+            await tx.update(partnerReceipts).set({ discrepancyId: incident.id })
+              .where(eq(partnerReceipts.id, receipt.id));
+          }
+          await appendEvent(tx, {
+            principal, aggregateType: "order", aggregateId: input.orderId,
+            eventType: "custody.discrepancy", reason: "weight mismatch on partner receipt",
+            payload: {
+              incidentId: incident.id,
+              containerCode: bag.containerCode,
+              expectedWeightGrams,
+              actualWeightGrams: bag.actualWeightGrams,
+            },
+          });
+        }
+        void expectedBag;
+      }
+
+      await tx.insert(custodyEvents).values({
         organizationId: principal.organizationId,
         orderId: input.orderId,
-        kind: "manifest_mismatch",
-        detailsJson: { expectedKeys, actualKeys },
-        openedBy: principal.userId,
-      }).returning();
-      incidentId = incident.id;
-      await tx.update(partnerReceipts).set({ discrepancyId: incident.id }).where(eq(partnerReceipts.id, receipt.id));
+        fromParty: "courier",
+        toParty: "partner",
+        actorId: principal.userId,
+        manifestId: input.manifestId,
+        manifestHash: manifest.manifestHash,
+      });
+
+      const to = nextState(order.lifecycleState as "picked_up" | "at_hub", "partner_receive", principal);
+      await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+
+      const lines = await tx.select().from(orderLines).where(eq(orderLines.orderId, input.orderId));
+      const resolvedContract = await resolveActivePartnerContract(tx, principal.partnerId!);
+      if (resolvedContract) {
+        const { contract, priceVersion, wholesalePerKgKopeks, wholesalePerPieceKopeks } = resolvedContract;
+        for (const line of lines) {
+          const amountKopeks = line.unit === "gram"
+            ? Math.ceil(line.quotedQuantity * wholesalePerKgKopeks / 1000)
+            : line.quotedQuantity * wholesalePerPieceKopeks;
+          await tx.insert(partnerServiceAccruals).values({
+            organizationId: principal.organizationId,
+            partnerId: principal.partnerId!,
+            orderLineId: line.id,
+            contractId: contract.id,
+            contractPriceVersionId: priceVersion?.id ?? null,
+            quantity: line.quotedQuantity,
+            amountKopeks,
+            status: "estimated",
+          });
+        }
+      }
+
       await appendEvent(tx, {
         principal, aggregateType: "order", aggregateId: input.orderId,
-        eventType: "custody.discrepancy", reason: "manifest mismatch",
-        payload: { incidentId, expectedHash, actualHash },
+        eventType: "order.partner_receive", payload: { receiptId: receipt.id, manifestHash: manifest.manifestHash },
       });
-      return { status: "discrepancy" as const, incidentId, receiptId: receipt.id };
-    }
-
-    const manifestBagWeights = await tx.select({
-      description: intakeManifestLines.description,
-      weightGrams: intakeManifestLines.weightGrams,
-    }).from(intakeManifestLines).where(eq(intakeManifestLines.manifestId, manifest.id));
-    // Every bag has its own weight in the manifest; the manifest total is only the sum
-    // of them, so a receipt line must never claim the whole order's weight.
-    const expectedWeightByCode = new Map(
-      manifestBagWeights
-        .filter(line => line.description.startsWith("bag:"))
-        .map(line => [line.description.slice(4), line.weightGrams]),
-    );
-
-    for (const bag of input.actual) {
-      const expectedBag = expected.find(row => row.containerCode === bag.containerCode);
-      const [container] = await tx.select().from(containers).where(eq(containers.code, bag.containerCode)).limit(1);
-      const [seal] = await tx.select().from(seals).where(eq(seals.serialNumber, bag.sealSerial)).limit(1);
-      if (!seal || seal.state !== "assigned") {
-        throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_INTACT", { serial: bag.sealSerial, state: seal?.state ?? "unknown" });
-      }
-      await tx.insert(partnerReceiptLines).values({
-        receiptId: receipt.id,
-        containerId: container.id,
-        expectedSealId: seal?.id ?? null,
-        actualSealId: seal?.id ?? null,
-        expectedWeightGrams: expectedWeightByCode.get(bag.containerCode) ?? manifest.weightGrams,
-        actualWeightGrams: bag.actualWeightGrams,
-        status: "matched",
-      });
-      void expectedBag;
-    }
-
-    await tx.insert(custodyEvents).values({
-      organizationId: principal.organizationId,
-      orderId: input.orderId,
-      fromParty: "courier",
-      toParty: "partner",
-      actorId: principal.userId,
-      manifestId: input.manifestId,
-      manifestHash: manifest.manifestHash,
+      return { status: "accepted" as const, incidentId, receiptId: receipt.id };
     });
-
-    const to = nextState(order.lifecycleState as "picked_up" | "at_hub", "partner_receive", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
-
-    const lines = await tx.select().from(orderLines).where(eq(orderLines.orderId, input.orderId));
-    const [contract] = await tx.select().from(partnerContracts).where(eq(partnerContracts.partnerId, principal.partnerId!)).limit(1);
-    if (contract) {
-      // The wholesale rate comes from the signed contract, not from a constant in the code.
-      // `wholesalePerKgKopeks` is the price of one kilogram in kopeks; a gram-priced line is
-      // billed per kilogram, a piece-priced line per piece. A line whose unit the contract does
-      // not price yet accrues nothing rather than a nonsensical amount.
-      const terms = (contract.termsJson ?? {}) as {
-        wholesalePerKgKopeks?: number;
-        wholesalePerPieceKopeks?: number;
-      };
-      const wholesalePerKgKopeks = terms.wholesalePerKgKopeks ?? DEFAULT_WHOLESALE_PER_KG_KOPEKS;
-      const wholesalePerPieceKopeks = terms.wholesalePerPieceKopeks ?? DEFAULT_WHOLESALE_PER_PIECE_KOPEKS;
-      for (const line of lines) {
-        const amountKopeks = line.unit === "gram"
-          ? Math.ceil(line.quotedQuantity * wholesalePerKgKopeks / 1000)
-          : line.quotedQuantity * wholesalePerPieceKopeks;
-        await tx.insert(partnerServiceAccruals).values({
+    return { ...result.value, replayed: result.replayed };
+  } catch (error) {
+    // A broken/void seal rolls back the custody transfer so the partner never accepts
+    // tampered bags, but the custody discrepancy incident must survive the rollback.
+    if (error instanceof AppError && error.code === "CUSTODY_CONFLICT" && error.message === "SEAL_NOT_INTACT") {
+      await db.transaction(async incidentTx => {
+        const [incident] = await incidentTx.insert(custodyDiscrepancies).values({
           organizationId: principal.organizationId,
-          partnerId: principal.partnerId!,
-          orderLineId: line.id,
-          contractId: contract.id,
-          quantity: line.quotedQuantity,
-          amountKopeks,
-          status: "estimated",
+          orderId: input.orderId,
+          kind: "seal_not_intact",
+          detailsJson: error.details ?? {},
+          openedBy: principal.userId,
+        }).returning();
+        await appendEvent(incidentTx, {
+          principal,
+          aggregateType: "order",
+          aggregateId: input.orderId,
+          eventType: "custody.discrepancy",
+          reason: "seal not intact on partner receipt",
+          payload: { incidentId: incident.id, ...(error.details ?? {}) },
         });
-      }
+      });
     }
-
-    await appendEvent(tx, {
-      principal, aggregateType: "order", aggregateId: input.orderId,
-      eventType: "order.partner_receive", payload: { receiptId: receipt.id, manifestHash: manifest.manifestHash },
-    });
-    return { status: "accepted" as const, incidentId: null, receiptId: receipt.id };
-  });
-  return { ...result.value, replayed: result.replayed };
+    throw error;
+  }
 }
 
 export async function reportSealBroken(
@@ -355,7 +598,10 @@ export async function startInspection(db: Db, principal: Principal, input: { ord
     // The partner's own scales may disagree with the quote. When they do, the customer
     // gets a proposal instead of a surprise on the invoice.
     const proposal = await proposeWeightAdjustment(tx as Db, principal, order);
-    if (!proposal) return { orderId: order.id, state: to, adjustment: null };
+    if (!proposal) {
+      await reconcilePartnerAccrualsForOrder(tx, principal.organizationId, order.id);
+      return { orderId: order.id, state: to, adjustment: null };
+    }
 
     const awaiting = nextState("inspection", "propose_change", principal);
     await tx.update(orders).set({ lifecycleState: awaiting, version: order.version + 2 })
@@ -440,15 +686,25 @@ export async function decideAdjustment(
 
     if (input.accept) {
       await applyWeightDecision(tx as Db, adjustment, true);
+      await reconcilePartnerAccrualsForOrder(tx, principal.organizationId, order.id);
       const to = nextState(order.lifecycleState as "awaiting_approval", "approve_change", principal);
       await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
-      const [openInvoice] = await tx.select().from(customerInvoices).where(and(
+      const existingInvoices = await tx.select().from(customerInvoices).where(and(
         eq(customerInvoices.organizationId, principal.organizationId),
         eq(customerInvoices.orderId, order.id),
-        eq(customerInvoices.state, "open"),
+        ne(customerInvoices.state, "cancelled"),
+      ));
+      const openInvoice = existingInvoices.find(inv => inv.state === "open");
+      const hasPaidInvoice = existingInvoices.some(inv => inv.state === "paid");
+      const captured = await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(and(
+        eq(paymentIntents.organizationId, principal.organizationId),
+        eq(paymentIntents.orderId, order.id),
+        inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
       )).limit(1);
-      if (openInvoice) {
+
+      let supplementalInvoiceId: string | null = null;
+      if (openInvoice && !captured.length) {
         await tx.insert(customerInvoiceLines).values({
           invoiceId: openInvoice.id,
           kind: "adjustment",
@@ -464,13 +720,46 @@ export async function decideAdjustment(
         await tx.update(customerInvoices).set({
           totalKopeks: openInvoice.totalKopeks + adjustment.deltaKopeks,
         }).where(eq(customerInvoices.id, openInvoice.id));
+      } else if ((hasPaidInvoice || (openInvoice && captured.length > 0)) && adjustment.deltaKopeks > 0) {
+        // The original invoice is already settled: never mutate its total in place.
+        // Issue a separate open supplemental invoice so the delta can be collected cleanly.
+        const [supplemental] = await tx.insert(customerInvoices).values({
+          organizationId: principal.organizationId,
+          orderId: order.id,
+          number: `INV-${order.publicNumber}-ADJ-${adjustment.id.slice(0, 8)}`,
+          totalKopeks: adjustment.deltaKopeks,
+          state: "open",
+        }).returning();
+        supplementalInvoiceId = supplemental.id;
+        await tx.insert(customerInvoiceLines).values({
+          invoiceId: supplemental.id,
+          kind: "adjustment",
+          description: adjustment.reason,
+          quantity: 1,
+          amountKopeks: adjustment.deltaKopeks,
+          tariffVersionId: null,
+          taxMode: "none",
+          source: "adjustment",
+          consentId: approval.id,
+          actorId: principal.userId,
+        });
+        await appendEvent(tx, {
+          principal, aggregateType: "invoice", aggregateId: supplemental.id,
+          eventType: "invoice.created",
+          payload: { orderId: order.id, totalKopeks: adjustment.deltaKopeks, adjustmentId: adjustment.id, supplemental: true },
+        });
       }
       await appendEvent(tx, {
         principal, aggregateType: "order", aggregateId: order.id,
         eventType: "order.approve_change",
-        payload: { adjustmentId: adjustment.id, deltaKopeks: adjustment.deltaKopeks, approvalId: approval.id },
+        payload: {
+          adjustmentId: adjustment.id,
+          deltaKopeks: adjustment.deltaKopeks,
+          approvalId: approval.id,
+          supplementalInvoiceId,
+        },
       });
-      return { orderId: order.id, adjustmentId: adjustment.id, state: to };
+      return { orderId: order.id, adjustmentId: adjustment.id, state: to, supplementalInvoiceId };
     }
 
     const inspected = nextState(order.lifecycleState as "awaiting_approval", "decline_change", principal);
@@ -479,6 +768,7 @@ export async function decideAdjustment(
       const hubState = nextState(inspected, "return_unprocessed");
       const readyState = nextState(hubState, "ready_for_return");
       const reason = "Отказ клиента: возврат без обработки";
+      await voidPartnerAccrualsForOrder(tx, principal.organizationId, order.id, reason);
       await tx.update(orders).set({
         lifecycleState: readyState,
         returnReason: reason,
@@ -557,6 +847,12 @@ export async function returnUnprocessedOrder(
     for (const invoice of openInvoices) {
       await tx.update(customerInvoices).set({ state: "cancelled" }).where(eq(customerInvoices.id, invoice.id));
     }
+    const { voidedAccruals, creditedAccruals } = await voidPartnerAccrualsForOrder(
+      tx,
+      principal.organizationId,
+      order.id,
+      input.reason,
+    );
     // Nothing will be delivered, so the capacity held for this order is released again.
     const liveReservations = await tx.select({
       id: slotReservations.id,
@@ -596,6 +892,7 @@ export async function returnUnprocessedOrder(
       payload: {
         from: order.lifecycleState, to: readyState, reason: input.reason,
         releasedReservations: liveReservations.length, voidedInvoices: openInvoices.length,
+        voidedAccruals, creditedAccruals,
       },
     });
     return {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { createDb, type Db } from "../src/db/client.js";
-import { custodyEvents, ledgerAccounts, ledgerEntries, ledgerJournals, orders, tariffVersions } from "../src/db/schema.js";
+import { custodyDiscrepancies, custodyEvents, ledgerAccounts, ledgerEntries, ledgerJournals, orders, seals, tariffVersions } from "../src/db/schema.js";
 import { and, inArray } from "drizzle-orm";
 
 import { makePrincipal, seedUser } from "./fixtures.js";
@@ -48,6 +48,29 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
       actual: [{ containerCode: f.bag, sealSerial: f.seal.serial, actualWeightGrams: 1_000 }],
       key: "receipt-after-broken",
     })).rejects.toThrow("SEAL_NOT_INTACT");
+
+    const incidents = await db.select().from(custodyDiscrepancies)
+      .where(eq(custodyDiscrepancies.orderId, f.orderId));
+    expect(incidents.some(row => row.kind === "seal_not_intact")).toBe(true);
+  });
+
+  it("C02b: broken seal discovered during receiveHandoff persists discrepancy outside rolled-back tx", async () => {
+    const f = await intakeFixture();
+    const partner = await seedPartnerForOrder(db, f);
+    await db.update(seals).set({ state: "void" }).where(eq(seals.id, f.seal.id));
+
+    await expect(receiveHandoff(db, partner.principal, {
+      orderId: f.orderId, manifestId: f.intake.manifestId,
+      actual: [{ containerCode: f.bag, sealSerial: f.seal.serial, actualWeightGrams: 1_000 }],
+      key: "receipt-void-seal",
+    })).rejects.toThrow("SEAL_NOT_INTACT");
+
+    const [order] = await db.select().from(orders).where(eq(orders.id, f.orderId)).limit(1);
+    expect(order.lifecycleState).toBe("picked_up");
+    const incidents = await db.select().from(custodyDiscrepancies)
+      .where(eq(custodyDiscrepancies.orderId, f.orderId));
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0].kind).toBe("seal_not_intact");
   });
 
   it("E05: a second partner cannot take over an order already assigned to another partner", async () => {

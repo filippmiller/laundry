@@ -107,7 +107,11 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       // `price_rules.rounding_rule` is free text without a database constraint. An unknown value
       // would fall through to the per-kilogram branch and quietly price the line ten times too
       // low, so it is rejected instead of reinterpreted.
-      if (rule.roundingRule !== "exact" && rule.roundingRule !== "gram_up_to_100") {
+      if (
+        rule.roundingRule !== "exact"
+        && rule.roundingRule !== "gram_up_to_100"
+        && rule.roundingRule !== "gram_up_to_1000"
+      ) {
         throw new AppError("VALIDATION_ERROR", "UNKNOWN_ROUNDING_RULE", {
           serviceId: line.serviceId, roundingRule: rule.roundingRule,
         });

@@ -216,6 +216,7 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
         FROM partner_service_accruals a
         LEFT JOIN partners p ON p.id = a.partner_id
         WHERE a.organization_id = ${organizationId}
+          AND a.status <> 'voided'
         GROUP BY a.partner_id, p.name, a.status, a.disputed
       `),
       db.execute(sql`
@@ -294,11 +295,41 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
   let receivableKopeks = 0;
   let creditKopeks = 0;
 
+  // Allocate order-level captures and refunds across the order's invoices in chronological order
+  // (FIFO) so an order with an original invoice plus a supplemental adjustment invoice never
+  // double-counts captures or creates phantom credits/receivables.
+  const invoicesByOrder = new Map<string, InvoiceSqlRow[]>();
+  for (const row of invoiceRows) {
+    const list = invoicesByOrder.get(row.order_id) ?? [];
+    list.push(row);
+    invoicesByOrder.set(row.order_id, list);
+  }
+  const allocationByInvoice = new Map<string, { captured: number; refunded: number; net: number }>();
+  for (const list of invoicesByOrder.values()) {
+    list.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    let remainingCaptured = Number(list[0].captured_kopeks ?? 0);
+    let remainingRefunded = Number(list[0].refunded_kopeks ?? 0);
+    list.forEach((row, index) => {
+      const total = Number(row.invoice_total_kopeks ?? 0);
+      const isLast = index === list.length - 1;
+      const allocCaptured = isLast ? remainingCaptured : Math.min(total, Math.max(0, remainingCaptured));
+      remainingCaptured -= allocCaptured;
+      const allocRefunded = isLast ? remainingRefunded : Math.min(allocCaptured, Math.max(0, remainingRefunded));
+      remainingRefunded -= allocRefunded;
+      allocationByInvoice.set(row.invoice_id, {
+        captured: allocCaptured,
+        refunded: allocRefunded,
+        net: allocCaptured - allocRefunded,
+      });
+    });
+  }
+
   const receivables: ReceivableRow[] = invoiceRows.map(row => {
     const invoiceTotalKopeks = Number(row.invoice_total_kopeks ?? 0);
-    const capturedKopeks = Number(row.captured_kopeks ?? 0);
-    const refunded = Number(row.refunded_kopeks ?? 0);
-    const net = capturedKopeks - refunded;
+    const alloc = allocationByInvoice.get(row.invoice_id) ?? { captured: 0, refunded: 0, net: 0 };
+    const capturedKopeks = alloc.captured;
+    const refunded = alloc.refunded;
+    const net = alloc.net;
     const receivable = Math.max(0, invoiceTotalKopeks - net);
     const credit = Math.max(0, net - invoiceTotalKopeks);
     const ageDays = daysSince(new Date(row.created_at).toISOString(), now);
@@ -421,11 +452,19 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
   }
   const chargebackAtRiskKopeks = Number(chargebackRows[0]?.total_kopeks ?? 0);
 
-  const monthly: MonthPoint[] = monthRows.map(row => ({
-    month: row.month,
-    invoicedKopeks: Number(row.invoiced_kopeks ?? 0),
-    netCollectedKopeks: Number(row.net_collected_kopeks ?? 0),
-  }));
+  const monthMap = new Map<string, { invoicedKopeks: number; netCollectedKopeks: number }>();
+  for (const row of receivables) {
+    const month = row.issuedAt.slice(0, 7);
+    const entry = monthMap.get(month) ?? { invoicedKopeks: 0, netCollectedKopeks: 0 };
+    entry.invoicedKopeks += row.invoiceTotalKopeks;
+    entry.netCollectedKopeks += Math.max(0, row.netCollectedKopeks);
+    monthMap.set(month, entry);
+  }
+  const monthly: MonthPoint[] = [...monthMap.entries()]
+    .sort(([a], [b]) => b.localeCompare(a))
+    .slice(0, 12)
+    .map(([month, totals]) => ({ month, ...totals }));
+  void monthRows;
 
   return {
     currency: "RUB",

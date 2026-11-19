@@ -144,6 +144,6 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("POST /finance/payments/capture 
     expect(response.json().error.code).toBe("FINANCIAL_HOLD");
     expect((await capturedIntents(openOrderId)).length).toBe(1);
     const [invoice] = await db.select().from(customerInvoices).where(eq(customerInvoices.id, openInvoiceId));
-    expect(invoice?.state).toBe("open");
+    expect(invoice?.state).toBe("paid");
   });
 });

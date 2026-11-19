@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../src/db/client.js";
 import {
   courierShifts, courierDevices, routes, routeStops, seals, evidenceAssets, orders,
-  memberships, membershipRoles, partnerContracts, partners,
+  memberships, membershipRoles, partnerContracts, partnerPriceVersions, partners,
 } from "../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { makePrincipal, seedAddress, seedCatalog, seedDeliveryWindow, seedUser, seedWindow } from "./fixtures.js";
@@ -106,8 +106,14 @@ export async function seedPartner(db: Db, organizationId: string) {
     signed: true,
     termsJson: { wholesalePerKgKopeks: 600 },
   }).returning();
+  const [priceVersion] = await db.insert(partnerPriceVersions).values({
+    contractId: contract.id,
+    version: "v1",
+    effectiveFrom: new Date("2026-01-01T00:00:00Z"),
+    pricesJson: { wholesalePerKgKopeks: 600 },
+  }).returning();
   const principal: Principal = makePrincipal(organizationId, userId, ["laundry_operator"], { partnerId: partner.id });
-  return { partnerId: partner.id, contractId: contract.id, userId, principal };
+  return { partnerId: partner.id, contractId: contract.id, priceVersionId: priceVersion.id, userId, principal };
 }
 
 export async function seedPartnerForOrder(
