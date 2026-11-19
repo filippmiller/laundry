@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ClipboardCheck,
   FileSpreadsheet,
+  Inbox,
   Package,
   PackageCheck,
   Play,
@@ -19,7 +20,28 @@ import {
 import { api, dt, money } from "../api";
 import { DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
-import { formatError, ORDER_STATE_LABELS } from "../labels";
+import {
+  ADJUSTMENT_STATE_LABELS,
+  adjustmentStateTone,
+  formatError,
+  GARMENT_STATUS_LABELS,
+  garmentStateTone,
+  ORDER_STATE_LABELS,
+  orderStateTone,
+  PARTNER_INVOICE_STATE_LABELS,
+  partnerInvoiceStateTone,
+  stateLabel,
+} from "../labels";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Card, CardHeader } from "../components/ui/Card";
+import { DataTable, type DataTableColumn } from "../components/ui/DataTable";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Input, Select, Textarea } from "../components/ui/Field";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Reveal, Stagger } from "../components/ui/Reveal";
+import { StatGrid, StatTile } from "../components/ui/StatTile";
+import { TabPanel, Tabs, type TabItem } from "../components/ui/Tabs";
 import { ItemMixPanel } from "./analytics-panels";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
@@ -135,18 +157,12 @@ const PROCESS_OPTIONS = [
   { value: "steam_press", label: "Отпаривание/глажка" },
 ] as const;
 
-const ADJUSTMENT_STATE_LABELS: Record<string, string> = {
-  proposed: "Ожидает решения клиента",
-  accepted: "Согласовано клиентом",
-  declined: "Отклонено клиентом",
-};
-
-const INVOICE_STATE_LABELS: Record<string, string> = {
-  draft: "Черновик",
-  issued: "Выставлен",
-  approved: "Подтверждён",
-  paid: "Оплачен",
-  disputed: "Оспорен",
+/** Status of a single accrual line as the partner settlement sees it. */
+const ACCRUAL_LINE_STATE_LABELS: Record<string, string> = {
+  estimated: "Оценено",
+  matched: "Сверено",
+  discrepancy: "Расхождение",
+  disputed: "Оспорено",
 };
 
 const RECEIVING_STATES = new Set(["picked_up", "at_hub"]);
@@ -154,7 +170,11 @@ const INSPECTION_STATES = new Set(["partner_received", "inspection", "awaiting_a
 const QC_STATES = new Set(["processing"]);
 
 function getStageBadgeText(state: string): string {
-  return ORDER_STATE_LABELS[state] ?? state;
+  return stateLabel(ORDER_STATE_LABELS, state);
+}
+
+function garmentStateLabel(status: string): string {
+  return stateLabel(GARMENT_STATUS_LABELS, status);
 }
 
 function buildContainerDrafts(containers: ContainerDto[]): ActualContainerDraft[] {
@@ -173,7 +193,85 @@ function buildQcDrafts(garments: GarmentDto[]): Record<string, QcDraft> {
   return next;
 }
 
+/** The queue tabs are plain views over the same list of orders. */
+function ordersForFilter(orders: PartnerOrderDto[], filter: QueueFilter): PartnerOrderDto[] {
+  if (filter === "receiving") return orders.filter((o) => RECEIVING_STATES.has(o.lifecycleState));
+  if (filter === "inspection") return orders.filter((o) => INSPECTION_STATES.has(o.lifecycleState));
+  if (filter === "qc") return orders.filter((o) => QC_STATES.has(o.lifecycleState));
+  return orders;
+}
+
+function invoiceLineLabel(line: PartnerInvoiceLineDto): string {
+  return line.description ?? line.name ?? line.serviceName ?? `Строка ${line.id}`;
+}
+
+/** Units arrive from the catalogue in Latin — the operator reads them in Russian. */
+const UNIT_LABELS: Record<string, string> = {
+  piece: "шт.",
+  gram: "г",
+  kg: "кг",
+  service: "услуга",
+  item: "шт.",
+};
+
+function unitLabel(unit: string | undefined): string {
+  if (!unit) return "";
+  return stateLabel(UNIT_LABELS, unit);
+}
+
+/* ------------------------------------------------------------------ */
+/* Table columns                                                      */
+/* ------------------------------------------------------------------ */
+
+const CONTAINER_COLUMNS: DataTableColumn<ContainerDto>[] = [
+  { key: "code", header: "Код", render: (c) => <span className="mono">{c.containerCode}</span> },
+  { key: "seal", header: "Пломба", render: (c) => <span className="mono">{c.sealSerial ?? "—"}</span> },
+  { key: "weight", header: "Вес", render: (c) => `${c.weightGrams} г`, numeric: true },
+];
+
+const GARMENT_COLUMNS: DataTableColumn<GarmentDto>[] = [
+  { key: "code", header: "Код", render: (g) => <span className="mono">{g.itemCode}</span> },
+  {
+    key: "item",
+    header: "Изделие",
+    render: (g) => (
+      <>
+        {g.category}: {g.description}
+      </>
+    ),
+  },
+  {
+    key: "status",
+    header: "Статус",
+    render: (g) => <Badge tone={garmentStateTone(g.status)}>{garmentStateLabel(g.status)}</Badge>,
+  },
+];
+
+const ACCRUAL_COLUMNS: DataTableColumn<AccrualItemDto>[] = [
+  {
+    key: "order",
+    header: "Заказ",
+    render: (item) => (
+      <span className="mono">{item.orderPublicNumber ?? item.publicNumber ?? item.orderId ?? "—"}</span>
+    ),
+  },
+  {
+    key: "service",
+    header: "Услуга / позиция",
+    render: (item) => item.serviceName ?? item.description ?? "Оптовая обработка",
+  },
+  { key: "qty", header: "Кол-во", render: (item) => `${item.qty ?? 1} ${unitLabel(item.unit)}`, numeric: true },
+  { key: "date", header: "Дата", render: (item) => <span className="mono">{dt(item.createdAt)}</span> },
+  {
+    key: "amount",
+    header: "Сумма",
+    render: (item) => money(item.amountKopeks ?? item.totalKopeks ?? 0),
+    numeric: true,
+  },
+];
+
 export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
+  const tabsId = useId();
   const [workspace, setWorkspace] = useState<PartnerWorkspaceResponse | null>(null);
   const [accruals, setAccruals] = useState<PartnerAccrualsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -201,9 +299,6 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
   const [printActId, setPrintActId] = useState<string | null>(null);
   const [disputeLine, setDisputeLine] = useState<{ id: string; label: string } | null>(null);
   const [disputeReason, setDisputeReason] = useState("");
-
-  // Unique IDs for form labels
-  const uid = useId();
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -243,12 +338,7 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
     return { all: orders.length, receiving, inspection, qc };
   }, [orders]);
 
-  const filteredOrders = useMemo(() => {
-    if (queueFilter === "receiving") return orders.filter((o) => RECEIVING_STATES.has(o.lifecycleState));
-    if (queueFilter === "inspection") return orders.filter((o) => INSPECTION_STATES.has(o.lifecycleState));
-    if (queueFilter === "qc") return orders.filter((o) => QC_STATES.has(o.lifecycleState));
-    return orders;
-  }, [orders, queueFilter]);
+  const filteredOrders = useMemo(() => ordersForFilter(orders, queueFilter), [orders, queueFilter]);
 
   const selectedOrder = useMemo(
     () => orders.find((o) => o.orderId === selectedOrderId) ?? filteredOrders[0] ?? null,
@@ -504,307 +594,273 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
 
   const isBusy = busyAction !== null;
 
-  return (
-    <div style={{ display: "grid", gap: 20 }}>
-      {/* What we actually received: items by category and weight against the quote */}
-      <ItemMixPanel notify={notify} />
+  const queueTabs: TabItem[] = [
+    { id: "all", label: `Все заказы (${counts.all})` },
+    { id: "receiving", label: `Приёмка (${counts.receiving})` },
+    { id: "inspection", label: `Осмотр и запуск (${counts.inspection})` },
+    { id: "qc", label: `ОТК (${counts.qc})` },
+  ];
 
-      {/* Header */}
-      <section className="panel" style={{ padding: 16 }}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: 12,
-          }}
-        >
-          <div>
-            <h2 className="panel-title" style={{ margin: 0 }}>
-              Рабочее место фабрики-прачечной
-            </h2>
-            <p className="muted" style={{ margin: "4px 0 0" }}>
-              Приёмка партий от курьера, осмотр технолога, контроль качества (ОТК) и расчёты с платформой
-            </p>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            {accruals?.partnerId && (
-              <span className="muted mono">Партнёр: {accruals.partnerId}</span>
-            )}
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => void loadData()}
-              disabled={loading || isBusy}
-            >
-              <RefreshCw size={16} aria-hidden="true" />
-              <span>Обновить</span>
-            </button>
-          </div>
-        </div>
+  const adjustmentColumns: DataTableColumn<AdjustmentDto>[] = [
+    { key: "date", header: "Дата", render: (adj) => <span className="mono">{dt(adj.createdAt)}</span> },
+    { key: "reason", header: "Причина", render: (adj) => adj.reason },
+    { key: "amount", header: "Сумма", render: (adj) => money(adj.deltaKopeks), numeric: true },
+    {
+      key: "state",
+      header: "Статус решения клиента",
+      render: (adj) => (
+        <Badge tone={adjustmentStateTone(adj.state)}>{stateLabel(ADJUSTMENT_STATE_LABELS, adj.state)}</Badge>
+      ),
+    },
+  ];
 
-        {/* Queue filters */}
-        <div className="button-row" style={{ marginBlockStart: 14 }}>
-          <button
-            type="button"
-            className={queueFilter === "all" ? "primary" : "ghost"}
-            onClick={() => setQueueFilter("all")}
+  const invoiceLineColumns: DataTableColumn<PartnerInvoiceLineDto>[] = [
+    { key: "line", header: "Строка начисления", render: (line) => invoiceLineLabel(line) },
+    {
+      key: "qty",
+      header: "Кол-во",
+      render: (line) => `${line.qty ?? 1} ${unitLabel(line.unit)}`,
+      numeric: true,
+    },
+    {
+      key: "amount",
+      header: "Сумма",
+      render: (line) => money(line.amountKopeks ?? line.totalKopeks ?? 0),
+      numeric: true,
+    },
+    {
+      key: "status",
+      header: "Статус",
+      render: (line) => {
+        if (line.disputed === true || line.status === "disputed") {
+          return <Badge tone="danger">Оспорено</Badge>;
+        }
+        if (line.status) {
+          return <Badge tone={partnerInvoiceStateTone(line.status)}>{ACCRUAL_LINE_STATE_LABELS[line.status] ?? "Начислено"}</Badge>;
+        }
+        return <Badge tone="neutral">Начислено</Badge>;
+      },
+    },
+    {
+      key: "action",
+      header: "Действие",
+      render: (line) => {
+        const isDisputed = line.disputed === true || line.status === "disputed";
+        return (
+          <Button
+            variant="ghost"
+            disabled={isBusy || isDisputed}
+            onClick={() => {
+              setDisputeLine({ id: line.id, label: invoiceLineLabel(line) });
+              setDisputeReason("");
+            }}
+            leadingIcon={<AlertTriangle size={14} aria-hidden="true" />}
           >
-            Все заказы ({counts.all})
-          </button>
-          <button
-            type="button"
-            className={queueFilter === "receiving" ? "primary" : "ghost"}
-            onClick={() => setQueueFilter("receiving")}
-          >
-            Приёмка ({counts.receiving})
-          </button>
-          <button
-            type="button"
-            className={queueFilter === "inspection" ? "primary" : "ghost"}
-            onClick={() => setQueueFilter("inspection")}
-          >
-            Осмотр и запуск ({counts.inspection})
-          </button>
-          <button
-            type="button"
-            className={queueFilter === "qc" ? "primary" : "ghost"}
-            onClick={() => setQueueFilter("qc")}
-          >
-            ОТК ({counts.qc})
-          </button>
-        </div>
-      </section>
+            Оспорить начисление
+          </Button>
+        );
+      },
+    },
+  ];
 
-      {/* Queue cards + Selected order workbench */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(260px, 340px) minmax(0, 1fr)",
-          gap: 16,
-          alignItems: "start",
-        }}
-      >
-        {/* Left: Queue cards */}
-        <aside className="panel" style={{ padding: 14 }}>
-          <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>
-            Очередь заказов ({filteredOrders.length})
-          </h3>
-          {loading && !workspace && <p className="muted">Загрузка очереди фабрики...</p>}
-          {!loading && filteredOrders.length === 0 && (
-            <p className="muted">В выбранной очереди заказов нет.</p>
-          )}
-          <div style={{ display: "grid", gap: 10 }}>
-            {filteredOrders.map((order) => {
-              const isSelected = selectedOrder?.orderId === order.orderId;
-              const pendingAdj = order.adjustments.some((a) => a.state === "proposed");
-              const declinedAdj = order.adjustments.some((a) => a.state === "declined");
-              return (
-                <button
-                  key={order.orderId}
-                  type="button"
-                  onClick={() => setSelectedOrderId(order.orderId)}
-                  style={{
-                    textAlign: "left",
-                    padding: 12,
-                    borderRadius: 10,
-                    border: isSelected
-                      ? "2px solid var(--accent, #2563eb)"
-                      : "1px solid var(--border-strong, #d1d5db)",
-                    background: isSelected ? "var(--surface-alt, rgba(37, 99, 235, 0.06))" : "transparent",
-                    cursor: "pointer",
-                    display: "grid",
-                    gap: 6,
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <strong className="mono">{order.publicNumber}</strong>
-                    <span className="muted" style={{ fontSize: "0.82rem" }}>
-                      {dt(order.createdAt)}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: "0.9rem", fontWeight: 600 }}>
-                    {getStageBadgeText(order.lifecycleState)}
-                  </div>
-                  <div className="muted" style={{ fontSize: "0.82rem", display: "flex", gap: 10, flexWrap: "wrap" }}>
+  function renderQueue(filter: QueueFilter) {
+    const list = ordersForFilter(orders, filter);
+    if (loading && !workspace) {
+      return <p className="muted">Загрузка очереди фабрики...</p>;
+    }
+    if (list.length === 0) {
+      return (
+        <EmptyState
+          icon={<Inbox size={20} aria-hidden="true" />}
+          title="В выбранной очереди заказов нет."
+        />
+      );
+    }
+    return (
+      <Stagger as="ul" className="data-list">
+        {list.map((order) => {
+          const isSelected = selectedOrder?.orderId === order.orderId;
+          const pendingAdj = order.adjustments.some((a) => a.state === "proposed");
+          const declinedAdj = order.adjustments.some((a) => a.state === "declined");
+          return (
+            <Reveal as="li" key={order.orderId}>
+              <button
+                type="button"
+                className={isSelected ? "data-row selected" : "data-row"}
+                onClick={() => setSelectedOrderId(order.orderId)}
+              >
+                <span className="data-row__main">
+                  <span className="data-row__title mono">{order.publicNumber}</span>
+                  <span className="row row--tight">
+                    <Badge tone={orderStateTone(order.lifecycleState)}>
+                      {getStageBadgeText(order.lifecycleState)}
+                    </Badge>
+                    {pendingAdj && <Badge tone="warn">Ожидается ответ клиента по доплате</Badge>}
+                    {declinedAdj && <Badge tone="danger">Клиент отклонил доплату</Badge>}
+                  </span>
+                  <span className="row row--tight muted">
                     <span>Мест: {order.containers.length}</span>
                     <span>
                       Вещей: {order.garments.length > 0 ? order.garments.length : "Эконом (без поштучки)"}
                     </span>
-                  </div>
-                  {pendingAdj && (
-                    <span className="muted" style={{ fontSize: "0.8rem", fontWeight: 600 }}>
-                      Ожидается ответ клиента по доплате
-                    </span>
-                  )}
-                  {declinedAdj && (
-                    <span className="muted" style={{ fontSize: "0.8rem", fontWeight: 600 }}>
-                      Клиент отклонил доплату
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </aside>
+                  </span>
+                </span>
+                <span className="muted mono">{dt(order.createdAt)}</span>
+              </button>
+            </Reveal>
+          );
+        })}
+      </Stagger>
+    );
+  }
 
-        {/* Right: Selected order workbench */}
-        <main style={{ display: "grid", gap: 16 }}>
+  return (
+    <div className="workspace-grid">
+      <PageHeader
+        title="Рабочее место фабрики-прачечной"
+        lede="Приёмка партий от курьера, осмотр технолога, контроль качества (ОТК) и расчёты с платформой"
+        actions={
+          <>
+            {accruals?.partnerId && <Badge tone="neutral">Партнёр: {accruals.partnerId}</Badge>}
+            <Button
+              variant="ghost"
+              onClick={() => void loadData()}
+              disabled={loading || isBusy}
+              leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+            >
+              Обновить
+            </Button>
+          </>
+        }
+      />
+
+      {/* What we actually received: items by category and weight against the quote */}
+      <ItemMixPanel notify={notify} />
+
+      {/* Queue + selected order workbench */}
+      <div className="workspace-side-col">
+        {/* Left: queue of orders */}
+        <Card>
+          <CardHeader title={`Очередь заказов (${filteredOrders.length})`} />
+          <Tabs
+            idPrefix={tabsId}
+            items={queueTabs}
+            value={queueFilter}
+            onChange={(id) => setQueueFilter(id as QueueFilter)}
+            label="Очереди заказов фабрики-прачечной"
+          />
+          {queueTabs.map((tab) => (
+            <TabPanel key={tab.id} idPrefix={tabsId} id={tab.id} active={queueFilter === tab.id}>
+              {renderQueue(tab.id as QueueFilter)}
+            </TabPanel>
+          ))}
+        </Card>
+
+        {/* Right: selected order workbench */}
+        <div className="workspace-grid">
           {!selectedOrder && (
-            <section className="panel" style={{ padding: 20 }}>
-              <p className="muted" style={{ margin: 0 }}>
-                Выберите заказ в очереди слева для приёмки, осмотра технолога или проведения ОТК.
-              </p>
-            </section>
+            <Card>
+              <EmptyState
+                icon={<Package size={20} aria-hidden="true" />}
+                title="Заказ не выбран"
+                text="Выберите заказ в очереди слева для приёмки, осмотра технолога или проведения ОТК."
+              />
+            </Card>
           )}
 
           {selectedOrder && (
             <>
               {/* Selected order summary */}
-              <section className="panel" style={{ padding: 16 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "flex-start",
-                    flexWrap: "wrap",
-                    gap: 12,
-                  }}
-                >
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Card>
+                <CardHeader
+                  title={
+                    <span className="row row--tight">
                       <Package size={18} aria-hidden="true" />
-                      <h3 className="panel-title" style={{ margin: 0 }}>
+                      <span>
                         Заказ <span className="mono">{selectedOrder.publicNumber}</span>
-                      </h3>
-                      <span
-                        style={{
-                          padding: "2px 10px",
-                          borderRadius: 999,
-                          border: "1px solid var(--border-strong, #d1d5db)",
-                          fontSize: "0.85rem",
-                          fontWeight: 600,
-                        }}
-                      >
-                        {getStageBadgeText(selectedOrder.lifecycleState)}
                       </span>
-                    </div>
-                    <div className="muted" style={{ marginBlockStart: 6, fontSize: "0.9rem" }}>
+                    </span>
+                  }
+                  subtitle={
+                    <>
                       Создан: <span className="mono">{dt(selectedOrder.createdAt)}</span>
                       {selectedOrder.manifestId && (
                         <>
                           {" · "}Манифест: <span className="mono">{selectedOrder.manifestId}</span>
                         </>
                       )}
-                    </div>
-                  </div>
-                </div>
+                    </>
+                  }
+                  actions={
+                    <Badge tone={orderStateTone(selectedOrder.lifecycleState)} large>
+                      {getStageBadgeText(selectedOrder.lifecycleState)}
+                    </Badge>
+                  }
+                />
 
                 {selectedOrder.returnReason && (
-                  <div className="alert-banner" style={{ marginBlockStart: 12 }}>
+                  <div className="alert-banner">
                     <strong>Причина возврата:</strong> {selectedOrder.returnReason}
                   </div>
                 )}
-              </section>
+              </Card>
 
               {/* 1. Приёмка партий от курьера (picked_up / at_hub) */}
               {RECEIVING_STATES.has(selectedOrder.lifecycleState) && (
-                <section className="panel" style={{ padding: 16 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBlockEnd: 8 }}>
-                    <PackageCheck size={18} aria-hidden="true" />
-                    <h4 className="panel-title" style={{ margin: 0 }}>
-                      1. Приёмка партии от курьера
-                    </h4>
-                  </div>
-                  <p className="muted" style={{ marginBlockStart: 0 }}>
-                    Сверьте фактические коды мешков, серийные номера пломб и вес с ожидаемыми данными.
-                    При необходимости скорректируйте значения, чтобы зафиксировать расхождение при приёмке.
-                  </p>
+                <Card>
+                  <CardHeader
+                    title={
+                      <span className="row row--tight">
+                        <PackageCheck size={18} aria-hidden="true" />
+                        <span>1. Приёмка партии от курьера</span>
+                      </span>
+                    }
+                    subtitle="Сверьте фактические коды мешков, серийные номера пломб и вес с ожидаемыми данными. При необходимости скорректируйте значения, чтобы зафиксировать расхождение при приёмке."
+                  />
 
                   {selectedOrder.containers.length === 0 ? (
-                    <p className="muted">Ожидаемые контейнеры не указаны.</p>
+                    <EmptyState
+                      icon={<Package size={20} aria-hidden="true" />}
+                      title="Ожидаемые контейнеры не указаны."
+                    />
                   ) : (
-                    <div style={{ display: "grid", gap: 12, marginBlockEnd: 14 }}>
+                    <div className="stack">
                       {selectedOrder.containers.map((expected, idx) => {
                         const draft = actualContainers[idx] ?? {
                           containerCode: expected.containerCode,
                           sealSerial: expected.sealSerial ?? "",
                           weightGrams: String(expected.weightGrams ?? 0),
                         };
-                        const codeId = `${uid}-container-code-${idx}`;
-                        const sealId = `${uid}-container-seal-${idx}`;
-                        const weightId = `${uid}-container-weight-${idx}`;
                         return (
-                          <div
-                            key={`${expected.containerCode}-${idx}`}
-                            style={{
-                              border: "1px solid var(--border-strong, #d1d5db)",
-                              borderRadius: 10,
-                              padding: 12,
-                              display: "grid",
-                              gap: 10,
-                            }}
-                          >
-                            <div className="muted" style={{ fontSize: "0.88rem" }}>
+                          <div key={`${expected.containerCode}-${idx}`} className="panel-muted stack">
+                            <div className="muted">
                               <strong>Ожидалось (место #{idx + 1}):</strong> контейнер{" "}
                               <span className="mono">{expected.containerCode}</span>, пломба{" "}
                               <span className="mono">{expected.sealSerial ?? "не указана"}</span>, вес{" "}
                               <span className="mono">{expected.weightGrams} г</span>
                             </div>
-                            <div
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                                gap: 10,
-                              }}
-                            >
-                              <div>
-                                <label htmlFor={codeId} style={{ display: "block", marginBlockEnd: 4 }}>
-                                  Фактический код контейнера
-                                </label>
-                                <input
-                                  id={codeId}
-                                  type="text"
-                                  value={draft.containerCode}
-                                  onChange={(e) => handleContainerChange(idx, "containerCode", e.target.value)}
-                                  style={{ width: "100%" }}
-                                />
-                              </div>
-                              <div>
-                                <label htmlFor={sealId} style={{ display: "block", marginBlockEnd: 4 }}>
-                                  Фактический номер пломбы
-                                </label>
-                                <input
-                                  id={sealId}
-                                  type="text"
-                                  value={draft.sealSerial}
-                                  placeholder="Без пломбы"
-                                  onChange={(e) => handleContainerChange(idx, "sealSerial", e.target.value)}
-                                  style={{ width: "100%" }}
-                                />
-                              </div>
-                              <div>
-                                <label htmlFor={weightId} style={{ display: "block", marginBlockEnd: 4 }}>
-                                  Фактический вес (г)
-                                </label>
-                                <input
-                                  id={weightId}
-                                  type="number"
-                                  min={0}
-                                  step={1}
-                                  value={draft.weightGrams}
-                                  onChange={(e) => handleContainerChange(idx, "weightGrams", e.target.value)}
-                                  style={{ width: "100%" }}
-                                />
-                              </div>
+                            <div className="grid-three">
+                              <Input
+                                label="Фактический код контейнера"
+                                type="text"
+                                value={draft.containerCode}
+                                onChange={(e) => handleContainerChange(idx, "containerCode", e.target.value)}
+                              />
+                              <Input
+                                label="Фактический номер пломбы"
+                                type="text"
+                                value={draft.sealSerial}
+                                placeholder="Без пломбы"
+                                onChange={(e) => handleContainerChange(idx, "sealSerial", e.target.value)}
+                              />
+                              <Input
+                                label="Фактический вес (г)"
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={draft.weightGrams}
+                                onChange={(e) => handleContainerChange(idx, "weightGrams", e.target.value)}
+                              />
                             </div>
                           </div>
                         );
@@ -813,101 +869,78 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
                   )}
 
                   <div className="button-row">
-                    <button
-                      type="button"
-                      className="primary"
+                    <Button
+                      variant="primary"
                       disabled={isBusy}
                       onClick={() => void handleReceiveBatch()}
+                      leadingIcon={<PackageCheck size={16} aria-hidden="true" />}
                     >
-                      <PackageCheck size={16} aria-hidden="true" />
-                      <span>Принять партию</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
+                      Принять партию
+                    </Button>
+                    <Button
+                      variant="ghost"
                       disabled={isBusy}
                       onClick={openBrokenSealModal}
+                      leadingIcon={<ShieldAlert size={16} aria-hidden="true" />}
                     >
-                      <ShieldAlert size={16} aria-hidden="true" />
-                      <span>Сообщить о повреждённой пломбе</span>
-                    </button>
+                      Сообщить о повреждённой пломбе
+                    </Button>
                   </div>
-                </section>
+                </Card>
               )}
 
               {/* 2. Осмотр технолога и согласование доплаты (partner_received / inspection / awaiting_approval) */}
               {INSPECTION_STATES.has(selectedOrder.lifecycleState) && (
-                <section className="panel" style={{ padding: 16, display: "grid", gap: 16 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <SearchCheck size={18} aria-hidden="true" />
-                    <h4 className="panel-title" style={{ margin: 0 }}>
-                      2. Осмотр технолога и согласование доплаты
-                    </h4>
-                  </div>
+                <Card>
+                  <CardHeader
+                    title={
+                      <span className="row row--tight">
+                        <SearchCheck size={18} aria-hidden="true" />
+                        <span>2. Осмотр технолога и согласование доплаты</span>
+                      </span>
+                    }
+                  />
 
                   {selectedOrder.lifecycleState === "partner_received" && (
-                    <div
-                      style={{
-                        border: "1px solid var(--border-strong, #d1d5db)",
-                        borderRadius: 10,
-                        padding: 12,
-                      }}
-                    >
-                      <p className="muted" style={{ marginBlockStart: 0 }}>
+                    <div className="panel-muted stack">
+                      <p className="muted">
                         Партия принята. Переведите заказ на этап входного осмотра технолога перед запуском
                         в обработку или предложением доплаты.
                       </p>
-                      <button
-                        type="button"
-                        className="primary"
-                        disabled={isBusy}
-                        onClick={() => void handleStartInspection()}
-                      >
-                        <SearchCheck size={16} aria-hidden="true" />
-                        <span>Начать осмотр</span>
-                      </button>
+                      <div className="button-row">
+                        <Button
+                          variant="primary"
+                          disabled={isBusy}
+                          onClick={() => void handleStartInspection()}
+                          leadingIcon={<SearchCheck size={16} aria-hidden="true" />}
+                        >
+                          Начать осмотр
+                        </Button>
+                      </div>
                     </div>
                   )}
 
                   {selectedOrder.lifecycleState === "awaiting_approval" && (
-                    <div className="alert-banner" style={{ marginBlock: 0 }}>
+                    <div className="alert-banner">
                       Ожидается решение клиента по предложенной доплате или изменению технологии обработки.
                     </div>
                   )}
 
                   {/* Customer adjustments history */}
-                  <div>
-                    <h5 style={{ margin: "0 0 8px" }}>История согласований доплаты</h5>
-                    {selectedOrder.adjustments.length === 0 ? (
-                      <p className="muted" style={{ margin: 0 }}>
-                        Доплаты по заказу не запрашивались.
-                      </p>
-                    ) : (
-                      <div className="table-wrap">
-                        <table className="clean-table">
-                          <thead>
-                            <tr>
-                              <th>Дата</th>
-                              <th>Причина</th>
-                              <th>Сумма</th>
-                              <th>Статус решения клиента</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedOrder.adjustments.map((adj) => (
-                              <tr key={adj.id}>
-                                <td className="mono">{dt(adj.createdAt)}</td>
-                                <td>{adj.reason}</td>
-                                <td className="mono">{money(adj.deltaKopeks)}</td>
-                                <td>
-                                  <strong>{ADJUSTMENT_STATE_LABELS[adj.state] ?? adj.state}</strong>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                  <div className="stack">
+                    <h3>История согласований доплаты</h3>
+                    <DataTable
+                      columns={adjustmentColumns}
+                      rows={selectedOrder.adjustments}
+                      rowKey={(adj) => adj.id}
+                      caption="История согласований доплаты по заказу"
+                      empty={
+                        <EmptyState
+                          icon={<Wallet size={20} aria-hidden="true" />}
+                          title="Доплаты по заказу не запрашивались."
+                        />
+                      }
+                    />
                   </div>
 
                   {/* Propose adjustment form (available in partner_received / inspection) */}
@@ -915,56 +948,36 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
                     selectedOrder.lifecycleState === "partner_received") && (
                     <form
                       onSubmit={(e) => void handleProposeAdjustment(e)}
-                      style={{
-                        border: "1px solid var(--border-strong, #d1d5db)",
-                        borderRadius: 10,
-                        padding: 12,
-                        display: "grid",
-                        gap: 10,
-                      }}
+                      className="panel-muted stack"
                     >
-                      <h5 style={{ margin: 0 }}>Запросить доплату у клиента</h5>
-                      <div
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "minmax(150px, 220px) minmax(0, 1fr)",
-                          gap: 10,
-                        }}
-                      >
-                        <div>
-                          <label htmlFor={`${uid}-adj-rub`} style={{ display: "block", marginBlockEnd: 4 }}>
-                            Сумма доплаты (₽)
-                          </label>
-                          <input
-                            id={`${uid}-adj-rub`}
-                            type="number"
-                            min="1"
-                            step="0.01"
-                            placeholder="Например, 350"
-                            value={adjustmentRub}
-                            onChange={(e) => setAdjustmentRub(e.target.value)}
-                            style={{ width: "100%" }}
-                          />
-                        </div>
-                        <div>
-                          <label htmlFor={`${uid}-adj-reason`} style={{ display: "block", marginBlockEnd: 4 }}>
-                            Причина доплаты / смены технологии
-                          </label>
-                          <input
-                            id={`${uid}-adj-reason`}
-                            type="text"
-                            placeholder="Например, стойкое пятно на шёлке — требуется химчистка"
-                            value={adjustmentReason}
-                            onChange={(e) => setAdjustmentReason(e.target.value)}
-                            style={{ width: "100%" }}
-                          />
-                        </div>
+                      <h3>Запросить доплату у клиента</h3>
+                      <div className="grid-two">
+                        <Input
+                          label="Сумма доплаты (₽)"
+                          type="number"
+                          min="1"
+                          step="0.01"
+                          placeholder="Например, 350"
+                          value={adjustmentRub}
+                          onChange={(e) => setAdjustmentRub(e.target.value)}
+                        />
+                        <Input
+                          label="Причина доплаты / смены технологии"
+                          type="text"
+                          placeholder="Например, стойкое пятно на шёлке — требуется химчистка"
+                          value={adjustmentReason}
+                          onChange={(e) => setAdjustmentReason(e.target.value)}
+                        />
                       </div>
-                      <div className="button-row" style={{ marginBlockStart: 2 }}>
-                        <button type="submit" className="ghost" disabled={isBusy}>
-                          <AlertTriangle size={16} aria-hidden="true" />
-                          <span>Запросить доплату у клиента</span>
-                        </button>
+                      <div className="button-row">
+                        <Button
+                          type="submit"
+                          variant="ghost"
+                          disabled={isBusy}
+                          leadingIcon={<AlertTriangle size={16} aria-hidden="true" />}
+                        >
+                          Запросить доплату у клиента
+                        </Button>
                       </div>
                     </form>
                   )}
@@ -972,43 +985,28 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
                   {/* Start processing batch */}
                   {(selectedOrder.lifecycleState === "inspection" ||
                     selectedOrder.lifecycleState === "partner_received") && (
-                    <div
-                      style={{
-                        border: "1px solid var(--border-strong, #d1d5db)",
-                        borderRadius: 10,
-                        padding: 12,
-                        display: "grid",
-                        gap: 10,
-                      }}
-                    >
-                      <h5 style={{ margin: 0 }}>Запуск производственной партии</h5>
-                      <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-                        <div style={{ minWidth: 220, flex: "1 1 220px" }}>
-                          <label htmlFor={`${uid}-process-type`} style={{ display: "block", marginBlockEnd: 4 }}>
-                            Технология обработки
-                          </label>
-                          <select
-                            id={`${uid}-process-type`}
-                            value={processType}
-                            onChange={(e) => setProcessType(e.target.value)}
-                            style={{ width: "100%" }}
-                          >
-                            {PROCESS_OPTIONS.map((opt) => (
-                              <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <button
-                          type="button"
-                          className="primary"
+                    <div className="panel-muted stack">
+                      <h3>Запуск производственной партии</h3>
+                      <Select
+                        label="Технология обработки"
+                        value={processType}
+                        onChange={(e) => setProcessType(e.target.value)}
+                      >
+                        {PROCESS_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </Select>
+                      <div className="button-row">
+                        <Button
+                          variant="primary"
                           disabled={isBusy}
                           onClick={() => void handleStartBatch()}
+                          leadingIcon={<Play size={16} aria-hidden="true" />}
                         >
-                          <Play size={16} aria-hidden="true" />
-                          <span>Запустить в обработку</span>
-                        </button>
+                          Запустить в обработку
+                        </Button>
                       </div>
                     </div>
                   )}
@@ -1017,436 +1015,294 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
                   {selectedOrder.lifecycleState === "inspection" && (
                     <form
                       onSubmit={(e) => void handleReturnUnprocessed(e)}
-                      style={{
-                        border: "1px solid var(--border-strong, #d1d5db)",
-                        borderRadius: 10,
-                        padding: 12,
-                        display: "grid",
-                        gap: 10,
-                      }}
+                      className="panel-muted stack"
                     >
-                      <h5 style={{ margin: 0 }}>Возврат без обработки</h5>
-                      <div>
-                        <label htmlFor={`${uid}-return-reason`} style={{ display: "block", marginBlockEnd: 4 }}>
-                          Причина возврата без обработки
-                        </label>
-                        <input
-                          id={`${uid}-return-reason`}
-                          type="text"
-                          placeholder="Например, клиент отклонил доплату или изделие не подлежит чистке"
-                          value={returnReason}
-                          onChange={(e) => setReturnReason(e.target.value)}
-                          style={{ width: "100%" }}
-                        />
-                      </div>
-                      <div className="button-row" style={{ marginBlockStart: 2 }}>
-                        <button type="submit" className="ghost" disabled={isBusy}>
-                          <RotateCcw size={16} aria-hidden="true" />
-                          <span>Вернуть без обработки</span>
-                        </button>
+                      <h3>Возврат без обработки</h3>
+                      <Input
+                        label="Причина возврата без обработки"
+                        type="text"
+                        placeholder="Например, клиент отклонил доплату или изделие не подлежит чистке"
+                        value={returnReason}
+                        onChange={(e) => setReturnReason(e.target.value)}
+                      />
+                      <div className="button-row">
+                        <Button
+                          type="submit"
+                          variant="ghost"
+                          disabled={isBusy}
+                          leadingIcon={<RotateCcw size={16} aria-hidden="true" />}
+                        >
+                          Вернуть без обработки
+                        </Button>
                       </div>
                     </form>
                   )}
-                </section>
+                </Card>
               )}
 
               {/* 3. Контроль качества (ОТК) и упаковка (processing) */}
               {QC_STATES.has(selectedOrder.lifecycleState) && (
-                <section className="panel" style={{ padding: 16, display: "grid", gap: 12 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <ClipboardCheck size={18} aria-hidden="true" />
-                    <h4 className="panel-title" style={{ margin: 0 }}>
-                      3. Контроль качества (ОТК) и упаковка
-                    </h4>
-                  </div>
+                <Card>
+                  <CardHeader
+                    title={
+                      <span className="row row--tight">
+                        <ClipboardCheck size={18} aria-hidden="true" />
+                        <span>3. Контроль качества (ОТК) и упаковка</span>
+                      </span>
+                    }
+                  />
 
                   {selectedOrder.garments.length === 0 ? (
-                    <>
-                      <p className="muted" style={{ margin: 0 }}>
+                    <div className="stack">
+                      <p className="muted">
                         Тариф «Эконом» без поштучной описи вещей. Подтвердите прохождение общего контроля
                         качества и готовность партии к выдаче курьеру.
                       </p>
                       <div className="button-row">
-                        <button
-                          type="button"
-                          className="primary"
+                        <Button
+                          variant="primary"
                           disabled={isBusy}
                           onClick={() => void handleCompleteQc()}
+                          leadingIcon={<CheckCircle2 size={16} aria-hidden="true" />}
                         >
-                          <CheckCircle2 size={16} aria-hidden="true" />
-                          <span>ОТК пройден — готово к выдаче</span>
-                        </button>
+                          ОТК пройден — готово к выдаче
+                        </Button>
                       </div>
-                    </>
+                    </div>
                   ) : (
-                    <>
-                      <p className="muted" style={{ margin: 0 }}>
+                    <div className="stack">
+                      <p className="muted">
                         Проверьте каждую вещь заказа. Если по позиции есть замечание, отметьте «Брак / на
                         доработку» и укажите комментарий.
                       </p>
-                      <div style={{ display: "grid", gap: 10 }}>
+                      <div className="stack">
                         {selectedOrder.garments.map((g) => {
                           const draft = qcDrafts[g.id] ?? { passed: true, note: "" };
-                          const statusSelectId = `${uid}-qc-status-${g.id}`;
-                          const noteInputId = `${uid}-qc-note-${g.id}`;
                           return (
-                            <div
-                              key={g.id}
-                              style={{
-                                border: "1px solid var(--border-strong, #d1d5db)",
-                                borderRadius: 10,
-                                padding: 12,
-                                display: "grid",
-                                gap: 10,
-                              }}
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  flexWrap: "wrap",
-                                  gap: 8,
-                                }}
-                              >
+                            <div key={g.id} className="panel-muted stack">
+                              <div className="row row--between">
                                 <div>
                                   <strong className="mono">{g.itemCode}</strong> · {g.category}
                                   {g.brandMark ? ` (${g.brandMark})` : ""}
-                                  <div className="muted" style={{ fontSize: "0.88rem" }}>
+                                  <div className="muted">
                                     {g.description} · Оценочная стоимость:{" "}
                                     <span className="mono">{money(g.declaredValueKopeks)}</span>
                                   </div>
                                 </div>
-                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                  {draft.passed ? (
-                                    <CheckCircle2 size={16} aria-hidden="true" />
-                                  ) : (
-                                    <XCircle size={16} aria-hidden="true" />
-                                  )}
-                                  <span style={{ fontWeight: 600 }}>
-                                    {draft.passed ? "Пройден" : "На доработку"}
-                                  </span>
-                                </div>
+                                <Badge
+                                  tone={draft.passed ? "ok" : "warn"}
+                                  icon={
+                                    draft.passed ? (
+                                      <CheckCircle2 size={14} aria-hidden="true" />
+                                    ) : (
+                                      <XCircle size={14} aria-hidden="true" />
+                                    )
+                                  }
+                                >
+                                  {draft.passed ? "Пройден" : "На доработку"}
+                                </Badge>
                               </div>
 
-                              <div
-                                style={{
-                                  display: "grid",
-                                  gridTemplateColumns: "minmax(180px, 240px) minmax(0, 1fr)",
-                                  gap: 10,
-                                }}
-                              >
-                                <div>
-                                  <label htmlFor={statusSelectId} style={{ display: "block", marginBlockEnd: 4 }}>
-                                    Решение ОТК
-                                  </label>
-                                  <select
-                                    id={statusSelectId}
-                                    value={draft.passed ? "pass" : "fail"}
-                                    onChange={(e) =>
-                                      handleQcChange(g.id, { passed: e.target.value === "pass" })
-                                    }
-                                    style={{ width: "100%" }}
-                                  >
-                                    <option value="pass">Пройден (готов к упаковке)</option>
-                                    <option value="fail">Брак (на повторную обработку)</option>
-                                  </select>
-                                </div>
-                                <div>
-                                  <label htmlFor={noteInputId} style={{ display: "block", marginBlockEnd: 4 }}>
-                                    Комментарий ОТК (необязательно)
-                                  </label>
-                                  <input
-                                    id={noteInputId}
-                                    type="text"
-                                    placeholder="Замечания по пятнам, фурнитуре или глажке"
-                                    value={draft.note}
-                                    onChange={(e) => handleQcChange(g.id, { note: e.target.value })}
-                                    style={{ width: "100%" }}
-                                  />
-                                </div>
+                              <div className="grid-two">
+                                <Select
+                                  label="Решение ОТК"
+                                  value={draft.passed ? "pass" : "fail"}
+                                  onChange={(e) =>
+                                    handleQcChange(g.id, { passed: e.target.value === "pass" })
+                                  }
+                                >
+                                  <option value="pass">Пройден (готов к упаковке)</option>
+                                  <option value="fail">Брак (на повторную обработку)</option>
+                                </Select>
+                                <Input
+                                  label="Комментарий ОТК (необязательно)"
+                                  type="text"
+                                  placeholder="Замечания по пятнам, фурнитуре или глажке"
+                                  value={draft.note}
+                                  onChange={(e) => handleQcChange(g.id, { note: e.target.value })}
+                                />
                               </div>
                             </div>
                           );
                         })}
                       </div>
                       <div className="button-row">
-                        <button
-                          type="button"
-                          className="primary"
+                        <Button
+                          variant="primary"
                           disabled={isBusy}
                           onClick={() => void handleCompleteQc()}
+                          leadingIcon={<ClipboardCheck size={16} aria-hidden="true" />}
                         >
-                          <ClipboardCheck size={16} aria-hidden="true" />
-                          <span>Завершить ОТК</span>
-                        </button>
+                          Завершить ОТК
+                        </Button>
                       </div>
-                    </>
+                    </div>
                   )}
-                </section>
+                </Card>
               )}
 
               {/* Order composition reference (containers & garments) */}
-              <section className="panel" style={{ padding: 16, display: "grid", gap: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <Shirt size={18} aria-hidden="true" />
-                  <h4 className="panel-title" style={{ margin: 0 }}>
-                    Состав заказа (контейнеры и вещи)
-                  </h4>
-                </div>
+              <Card>
+                <CardHeader
+                  title={
+                    <span className="row row--tight">
+                      <Shirt size={18} aria-hidden="true" />
+                      <span>Состав заказа (контейнеры и вещи)</span>
+                    </span>
+                  }
+                />
                 <div className="grid-two">
-                  <div>
-                    <h5 style={{ margin: "0 0 6px" }}>Мешки / контейнеры ({selectedOrder.containers.length})</h5>
-                    {selectedOrder.containers.length === 0 ? (
-                      <p className="muted" style={{ margin: 0 }}>
-                        Нет данных о контейнерах.
-                      </p>
-                    ) : (
-                      <div className="table-wrap">
-                        <table className="clean-table">
-                          <thead>
-                            <tr>
-                              <th>Код</th>
-                              <th>Пломба</th>
-                              <th>Вес</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedOrder.containers.map((c, idx) => (
-                              <tr key={`${c.containerCode}-${idx}`}>
-                                <td className="mono">{c.containerCode}</td>
-                                <td className="mono">{c.sealSerial ?? "—"}</td>
-                                <td className="mono">{c.weightGrams} г</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                  <div className="stack">
+                    <h3>Мешки / контейнеры ({selectedOrder.containers.length})</h3>
+                    <DataTable
+                      columns={CONTAINER_COLUMNS}
+                      rows={selectedOrder.containers}
+                      rowKey={(c, idx) => `${c.containerCode}-${idx}`}
+                      caption="Мешки и контейнеры заказа"
+                      empty={
+                        <EmptyState
+                          icon={<Package size={20} aria-hidden="true" />}
+                          title="Нет данных о контейнерах."
+                        />
+                      }
+                    />
                   </div>
-                  <div>
-                    <h5 style={{ margin: "0 0 6px" }}>Опись вещей ({selectedOrder.garments.length})</h5>
-                    {selectedOrder.garments.length === 0 ? (
-                      <p className="muted" style={{ margin: 0 }}>
-                        Тариф без поштучной описи.
-                      </p>
-                    ) : (
-                      <div className="table-wrap">
-                        <table className="clean-table">
-                          <thead>
-                            <tr>
-                              <th>Код</th>
-                              <th>Изделие</th>
-                              <th>Статус</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedOrder.garments.map((g) => (
-                              <tr key={g.id}>
-                                <td className="mono">{g.itemCode}</td>
-                                <td>
-                                  {g.category}: {g.description}
-                                </td>
-                                <td>{g.status}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
+                  <div className="stack">
+                    <h3>Опись вещей ({selectedOrder.garments.length})</h3>
+                    <DataTable
+                      columns={GARMENT_COLUMNS}
+                      rows={selectedOrder.garments}
+                      rowKey={(g) => g.id}
+                      caption="Опись вещей заказа"
+                      empty={
+                        <EmptyState
+                          icon={<Shirt size={20} aria-hidden="true" />}
+                          title="Тариф без поштучной описи."
+                        />
+                      }
+                    />
                   </div>
                 </div>
-              </section>
+              </Card>
             </>
           )}
-        </main>
+        </div>
       </div>
 
       {/* 4. Начисления и акты прачечной (partnerAccruals) */}
-      <section className="panel" style={{ padding: 16, display: "grid", gap: 16 }}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: 12,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Wallet size={18} aria-hidden="true" />
-            <h3 className="panel-title" style={{ margin: 0 }}>
-              4. Начисления и акты прачечной
-            </h3>
-          </div>
-          <div style={{ fontSize: "1rem" }}>
-            <span className="muted">Расчётная сумма оптовых начислений: </span>
-            <strong className="mono">{money(accruals?.estimatedTotalKopeks ?? 0)}</strong>
-          </div>
-        </div>
+      <Card>
+        <CardHeader
+          title={
+            <span className="row row--tight">
+              <Wallet size={18} aria-hidden="true" />
+              <span>4. Начисления и акты прачечной</span>
+            </span>
+          }
+          subtitle="Текущие начисления по заказам и акты выполненных работ со счетами партнёра."
+        />
+
+        <StatGrid>
+          <StatTile
+            label="Расчётная сумма оптовых начислений"
+            value={money(accruals?.estimatedTotalKopeks ?? 0)}
+            tone="accent"
+            icon={<Wallet size={16} aria-hidden="true" />}
+          />
+          <StatTile
+            label="Актов выполненных работ"
+            value={accruals?.invoices.length ?? 0}
+            icon={<FileSpreadsheet size={16} aria-hidden="true" />}
+          />
+        </StatGrid>
 
         {/* Estimated accruals list */}
-        <div>
-          <h4 style={{ margin: "0 0 8px" }}>Текущие начисления по заказам</h4>
-          {!accruals || accruals.accruals.length === 0 ? (
-            <p className="muted" style={{ margin: 0 }}>
-              Незакрытых оптовых начислений пока нет.
-            </p>
-          ) : (
-            <div className="table-wrap">
-              <table className="clean-table">
-                <thead>
-                  <tr>
-                    <th>Заказ</th>
-                    <th>Услуга / позиция</th>
-                    <th>Кол-во</th>
-                    <th>Дата</th>
-                    <th>Сумма</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {accruals.accruals.map((item, idx) => (
-                    <tr key={item.id ?? `${item.orderId ?? "acc"}-${idx}`}>
-                      <td className="mono">
-                        {item.orderPublicNumber ?? item.publicNumber ?? item.orderId ?? "—"}
-                      </td>
-                      <td>{item.serviceName ?? item.description ?? "Оптовая обработка"}</td>
-                      <td className="mono">
-                        {item.qty ?? 1} {item.unit ?? ""}
-                      </td>
-                      <td className="mono">{dt(item.createdAt)}</td>
-                      <td className="mono">{money(item.amountKopeks ?? item.totalKopeks ?? 0)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+        <div className="stack">
+          <h3>Текущие начисления по заказам</h3>
+          <DataTable
+            columns={ACCRUAL_COLUMNS}
+            rows={accruals?.accruals ?? []}
+            rowKey={(item, idx) => item.id ?? `${item.orderId ?? "acc"}-${idx}`}
+            caption="Текущие начисления по заказам"
+            empty={
+              <EmptyState
+                icon={<Wallet size={20} aria-hidden="true" />}
+                title="Незакрытых оптовых начислений пока нет."
+              />
+            }
+          />
         </div>
+      </Card>
 
-        {/* Partner invoices & acts */}
-        <div>
-          <h4 style={{ margin: "0 0 8px", display: "flex", alignItems: "center", gap: 6 }}>
-            <FileSpreadsheet size={16} aria-hidden="true" />
-            <span>Акты выполненных работ и счета партнёра</span>
-          </h4>
-          {!accruals || accruals.invoices.length === 0 ? (
-            <p className="muted" style={{ margin: 0 }}>
-              Сформированных актов прачечной пока нет.
-            </p>
-          ) : (
-            <div style={{ display: "grid", gap: 12 }}>
-              {accruals.invoices.map((inv) => {
-                const invTitle = inv.invoiceNumber ?? inv.number ?? inv.id;
-                const invState = inv.status ?? inv.state ?? "issued";
-                const invTotal = inv.totalKopeks ?? inv.amountKopeks ?? 0;
-                const lines = inv.lines ?? [];
-                return (
-                  <div
-                    key={inv.id}
-                    style={{
-                      border: "1px solid var(--border-strong, #d1d5db)",
-                      borderRadius: 10,
-                      padding: 12,
-                      display: "grid",
-                      gap: 10,
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                        gap: 10,
-                      }}
-                    >
-                      <div>
-                        <strong>
-                          Акт № <span className="mono">{invTitle}</span>
-                        </strong>
-                        <div className="muted" style={{ fontSize: "0.88rem" }}>
-                          Статус: {INVOICE_STATE_LABELS[invState] ?? invState}
-                          {inv.period ? ` · Период: ${inv.period}` : ""}
-                          {inv.periodStart && inv.periodEnd
-                            ? ` · ${dt(inv.periodStart)} — ${dt(inv.periodEnd)}`
-                            : ""}
-                          {(inv.issuedAt || inv.createdAt) && ` · Дата: ${dt(inv.issuedAt ?? inv.createdAt)}`}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <Card>
+        <CardHeader
+          title={
+            <span className="row row--tight">
+              <FileSpreadsheet size={18} aria-hidden="true" />
+              <span>Акты выполненных работ и счета партнёра</span>
+            </span>
+          }
+        />
+        {!accruals || accruals.invoices.length === 0 ? (
+          <EmptyState
+            icon={<FileSpreadsheet size={20} aria-hidden="true" />}
+            title="Сформированных актов прачечной пока нет."
+          />
+        ) : (
+          <div className="stack">
+            {accruals.invoices.map((inv) => {
+              const invTitle = inv.invoiceNumber ?? inv.number ?? inv.id;
+              const invState = inv.status ?? inv.state ?? "issued";
+              const invTotal = inv.totalKopeks ?? inv.amountKopeks ?? 0;
+              const lines = inv.lines ?? [];
+              return (
+                <Card key={inv.id} quiet>
+                  <CardHeader
+                    title={
+                      <>
+                        Акт № <span className="mono">{invTitle}</span>
+                      </>
+                    }
+                    subtitle={
+                      <>
+                        Статус:{" "}
+                        <Badge tone={partnerInvoiceStateTone(invState)}>
+                          {stateLabel(PARTNER_INVOICE_STATE_LABELS, invState)}
+                        </Badge>
+                        {inv.period ? ` · Период: ${inv.period}` : ""}
+                        {inv.periodStart && inv.periodEnd
+                          ? ` · ${dt(inv.periodStart)} — ${dt(inv.periodEnd)}`
+                          : ""}
+                        {(inv.issuedAt || inv.createdAt) && ` · Дата: ${dt(inv.issuedAt ?? inv.createdAt)}`}
+                      </>
+                    }
+                    actions={
+                      <>
                         <strong className="mono">{money(invTotal)}</strong>
-                        <button
-                          type="button"
-                          className="ghost"
+                        <Button
+                          variant="ghost"
                           onClick={() => setPrintActId(inv.id)}
+                          leadingIcon={<Printer size={16} aria-hidden="true" />}
                         >
-                          <Printer size={16} aria-hidden="true" />
-                          <span>Печать акта</span>
-                        </button>
-                      </div>
-                    </div>
+                          Печать акта
+                        </Button>
+                      </>
+                    }
+                  />
 
-                    {lines.length > 0 && (
-                      <div className="table-wrap">
-                        <table className="clean-table">
-                          <thead>
-                            <tr>
-                              <th>Строка начисления</th>
-                              <th>Кол-во</th>
-                              <th>Сумма</th>
-                              <th>Статус</th>
-                              <th>Действие</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {lines.map((line) => {
-                              const lineLabel =
-                                line.description ?? line.name ?? line.serviceName ?? `Строка ${line.id}`;
-                              const lineAmount = line.amountKopeks ?? line.totalKopeks ?? 0;
-                              const isDisputed = line.disputed === true || line.status === "disputed";
-                              return (
-                                <tr key={line.id}>
-                                  <td>{lineLabel}</td>
-                                  <td className="mono">
-                                    {line.qty ?? 1} {line.unit ?? ""}
-                                  </td>
-                                  <td className="mono">{money(lineAmount)}</td>
-                                  <td>
-                                    {isDisputed
-                                      ? "Оспорено"
-                                      : line.status
-                                        ? INVOICE_STATE_LABELS[line.status] ?? line.status
-                                        : "Начислено"}
-                                  </td>
-                                  <td>
-                                    <button
-                                      type="button"
-                                      className="ghost"
-                                      disabled={isBusy || isDisputed}
-                                      onClick={() => {
-                                        setDisputeLine({ id: line.id, label: lineLabel });
-                                        setDisputeReason("");
-                                      }}
-                                    >
-                                      <AlertTriangle size={14} aria-hidden="true" />
-                                      <span>Оспорить начисление</span>
-                                    </button>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </section>
+                  {lines.length > 0 && (
+                    <DataTable
+                      columns={invoiceLineColumns}
+                      rows={lines}
+                      rowKey={(line) => line.id}
+                      caption="Строки начисления по акту"
+                    />
+                  )}
+                </Card>
+              );
+            })}
+          </div>
+        )}
+      </Card>
 
       {/* Broken seal modal */}
       <ModalDialog
@@ -1454,67 +1310,55 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
         title="Сообщение о повреждённой пломбе"
         onClose={() => setBrokenSealOpen(false)}
       >
-        <form onSubmit={(e) => void handleReportBrokenSeal(e)} style={{ display: "grid", gap: 12 }}>
+        <form onSubmit={(e) => void handleReportBrokenSeal(e)} className="stack">
           {selectedOrder && selectedOrder.containers.some((c) => c.sealSerial) && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-              <span className="muted" style={{ fontSize: "0.85rem" }}>
-                Пломбы заказа:
-              </span>
+            <div className="row row--tight">
+              <span className="muted">Пломбы заказа:</span>
               {selectedOrder.containers
                 .filter((c) => c.sealSerial)
                 .map((c, idx) => (
-                  <button
+                  <Button
                     key={`${c.sealSerial}-${idx}`}
-                    type="button"
-                    className="ghost"
+                    variant="ghost"
                     onClick={() => setBrokenSealSerial(c.sealSerial ?? "")}
                   >
                     <span className="mono">{c.sealSerial}</span>
-                  </button>
+                  </Button>
                 ))}
             </div>
           )}
-          <div>
-            <label htmlFor={`${uid}-broken-seal-serial`} style={{ display: "block", marginBlockEnd: 4 }}>
-              Серийный номер повреждённой пломбы
-            </label>
-            <input
-              id={`${uid}-broken-seal-serial`}
-              type="text"
-              required
-              value={brokenSealSerial}
-              onChange={(e) => setBrokenSealSerial(e.target.value)}
-              placeholder="Введите номер пломбы"
-              style={{ width: "100%" }}
-            />
-          </div>
-          <div>
-            <label htmlFor={`${uid}-broken-seal-reason`} style={{ display: "block", marginBlockEnd: 4 }}>
-              Описание инцидента и причины
-            </label>
-            <textarea
-              id={`${uid}-broken-seal-reason`}
-              rows={3}
-              required
-              value={brokenSealReason}
-              onChange={(e) => setBrokenSealReason(e.target.value)}
-              placeholder="Например, пломба сорвана при транспортировке, мешок открыт"
-              style={{ width: "100%" }}
-            />
-          </div>
+          <Input
+            label="Серийный номер повреждённой пломбы"
+            type="text"
+            required
+            value={brokenSealSerial}
+            onChange={(e) => setBrokenSealSerial(e.target.value)}
+            placeholder="Введите номер пломбы"
+          />
+          <Textarea
+            label="Описание инцидента и причины"
+            rows={3}
+            required
+            value={brokenSealReason}
+            onChange={(e) => setBrokenSealReason(e.target.value)}
+            placeholder="Например, пломба сорвана при транспортировке, мешок открыт"
+          />
           <div className="button-row">
-            <button type="submit" className="primary" disabled={isBusy}>
-              <ShieldAlert size={16} aria-hidden="true" />
-              <span>Зафиксировать повреждение пломбы</span>
-            </button>
-            <button
-              type="button"
-              className="ghost"
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={isBusy}
+              leadingIcon={<ShieldAlert size={16} aria-hidden="true" />}
+            >
+              Зафиксировать повреждение пломбы
+            </Button>
+            <Button
+              variant="ghost"
               disabled={isBusy}
               onClick={() => setBrokenSealOpen(false)}
             >
               Отмена
-            </button>
+            </Button>
           </div>
         </form>
       </ModalDialog>
@@ -1525,39 +1369,36 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
         title="Оспорить начисление по строке акта"
         onClose={() => setDisputeLine(null)}
       >
-        <form onSubmit={(e) => void handleDisputeLineSubmit(e)} style={{ display: "grid", gap: 12 }}>
+        <form onSubmit={(e) => void handleDisputeLineSubmit(e)} className="stack">
           {disputeLine && (
             <div className="muted">
               Позиция: <strong>{disputeLine.label}</strong>
             </div>
           )}
-          <div>
-            <label htmlFor={`${uid}-dispute-reason`} style={{ display: "block", marginBlockEnd: 4 }}>
-              Причина оспаривания
-            </label>
-            <textarea
-              id={`${uid}-dispute-reason`}
-              rows={3}
-              required
-              value={disputeReason}
-              onChange={(e) => setDisputeReason(e.target.value)}
-              placeholder="Укажите расхождение по количеству, тарифу или весу"
-              style={{ width: "100%" }}
-            />
-          </div>
+          <Textarea
+            label="Причина оспаривания"
+            rows={3}
+            required
+            value={disputeReason}
+            onChange={(e) => setDisputeReason(e.target.value)}
+            placeholder="Укажите расхождение по количеству, тарифу или весу"
+          />
           <div className="button-row">
-            <button type="submit" className="primary" disabled={isBusy}>
-              <AlertTriangle size={16} aria-hidden="true" />
-              <span>Отправить возражение</span>
-            </button>
-            <button
-              type="button"
-              className="ghost"
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={isBusy}
+              leadingIcon={<AlertTriangle size={16} aria-hidden="true" />}
+            >
+              Отправить возражение
+            </Button>
+            <Button
+              variant="ghost"
               disabled={isBusy}
               onClick={() => setDisputeLine(null)}
             >
               Отмена
-            </button>
+            </Button>
           </div>
         </form>
       </ModalDialog>

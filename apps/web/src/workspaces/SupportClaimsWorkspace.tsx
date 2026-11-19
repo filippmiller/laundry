@@ -18,7 +18,25 @@ import {
 } from "lucide-react";
 import { api, dt, money } from "../api";
 import { ModalDialog } from "../components/ModalDialog";
-import { CLAIM_STATE_LABELS, ORDER_STATE_LABELS, formatError } from "../labels";
+import { Badge, type BadgeTone } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Card, CardBody, CardHeader } from "../components/ui/Card";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Input, Select, Textarea } from "../components/ui/Field";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Reveal, Stagger } from "../components/ui/Reveal";
+import { StatGrid, StatTile } from "../components/ui/StatTile";
+import { TabPanel, Tabs } from "../components/ui/Tabs";
+import {
+  CLAIM_STATE_LABELS,
+  CLAIM_TYPE_LABELS,
+  EVIDENCE_PURPOSE_LABELS,
+  ORDER_STATE_LABELS,
+  claimStateTone,
+  formatError,
+  orderStateTone,
+  stateLabel,
+} from "../labels";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -196,18 +214,24 @@ const THREAD_STATUS_LABELS: Record<string, string> = {
   closed: "Закрыто",
 };
 
+/**
+ * Semantic → badge tone for support threads, per the status table in
+ * docs/UI_SYSTEM.md. Order and claim states are mapped by the shared helpers
+ * in apps/web/src/labels.ts.
+ */
+const THREAD_STATUS_TONES: Record<string, BadgeTone> = {
+  open: "info",
+  pending: "warn",
+  closed: "ok",
+};
+
+function threadStatusTone(status: string): BadgeTone {
+  return THREAD_STATUS_TONES[status] ?? "neutral";
+}
+
 export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; roles: string[] }) {
-  const searchInputId = useId();
-  const ticketChannelId = useId();
-  const ticketSubjectId = useId();
-  const ticketBodyId = useId();
-  const replyBodyId = useId();
-  const compRubId = useId();
-  const decisionOutcomeId = useId();
-  const decisionRationaleId = useId();
-  const reopenReasonId = useId();
-  const hideReviewReasonId = useId();
-  const closeReasonId = useId();
+  const tabsId = useId();
+  const [activeSection, setActiveSection] = useState("search");
 
   // 1. Order search & quick ticket modal
   const [orderQuery, setOrderQuery] = useState("");
@@ -593,624 +617,659 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   // agent only produced a 403 from the service.
   const canDecideClaims = roles.includes("claims_approver") || roles.includes("platform_admin");
   const compPreviewKopeks = Math.round(Number(compRub.replace(",", ".")) * 100);
+  const activeHoldsCount = claimDetail
+    ? claimDetail.evidenceHolds.filter((h) => !h.releasedAt && h.active !== false).length
+    : null;
+
+  const sectionTabs = [
+    { id: "search", label: "Поиск заказа", icon: Search },
+    { id: "threads", label: "Обращения клиентов", icon: MessageSquare },
+    { id: "claims", label: "Претензии", icon: ShieldAlert },
+    { id: "reviews", label: "Отзывы", icon: Star },
+  ];
 
   return (
-    <div className="stack" style={{ display: "grid", gap: "1rem" }}>
+    <div className="workspace-grid">
+      <PageHeader
+        eyebrow="Клиентская поддержка"
+        title="Обращения клиентов и претензии"
+        lede="Поиск заказа и регистрация обращения, переписка с клиентом, разбор претензий с защищёнными доказательствами и модерация отзывов."
+      />
+
+      <StatGrid>
+        <StatTile
+          label="Обращения"
+          value={threads.length}
+          icon={<MessageSquare size={16} aria-hidden="true" />}
+          tone="accent"
+        />
+        <StatTile
+          label="Претензии"
+          value={claims.length}
+          icon={<ShieldAlert size={16} aria-hidden="true" />}
+        />
+        <StatTile
+          label="Отзывы"
+          value={reviews.length}
+          icon={<Star size={16} aria-hidden="true" />}
+        />
+        <StatTile
+          label="Активные удержания"
+          value={activeHoldsCount === null ? "—" : activeHoldsCount}
+          icon={<Lock size={16} aria-hidden="true" />}
+        />
+      </StatGrid>
+
+      <Tabs
+        idPrefix={tabsId}
+        items={sectionTabs.map((tab) => ({
+          id: tab.id,
+          label: (
+            <>
+              <tab.icon size={16} aria-hidden="true" />
+              <span>{tab.label}</span>
+            </>
+          ),
+        }))}
+        value={activeSection}
+        onChange={setActiveSection}
+        label="Разделы поддержки и претензий"
+      />
+
       {/* 1. Поиск заказа и регистрация обращения */}
-      <section className="panel">
-        <div className="row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.75rem" }}>
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: 0 }}>
-            <Search size={18} aria-hidden="true" />
-            <span>Поиск заказа и регистрация обращения</span>
-          </h2>
-        </div>
+      <TabPanel idPrefix={tabsId} id="search" active={activeSection === "search"}>
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                <Search size={18} aria-hidden="true" />
+                <span>Поиск заказа и регистрация обращения</span>
+              </span>
+            }
+          />
+          <CardBody>
+            <form onSubmit={handleOrderSearch} className="stack">
+              <Input
+                label="Номер заказа (LA-...) или телефон (+7...)"
+                type="text"
+                value={orderQuery}
+                onChange={(e) => setOrderQuery(e.target.value)}
+                placeholder="Например: LA-2026-0001 или +79990001122"
+              />
+              <div className="button-row">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={searchingOrders}
+                  leadingIcon={<Search size={16} aria-hidden="true" />}
+                >
+                  {searchingOrders ? "Поиск..." : "Найти заказ"}
+                </Button>
+              </div>
+            </form>
 
-        <form onSubmit={handleOrderSearch} style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: "0.75rem" }}>
-          <div className="field" style={{ flex: "1 1 280px", display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={searchInputId}>Номер заказа (LA-...) или телефон (+7...)</label>
-            <input
-              id={searchInputId}
-              type="text"
-              value={orderQuery}
-              onChange={(e) => setOrderQuery(e.target.value)}
-              placeholder="Например: LA-2026-0001 или +79990001122"
-            />
-          </div>
-          <button type="submit" className="primary" disabled={searchingOrders} style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
-            <Search size={16} aria-hidden="true" />
-            <span>{searchingOrders ? "Поиск..." : "Найти заказ"}</span>
-          </button>
-        </form>
-
-        {hasSearchedOrders && (
-          <div style={{ marginTop: "1rem" }}>
-            {foundOrders.length === 0 ? (
-              <p className="muted">Заказы по вашему запросу не найдены.</p>
-            ) : (
-              <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.5rem" }}>
-                {foundOrders.map((order) => (
-                  <li
-                    key={order.id}
-                    className="list-item"
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: "0.75rem",
-                      padding: "0.75rem",
-                      border: "1px solid var(--border, #e2e8f0)",
-                      borderRadius: "0.5rem",
-                    }}
-                  >
-                    <div style={{ display: "grid", gap: "0.2rem" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-                        <strong>{order.publicNumber}</strong>
-                        <span className="badge">
-                          {ORDER_STATE_LABELS[order.lifecycleState] ?? order.lifecycleState}
+            {hasSearchedOrders && (
+              <>
+                {foundOrders.length === 0 ? (
+                  <EmptyState
+                    icon={<Search size={20} aria-hidden="true" />}
+                    title="Заказы по вашему запросу не найдены."
+                  />
+                ) : (
+                  <div className="data-list">
+                    {foundOrders.map((order) => (
+                      <div className="data-row" key={order.id}>
+                        <span className="data-row__main">
+                          <span className="row row--tight">
+                            <strong>{order.publicNumber}</strong>
+                            <Badge tone={orderStateTone(order.lifecycleState)}>
+                              {stateLabel(ORDER_STATE_LABELS, order.lifecycleState)}
+                            </Badge>
+                          </span>
+                          <span className="muted row row--tight">
+                            <span>
+                              Создан: {dt(order.createdAt)}
+                              {order.customerPhone ? ` · ${order.customerPhone}` : ""}
+                              {order.totalKopeks !== undefined ? ` · ${money(order.totalKopeks)}` : ""}
+                            </span>
+                          </span>
                         </span>
+                        <Button
+                          variant="primary"
+                          onClick={() => openTicketModal(order)}
+                          leadingIcon={<MessageSquarePlus size={16} aria-hidden="true" />}
+                        >
+                          Открыть тикет по заказу
+                        </Button>
                       </div>
-                      <div className="muted" style={{ fontSize: "0.875rem" }}>
-                        Создан: {dt(order.createdAt)}
-                        {order.customerPhone ? ` · ${order.customerPhone}` : ""}
-                        {order.totalKopeks !== undefined ? ` · ${money(order.totalKopeks)}` : ""}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      className="primary"
-                      onClick={() => openTicketModal(order)}
-                      style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-                    >
-                      <MessageSquarePlus size={16} aria-hidden="true" />
-                      <span>Открыть тикет по заказу</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
-          </div>
-        )}
-      </section>
+          </CardBody>
+        </Card>
+      </TabPanel>
 
       {/* 2. Обращения клиентов */}
-      <section className="panel">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.75rem" }}>
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: 0 }}>
-            <MessageSquare size={18} aria-hidden="true" />
-            <span>Обращения клиентов</span>
-          </h2>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => void loadThreads()}
-            disabled={loadingThreads}
-            style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-          >
-            <RefreshCw size={15} aria-hidden="true" />
-            <span>{loadingThreads ? "Обновление..." : "Обновить"}</span>
-          </button>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "1rem", alignItems: "start" }}>
-          <div>
-            {threads.length === 0 ? (
-              <p className="muted">Обращений пока нет.</p>
-            ) : (
-              <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.5rem" }}>
-                {threads.map((t) => {
-                  const isSelected = t.id === selectedThreadId;
-                  const orderRef = t.orderPublicNumber ?? t.publicNumber;
-                  return (
-                    <li key={t.id}>
+      <TabPanel idPrefix={tabsId} id="threads" active={activeSection === "threads"}>
+        <div className="grid-two">
+          <Card>
+            <CardHeader
+              title={
+                <span className="row row--tight">
+                  <MessageSquare size={18} aria-hidden="true" />
+                  <span>Обращения клиентов</span>
+                </span>
+              }
+              actions={
+                <Button
+                  variant="ghost"
+                  onClick={() => void loadThreads()}
+                  disabled={loadingThreads}
+                  leadingIcon={<RefreshCw size={15} aria-hidden="true" />}
+                >
+                  {loadingThreads ? "Обновление..." : "Обновить"}
+                </Button>
+              }
+            />
+            <CardBody>
+              {threads.length === 0 ? (
+                <EmptyState
+                  icon={<MessageSquare size={20} aria-hidden="true" />}
+                  title="Обращений пока нет."
+                />
+              ) : (
+                <div className="data-list">
+                  {threads.map((t) => {
+                    const isSelected = t.id === selectedThreadId;
+                    const orderRef = t.orderPublicNumber ?? t.publicNumber;
+                    return (
                       <button
+                        key={t.id}
                         type="button"
-                        className={isSelected ? "primary" : "ghost"}
+                        className={isSelected ? "data-row selected" : "data-row"}
                         onClick={() => void loadThreadDetail(t.id)}
-                        style={{
-                          width: "100%",
-                          textAlign: "left",
-                          display: "grid",
-                          gap: "0.25rem",
-                          padding: "0.75rem",
-                          border: "1px solid var(--border, #e2e8f0)",
-                          borderRadius: "0.5rem",
-                        }}
                       >
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
-                          <strong>{t.subject || (orderRef ? `Заказ ${orderRef}` : `Тикет #${t.id.slice(0, 8)}`)}</strong>
-                          <span className="badge">{THREAD_STATUS_LABELS[t.status] ?? t.status}</span>
-                        </div>
-                        <div style={{ fontSize: "0.85rem", opacity: 0.85 }}>
-                          {orderRef ? `Заказ ${orderRef} · ` : ""}
-                          {t.channel ? `${CHANNEL_LABELS[t.channel] ?? t.channel} · ` : ""}
-                          {dt(t.createdAt)}
-                        </div>
+                        <span className="data-row__main">
+                          <span className="row row--tight">
+                            <span>
+                              {t.subject ||
+                                (orderRef ? `Заказ ${orderRef}` : `Тикет #${t.id.slice(0, 8)}`)}
+                            </span>
+                          </span>
+                          <span className="muted row row--tight">
+                            <span>
+                              {orderRef ? `Заказ ${orderRef} · ` : ""}
+                              {t.channel ? `${stateLabel(CHANNEL_LABELS, t.channel)} · ` : ""}
+                              {dt(t.createdAt)}
+                            </span>
+                          </span>
+                        </span>
+                        <Badge tone={threadStatusTone(t.status)}>
+                          {stateLabel(THREAD_STATUS_LABELS, t.status)}
+                        </Badge>
                       </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+                    );
+                  })}
+                </div>
+              )}
+            </CardBody>
+          </Card>
 
-          <div
-            style={{
-              border: "1px solid var(--border, #e2e8f0)",
-              borderRadius: "0.5rem",
-              padding: "0.9rem",
-              minHeight: "220px",
-              display: "grid",
-              gap: "0.75rem",
-            }}
-          >
+          <Card quiet className="stack">
             {loadingThreadDetail ? (
               <p className="muted">Загрузка переписки...</p>
             ) : !threadDetail ? (
-              <p className="muted">Выберите обращение слева, чтобы просмотреть переписку и ответить клиенту.</p>
+              <EmptyState
+                icon={<MessageSquare size={20} aria-hidden="true" />}
+                title="Обращение не выбрано"
+                text="Выберите обращение слева, чтобы просмотреть переписку и ответить клиенту."
+              />
             ) : (
               <>
-                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
-                  <div>
-                    <h3 style={{ margin: 0, fontSize: "1rem" }}>
-                      {threadDetail.thread.subject || `Обращение #${threadDetail.thread.id.slice(0, 8)}`}
-                    </h3>
-                    <div className="muted" style={{ fontSize: "0.85rem" }}>
-                      Статус: {THREAD_STATUS_LABELS[threadDetail.thread.status] ?? threadDetail.thread.status}
+                <div className="stack stack--tight">
+                  <h3 className="section-title">
+                    {threadDetail.thread.subject || `Обращение #${threadDetail.thread.id.slice(0, 8)}`}
+                  </h3>
+                  <span className="muted row row--tight">
+                    <span>
+                      Статус: {stateLabel(THREAD_STATUS_LABELS, threadDetail.thread.status)}
                       {threadDetail.thread.orderPublicNumber
                         ? ` · Заказ ${threadDetail.thread.orderPublicNumber}`
                         : ""}
-                    </div>
-                  </div>
-                  {threadDetail.thread.status !== "closed" && (
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <input
-                        id={closeReasonId}
-                        className="input"
-                        value={closeReason}
-                        onChange={event => setCloseReason(event.target.value)}
-                        placeholder="Причина закрытия"
-                        aria-label="Причина закрытия обращения"
-                        style={{ minWidth: "14rem" }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={() => void handleCloseThread()}
-                        disabled={closingThread}
-                        style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-                      >
-                        <CheckCircle2 size={16} aria-hidden="true" />
-                        <span>{closingThread ? "Закрытие..." : "Закрыть обращение"}</span>
-                      </button>
-                    </div>
-                  )}
+                    </span>
+                  </span>
                 </div>
 
-                <div style={{ display: "grid", gap: "0.5rem", maxHeight: "320px", overflowY: "auto", paddingRight: "0.25rem" }}>
-                  {threadDetail.messages.length === 0 ? (
-                    <p className="muted">Сообщений в обращении пока нет.</p>
-                  ) : (
-                    threadDetail.messages.map((m) => {
+                {threadDetail.thread.status !== "closed" && (
+                  <div className="row row--tight">
+                    <Input
+                      aria-label="Причина закрытия обращения"
+                      placeholder="Причина закрытия"
+                      value={closeReason}
+                      onChange={(event) => setCloseReason(event.target.value)}
+                    />
+                    <Button
+                      variant="ghost"
+                      onClick={() => void handleCloseThread()}
+                      disabled={closingThread}
+                      leadingIcon={<CheckCircle2 size={16} aria-hidden="true" />}
+                    >
+                      {closingThread ? "Закрытие..." : "Закрыть обращение"}
+                    </Button>
+                  </div>
+                )}
+
+                {threadDetail.messages.length === 0 ? (
+                  <EmptyState
+                    icon={<MessageSquare size={20} aria-hidden="true" />}
+                    title="Сообщений в обращении пока нет."
+                  />
+                ) : (
+                  <div className="data-list">
+                    {threadDetail.messages.map((m) => {
                       const fromCustomer = isCustomerMessage(m);
                       return (
-                        <div
-                          key={m.id}
-                          style={{
-                            padding: "0.6rem 0.75rem",
-                            borderRadius: "0.5rem",
-                            border: "1px solid var(--border, #e2e8f0)",
-                            background: fromCustomer ? "var(--surface-alt, #f8fafc)" : "var(--surface, #ffffff)",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8rem", marginBottom: "0.25rem" }}>
-                            <strong>{fromCustomer ? "клиент" : "вы"}</strong>
-                            <span className="muted">{dt(m.createdAt)}</span>
-                          </div>
-                          <div style={{ whiteSpace: "pre-wrap" }}>{m.body ?? m.text ?? m.message ?? ""}</div>
+                        <div className="data-row" key={m.id}>
+                          <span className="data-row__main">
+                            <span className="row row--tight">
+                              <Badge tone={fromCustomer ? "info" : "accent"}>
+                                {fromCustomer ? "клиент" : "вы"}
+                              </Badge>
+                              <span className="muted">{dt(m.createdAt)}</span>
+                            </span>
+                            <span className="row row--tight">
+                              <span>{m.body ?? m.text ?? m.message ?? ""}</span>
+                            </span>
+                          </span>
                         </div>
                       );
-                    })
-                  )}
-                </div>
+                    })}
+                  </div>
+                )}
 
                 {threadDetail.thread.status !== "closed" ? (
-                  <form onSubmit={handleSendReply} style={{ display: "grid", gap: "0.5rem" }}>
-                    <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-                      <label htmlFor={replyBodyId}>Ответ клиенту</label>
-                      <textarea
-                        id={replyBodyId}
-                        rows={3}
-                        value={replyText}
-                        onChange={(e) => setReplyText(e.target.value)}
-                        placeholder="Введите сообщение для клиента..."
-                      />
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                      <button
+                  <form onSubmit={handleSendReply} className="stack">
+                    <Textarea
+                      label="Ответ клиенту"
+                      rows={3}
+                      value={replyText}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      placeholder="Введите сообщение для клиента..."
+                    />
+                    <div className="row row--end">
+                      <Button
                         type="submit"
-                        className="primary"
+                        variant="primary"
                         disabled={sendingReply}
-                        style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
+                        leadingIcon={<Send size={15} aria-hidden="true" />}
                       >
-                        <Send size={15} aria-hidden="true" />
-                        <span>{sendingReply ? "Отправка..." : "Отправить"}</span>
-                      </button>
+                        {sendingReply ? "Отправка..." : "Отправить"}
+                      </Button>
                     </div>
                   </form>
                 ) : (
-                  <p className="muted" style={{ margin: 0 }}>
+                  <p className="muted">
                     Обращение закрыто. Отправка новых сообщений недоступна.
                   </p>
                 )}
               </>
             )}
-          </div>
+          </Card>
         </div>
-      </section>
+      </TabPanel>
 
-      {/* 3. Претензии и удержание доказательств (Legal Hold) */}
-      <section className="panel">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.75rem" }}>
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: 0 }}>
-            <ShieldAlert size={18} aria-hidden="true" />
-            <span>Претензии и удержание доказательств (Legal Hold)</span>
-          </h2>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => void loadClaims()}
-            disabled={loadingClaims}
-            style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-          >
-            <RefreshCw size={15} aria-hidden="true" />
-            <span>{loadingClaims ? "Обновление..." : "Обновить"}</span>
-          </button>
-        </div>
+      {/* 3. Претензии и юридическое удержание доказательств */}
+      <TabPanel idPrefix={tabsId} id="claims" active={activeSection === "claims"}>
+        <div className="grid-two">
+          <Card>
+            <CardHeader
+              title={
+                <span className="row row--tight">
+                  <ShieldAlert size={18} aria-hidden="true" />
+                  <span>Претензии</span>
+                </span>
+              }
+              actions={
+                <Button
+                  variant="ghost"
+                  onClick={() => void loadClaims()}
+                  disabled={loadingClaims}
+                  leadingIcon={<RefreshCw size={15} aria-hidden="true" />}
+                >
+                  {loadingClaims ? "Обновление..." : "Обновить"}
+                </Button>
+              }
+            />
+            <CardBody>
+              {claims.length === 0 ? (
+                <EmptyState
+                  icon={<ShieldAlert size={20} aria-hidden="true" />}
+                  title="Претензий нет."
+                />
+              ) : (
+                <Stagger as="div" className="data-list">
+                  {claims.map((c) => {
+                    const status = getClaimStatus(c);
+                    const isSelected = c.id === selectedClaimId;
+                    const orderRef = c.orderPublicNumber ?? c.publicNumber ?? c.orderId;
+                    return (
+                      <Reveal as="div" key={c.id}>
+                        <button
+                          type="button"
+                          className={isSelected ? "data-row selected" : "data-row"}
+                          onClick={() => void loadClaimAndEvidence(c.id, c.orderId)}
+                        >
+                          <span className="data-row__main">
+                            <span className="row row--tight">
+                              <span>Заказ {orderRef}</span>
+                            </span>
+                            <span className="muted row row--tight">
+                              <span>
+                                {c.reason ?? c.summary ?? (c.claimType ? stateLabel(CLAIM_TYPE_LABELS, c.claimType) : "Претензия")} · {dt(c.createdAt)}
+                              </span>
+                            </span>
+                          </span>
+                          <Badge tone={claimStateTone(status)}>
+                            {stateLabel(CLAIM_STATE_LABELS, status)}
+                          </Badge>
+                        </button>
+                      </Reveal>
+                    );
+                  })}
+                </Stagger>
+              )}
+            </CardBody>
+          </Card>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "1rem", alignItems: "start" }}>
-          <div>
-            {claims.length === 0 ? (
-              <p className="muted">Претензий нет.</p>
-            ) : (
-              <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.5rem" }}>
-                {claims.map((c) => {
-                  const status = getClaimStatus(c);
-                  const isSelected = c.id === selectedClaimId;
-                  const orderRef = c.orderPublicNumber ?? c.publicNumber ?? c.orderId;
-                  return (
-                    <li key={c.id}>
-                      <button
-                        type="button"
-                        className={isSelected ? "primary" : "ghost"}
-                        onClick={() => void loadClaimAndEvidence(c.id, c.orderId)}
-                        style={{
-                          width: "100%",
-                          textAlign: "left",
-                          display: "grid",
-                          gap: "0.25rem",
-                          padding: "0.75rem",
-                          border: "1px solid var(--border, #e2e8f0)",
-                          borderRadius: "0.5rem",
-                        }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
-                          <strong>Заказ {orderRef}</strong>
-                          <span className="badge">{CLAIM_STATE_LABELS[status] ?? status}</span>
-                        </div>
-                        <div style={{ fontSize: "0.85rem", opacity: 0.85 }}>
-                          {c.reason ?? c.summary ?? c.claimType ?? "Претензия"} · {dt(c.createdAt)}
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-
-          <div
-            style={{
-              border: "1px solid var(--border, #e2e8f0)",
-              borderRadius: "0.5rem",
-              padding: "0.9rem",
-              minHeight: "260px",
-              display: "grid",
-              gap: "0.9rem",
-            }}
-          >
+          <Card quiet className="stack">
             {loadingClaimDetail ? (
               <p className="muted">Загрузка претензии и защищённых доказательств...</p>
             ) : !claimDetail ? (
-              <p className="muted">
-                Выберите претензию слева. При открытии автоматически загружаются доказательства заказа с записью в журнал аудита.
-              </p>
+              <EmptyState
+                icon={<ShieldAlert size={20} aria-hidden="true" />}
+                title="Претензия не выбрана"
+                text="Выберите претензию слева. При открытии автоматически загружаются доказательства заказа с записью в журнал аудита."
+              />
             ) : (
               <>
-                <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem" }}>
-                  <div>
-                    <h3 style={{ margin: 0, fontSize: "1rem" }}>
+                <div className="stack stack--tight">
+                  <div className="row row--between row--tight">
+                    <h3 className="section-title">
                       Претензия #{claimDetail.claim.id.slice(0, 8)} · Заказ{" "}
                       {claimDetail.claim.orderPublicNumber ?? claimDetail.claim.publicNumber ?? claimDetail.claim.orderId}
                     </h3>
-                    <div className="muted" style={{ fontSize: "0.875rem", marginTop: "0.2rem" }}>
-                      Статус: <strong>{CLAIM_STATE_LABELS[activeClaimStatus] ?? activeClaimStatus}</strong>
-                      {" · "}Создана: {dt(claimDetail.claim.createdAt)}
+                    <Badge tone={claimStateTone(activeClaimStatus)} large>
+                      {stateLabel(CLAIM_STATE_LABELS, activeClaimStatus)}
+                    </Badge>
+                  </div>
+                  <span className="muted row row--tight">
+                    <span>
+                      Создана: {dt(claimDetail.claim.createdAt)}
                       {claimDetail.claim.claimedAmountKopeks !== undefined
                         ? ` · Заявлено: ${money(claimDetail.claim.claimedAmountKopeks)}`
                         : ""}
                       {claimDetail.claim.compensationKopeks !== undefined && claimDetail.claim.compensationKopeks > 0
                         ? ` · Компенсация: ${money(claimDetail.claim.compensationKopeks)}`
                         : ""}
-                    </div>
-                    {(claimDetail.claim.reason || claimDetail.claim.summary) && (
-                      <p style={{ margin: "0.4rem 0 0" }}>
-                        {claimDetail.claim.reason ?? claimDetail.claim.summary}
-                      </p>
-                    )}
-                  </div>
+                    </span>
+                  </span>
+                  {(claimDetail.claim.reason || claimDetail.claim.summary) && (
+                    <span className="row row--tight">
+                      <span>{claimDetail.claim.reason ?? claimDetail.claim.summary}</span>
+                    </span>
+                  )}
                 </div>
 
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                  <button
-                    type="button"
-                    className="ghost"
+                <div className="button-row">
+                  <Button
+                    variant="ghost"
                     onClick={() => {
                       setCompRub("");
                       setCompModalOpen(true);
                     }}
-                    style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
+                    leadingIcon={<Banknote size={16} aria-hidden="true" />}
                   >
-                    <Banknote size={16} aria-hidden="true" />
-                    <span>Предложить компенсацию</span>
-                  </button>
+                    Предложить компенсацию
+                  </Button>
 
                   {canDecideClaims && (
-                    <button
-                      type="button"
-                      className="primary"
+                    <Button
+                      variant="primary"
                       onClick={() => {
                         setDecisionOutcome("resolved");
                         setDecisionRationale("");
                         setDecisionModalOpen(true);
                       }}
-                      style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
+                      leadingIcon={<Scale size={16} aria-hidden="true" />}
                     >
-                      <Scale size={16} aria-hidden="true" />
-                      <span>Вынести решение</span>
-                    </button>
+                      Вынести решение
+                    </Button>
                   )}
 
                   {canReopenClaim && (
-                    <button
-                      type="button"
-                      className="ghost"
+                    <Button
+                      variant="ghost"
                       onClick={() => {
                         setReopenReason("");
                         setReopenModalOpen(true);
                       }}
-                      style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
+                      leadingIcon={<RotateCcw size={16} aria-hidden="true" />}
                     >
-                      <RotateCcw size={16} aria-hidden="true" />
-                      <span>Переоткрыть претензию</span>
-                    </button>
+                      Переоткрыть претензию
+                    </Button>
                   )}
                 </div>
 
                 {claimDetail.items.length > 0 && (
-                  <div style={{ display: "grid", gap: "0.4rem" }}>
-                    <h4 style={{ margin: 0, fontSize: "0.95rem" }}>Позиции претензии</h4>
-                    <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.35rem" }}>
+                  <div className="stack stack--tight">
+                    <h4 className="section-title">Позиции претензии</h4>
+                    <div className="data-list">
                       {claimDetail.items.map((item) => (
-                        <li
-                          key={item.id}
-                          style={{
-                            padding: "0.5rem 0.65rem",
-                            border: "1px solid var(--border, #e2e8f0)",
-                            borderRadius: "0.4rem",
-                            fontSize: "0.9rem",
-                          }}
-                        >
-                          <strong>{item.title ?? item.name ?? item.description ?? `Позиция #${item.id.slice(0, 6)}`}</strong>
-                          {item.description && item.title ? ` — ${item.description}` : ""}
-                          {(item.claimedAmountKopeks ?? item.amountKopeks) !== undefined
-                            ? ` · ${money((item.claimedAmountKopeks ?? item.amountKopeks) as number)}`
-                            : ""}
-                        </li>
+                        <div className="data-row" key={item.id}>
+                          <span className="data-row__main">
+                            <span className="row row--tight">
+                              <strong>
+                                {item.title ?? item.name ?? item.description ?? `Позиция #${item.id.slice(0, 6)}`}
+                              </strong>
+                            </span>
+                            {item.description && item.title ? (
+                              <span className="muted row row--tight">
+                                <span>{item.description}</span>
+                              </span>
+                            ) : null}
+                          </span>
+                          {(item.claimedAmountKopeks ?? item.amountKopeks) !== undefined ? (
+                            <span className="mono">
+                              {money((item.claimedAmountKopeks ?? item.amountKopeks) as number)}
+                            </span>
+                          ) : null}
+                        </div>
                       ))}
-                    </ul>
+                    </div>
                   </div>
                 )}
 
-                <div style={{ display: "grid", gap: "0.4rem" }}>
-                  <h4 style={{ margin: 0, fontSize: "0.95rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <div className="stack stack--tight">
+                  <h4 className="section-title row row--tight">
                     <Lock size={15} aria-hidden="true" />
-                    <span>Доказательства и удержание (Legal Hold)</span>
+                    <span>Доказательства и юридическое удержание</span>
                   </h4>
-                  <p className="muted" style={{ margin: 0, fontSize: "0.82rem" }}>
-                    Доступ к доказательствам заказа зафиксирован в журнале аудита. Активных удержаний: {claimDetail.evidenceHolds.filter((h) => !h.releasedAt && h.active !== false).length}.
-                  </p>
+                  <span className="muted row row--tight">
+                    <span>
+                      Доступ к доказательствам заказа зафиксирован в журнале аудита. Активных удержаний: {activeHoldsCount}.
+                    </span>
+                  </span>
                   {orderEvidence.length === 0 && claimDetail.evidenceHolds.length === 0 ? (
-                    <p className="muted" style={{ margin: 0 }}>Связанные доказательства отсутствуют.</p>
+                    <EmptyState
+                      icon={<Lock size={20} aria-hidden="true" />}
+                      title="Связанные доказательства отсутствуют."
+                    />
                   ) : orderEvidence.length > 0 ? (
-                    <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.4rem" }}>
+                    <div className="data-list">
                       {orderEvidence.map((asset) => {
                         const held = isAssetOnLegalHold(asset, claimDetail.evidenceHolds);
                         return (
-                          <li
-                            key={asset.id}
-                            style={{
-                              padding: "0.55rem 0.7rem",
-                              border: "1px solid var(--border, #e2e8f0)",
-                              borderRadius: "0.4rem",
-                              display: "grid",
-                              gap: "0.2rem",
-                              fontSize: "0.875rem",
-                            }}
-                          >
-                            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "0.4rem" }}>
-                              <code style={{ wordBreak: "break-all" }}>{asset.objectKey}</code>
-                              {held && <span className="badge">legal_hold</span>}
-                            </div>
-                            <div className="muted">
-                              SHA-256: <code>{getHashPrefix(asset)}</code>
-                              {asset.purpose ? ` · Назначение: ${asset.purpose}` : ""}
-                            </div>
-                          </li>
+                          <div className="data-row" key={asset.id}>
+                            <span className="data-row__main">
+                              <span className="row row--tight">
+                                <code>{asset.objectKey}</code>
+                              </span>
+                              <span className="muted row row--tight">
+                                <span>
+                                  SHA-256: <code>{getHashPrefix(asset)}</code>
+                                  {asset.purpose ? ` · Назначение: ${stateLabel(EVIDENCE_PURPOSE_LABELS, asset.purpose)}` : ""}
+                                </span>
+                              </span>
+                            </span>
+                            {held && <Badge tone="warn">Юридическое удержание</Badge>}
+                          </div>
                         );
                       })}
-                    </ul>
+                    </div>
                   ) : (
-                    <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.4rem" }}>
+                    <div className="data-list">
                       {claimDetail.evidenceHolds.map((hold) => (
-                        <li
-                          key={hold.id}
-                          style={{
-                            padding: "0.55rem 0.7rem",
-                            border: "1px solid var(--border, #e2e8f0)",
-                            borderRadius: "0.4rem",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: "0.5rem",
-                            fontSize: "0.875rem",
-                          }}
-                        >
-                          <div>
-                            <code>{hold.objectKey ?? hold.evidenceAssetId ?? hold.assetId ?? hold.id}</code>
-                            {hold.reason ? <div className="muted">{hold.reason}</div> : null}
-                          </div>
+                        <div className="data-row" key={hold.id}>
+                          <span className="data-row__main">
+                            <span className="row row--tight">
+                              <code>{hold.objectKey ?? hold.evidenceAssetId ?? hold.assetId ?? hold.id}</code>
+                            </span>
+                            {hold.reason ? (
+                              <span className="muted row row--tight">
+                                <span>{hold.reason}</span>
+                              </span>
+                            ) : null}
+                          </span>
                           {!hold.releasedAt && hold.active !== false && (
-                            <span className="badge">legal_hold</span>
+                            <Badge tone="warn">Юридическое удержание</Badge>
                           )}
-                        </li>
+                        </div>
                       ))}
-                    </ul>
+                    </div>
                   )}
                 </div>
 
-                <div style={{ display: "grid", gap: "0.4rem" }}>
-                  <h4 style={{ margin: 0, fontSize: "0.95rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <div className="stack stack--tight">
+                  <h4 className="section-title row row--tight">
                     <FileText size={15} aria-hidden="true" />
                     <span>История решений</span>
                   </h4>
                   {claimDetail.decisions.length === 0 ? (
-                    <p className="muted" style={{ margin: 0 }}>Решения по претензии ещё не выносились.</p>
+                    <EmptyState
+                      icon={<FileText size={20} aria-hidden="true" />}
+                      title="Решения по претензии ещё не выносились."
+                    />
                   ) : (
-                    <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.4rem" }}>
+                    <div className="data-list">
                       {claimDetail.decisions.map((d) => (
-                        <li
-                          key={d.id}
-                          style={{
-                            padding: "0.55rem 0.7rem",
-                            border: "1px solid var(--border, #e2e8f0)",
-                            borderRadius: "0.4rem",
-                            display: "grid",
-                            gap: "0.2rem",
-                            fontSize: "0.875rem",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
-                            <strong>{CLAIM_STATE_LABELS[d.outcome] ?? d.outcome}</strong>
-                            <span className="muted">{dt(d.decidedAt ?? d.createdAt)}</span>
-                          </div>
-                          {(d.rationale ?? d.reason) && <div>{d.rationale ?? d.reason}</div>}
-                          {d.compensationKopeks !== undefined && d.compensationKopeks > 0 && (
-                            <div className="muted">Компенсация: {money(d.compensationKopeks)}</div>
-                          )}
-                        </li>
+                        <div className="data-row" key={d.id}>
+                          <span className="data-row__main">
+                            <span className="row row--tight">
+                              <Badge tone={claimStateTone(d.outcome)}>
+                                {stateLabel(CLAIM_STATE_LABELS, d.outcome)}
+                              </Badge>
+                              <span className="muted">{dt(d.decidedAt ?? d.createdAt)}</span>
+                            </span>
+                            {(d.rationale ?? d.reason) && (
+                              <span className="row row--tight">
+                                <span>{d.rationale ?? d.reason}</span>
+                              </span>
+                            )}
+                            {d.compensationKopeks !== undefined && d.compensationKopeks > 0 && (
+                              <span className="muted row row--tight">
+                                <span>Компенсация: {money(d.compensationKopeks)}</span>
+                              </span>
+                            )}
+                          </span>
+                        </div>
                       ))}
-                    </ul>
+                    </div>
                   )}
                 </div>
               </>
             )}
-          </div>
+          </Card>
         </div>
-      </section>
+      </TabPanel>
 
       {/* 4. Модерация отзывов */}
-      <section className="panel">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem", marginBottom: "0.75rem" }}>
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: 0 }}>
-            <Star size={18} aria-hidden="true" />
-            <span>Модерация отзывов</span>
-          </h2>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => void loadReviews()}
-            disabled={loadingReviews}
-            style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-          >
-            <RefreshCw size={15} aria-hidden="true" />
-            <span>{loadingReviews ? "Обновление..." : "Обновить"}</span>
-          </button>
-        </div>
+      <TabPanel idPrefix={tabsId} id="reviews" active={activeSection === "reviews"}>
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                <Star size={18} aria-hidden="true" />
+                <span>Модерация отзывов</span>
+              </span>
+            }
+            actions={
+              <Button
+                variant="ghost"
+                onClick={() => void loadReviews()}
+                disabled={loadingReviews}
+                leadingIcon={<RefreshCw size={15} aria-hidden="true" />}
+              >
+                {loadingReviews ? "Обновление..." : "Обновить"}
+              </Button>
+            }
+          />
+          <CardBody>
+            {reviews.length === 0 ? (
+              <EmptyState
+                icon={<Star size={20} aria-hidden="true" />}
+                title="Опубликованных отзывов пока нет."
+              />
+            ) : (
+              <div className="data-list">
+                {reviews.map((review) => {
+                  const isHidden = review.status === "hidden" || Boolean(review.hiddenAt);
+                  return (
+                    <div className="data-row" key={review.id}>
+                      <span className="data-row__main">
+                        <span className="row row--tight">
+                          <span className="row row--tight">
+                            <Star size={15} aria-hidden="true" />
+                            <strong>{review.rating} / 5</strong>
+                          </span>
+                          <span className="row row--tight muted">
+                            <ThumbsUp size={14} aria-hidden="true" />
+                            <span>{review.likeCount}</span>
+                          </span>
+                          <span className="muted">{dt(review.createdAt)}</span>
+                          {isHidden && <Badge tone="neutral">Скрыт</Badge>}
+                        </span>
+                        <span className="row row--tight">
+                          <span>{review.body}</span>
+                        </span>
+                        {review.hideReason && (
+                          <span className="muted row row--tight">
+                            <span>Причина скрытия: {review.hideReason}</span>
+                          </span>
+                        )}
+                      </span>
 
-        {reviews.length === 0 ? (
-          <p className="muted">Опубликованных отзывов пока нет.</p>
-        ) : (
-          <ul className="list" style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.6rem" }}>
-            {reviews.map((review) => {
-              const isHidden = review.status === "hidden" || Boolean(review.hiddenAt);
-              return (
-                <li
-                  key={review.id}
-                  style={{
-                    padding: "0.75rem",
-                    border: "1px solid var(--border, #e2e8f0)",
-                    borderRadius: "0.5rem",
-                    display: "flex",
-                    flexWrap: "wrap",
-                    justifyContent: "space-between",
-                    alignItems: "flex-start",
-                    gap: "0.75rem",
-                  }}
-                >
-                  <div style={{ display: "grid", gap: "0.35rem", flex: "1 1 320px" }}>
-                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.6rem" }}>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", fontWeight: 600 }}>
-                        <Star size={15} aria-hidden="true" />
-                        <span>{review.rating} / 5</span>
-                      </span>
-                      <span className="muted" style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", fontSize: "0.875rem" }}>
-                        <ThumbsUp size={14} aria-hidden="true" />
-                        <span>{review.likeCount}</span>
-                      </span>
-                      <span className="muted" style={{ fontSize: "0.875rem" }}>
-                        {dt(review.createdAt)}
-                      </span>
-                      {isHidden && <span className="badge">Скрыт</span>}
+                      {!isHidden && (
+                        <Button
+                          variant="ghost"
+                          onClick={() => {
+                            setHideReviewTarget(review);
+                            setHideReason("");
+                          }}
+                          leadingIcon={<EyeOff size={15} aria-hidden="true" />}
+                        >
+                          Скрыть с причиной
+                        </Button>
+                      )}
                     </div>
-                    <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{review.body}</p>
-                    {review.hideReason && (
-                      <div className="muted" style={{ fontSize: "0.85rem" }}>
-                        Причина скрытия: {review.hideReason}
-                      </div>
-                    )}
-                  </div>
-
-                  {!isHidden && (
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => {
-                        setHideReviewTarget(review);
-                        setHideReason("");
-                      }}
-                      style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-                    >
-                      <EyeOff size={15} aria-hidden="true" />
-                      <span>Скрыть с причиной</span>
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+                  );
+                })}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </TabPanel>
 
       {/* Modal: Открыть тикет по заказу */}
       <ModalDialog
@@ -1218,48 +1277,39 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         title={ticketOrder ? `Открыть тикет по заказу ${ticketOrder.publicNumber}` : "Открыть тикет по заказу"}
         onClose={() => setTicketOrder(null)}
       >
-        <form onSubmit={handleCreateTicket} style={{ display: "grid", gap: "0.75rem" }}>
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={ticketChannelId}>Канал обращения</label>
-            <select
-              id={ticketChannelId}
-              value={ticketChannel}
-              onChange={(e) => setTicketChannel(e.target.value as "call" | "chat")}
-            >
-              <option value="call">Звонок</option>
-              <option value="chat">Чат</option>
-            </select>
-          </div>
+        <form onSubmit={handleCreateTicket} className="stack">
+          <Select
+            label="Канал обращения"
+            value={ticketChannel}
+            onChange={(e) => setTicketChannel(e.target.value as "call" | "chat")}
+          >
+            <option value="call">Звонок</option>
+            <option value="chat">Чат</option>
+          </Select>
 
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={ticketSubjectId}>Тема обращения</label>
-            <input
-              id={ticketSubjectId}
-              type="text"
-              value={ticketSubject}
-              onChange={(e) => setTicketSubject(e.target.value)}
-              placeholder="Краткая тема обращения"
-            />
-          </div>
+          <Input
+            label="Тема обращения"
+            type="text"
+            value={ticketSubject}
+            onChange={(e) => setTicketSubject(e.target.value)}
+            placeholder="Краткая тема обращения"
+          />
 
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={ticketBodyId}>Описание обращения</label>
-            <textarea
-              id={ticketBodyId}
-              rows={4}
-              value={ticketBody}
-              onChange={(e) => setTicketBody(e.target.value)}
-              placeholder="Суть звонка или сообщения клиента..."
-            />
-          </div>
+          <Textarea
+            label="Описание обращения"
+            rows={4}
+            value={ticketBody}
+            onChange={(e) => setTicketBody(e.target.value)}
+            placeholder="Суть звонка или сообщения клиента..."
+          />
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-            <button type="button" className="ghost" onClick={() => setTicketOrder(null)}>
+          <div className="row row--end row--tight">
+            <Button variant="ghost" onClick={() => setTicketOrder(null)}>
               Отмена
-            </button>
-            <button type="submit" className="primary" disabled={creatingTicket}>
+            </Button>
+            <Button type="submit" variant="primary" disabled={creatingTicket}>
               {creatingTicket ? "Создание..." : "Создать обращение"}
-            </button>
+            </Button>
           </div>
         </form>
       </ModalDialog>
@@ -1270,32 +1320,31 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         title="Предложить компенсацию"
         onClose={() => setCompModalOpen(false)}
       >
-        <form onSubmit={handleProposeCompensation} style={{ display: "grid", gap: "0.75rem" }}>
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={compRubId}>Сумма компенсации (руб.)</label>
-            <input
-              id={compRubId}
-              type="number"
-              min="1"
-              step="0.01"
-              value={compRub}
-              onChange={(e) => setCompRub(e.target.value)}
-              placeholder="Например: 500"
-            />
-            {Number.isFinite(compPreviewKopeks) && compPreviewKopeks > 0 && (
-              <span className="muted" style={{ fontSize: "0.85rem" }}>
-                К начислению: {money(compPreviewKopeks)} ({compPreviewKopeks} коп.)
-              </span>
-            )}
-          </div>
+        <form onSubmit={handleProposeCompensation} className="stack">
+          <Input
+            label="Сумма компенсации (руб.)"
+            type="number"
+            min="1"
+            step="0.01"
+            value={compRub}
+            onChange={(e) => setCompRub(e.target.value)}
+            placeholder="Например: 500"
+            hint={
+              Number.isFinite(compPreviewKopeks) && compPreviewKopeks > 0 ? (
+                <span>
+                  К начислению: {money(compPreviewKopeks)} ({compPreviewKopeks} коп.)
+                </span>
+              ) : undefined
+            }
+          />
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-            <button type="button" className="ghost" onClick={() => setCompModalOpen(false)}>
+          <div className="row row--end row--tight">
+            <Button variant="ghost" onClick={() => setCompModalOpen(false)}>
               Отмена
-            </button>
-            <button type="submit" className="primary" disabled={submittingComp}>
+            </Button>
+            <Button type="submit" variant="primary" disabled={submittingComp}>
               {submittingComp ? "Отправка..." : "Предложить компенсацию"}
-            </button>
+            </Button>
           </div>
         </form>
       </ModalDialog>
@@ -1306,44 +1355,36 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         title="Вынести решение по претензии"
         onClose={() => setDecisionModalOpen(false)}
       >
-        <form onSubmit={handleSubmitDecision} style={{ display: "grid", gap: "0.75rem" }}>
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={decisionOutcomeId}>Итог рассмотрения</label>
-            <select
-              id={decisionOutcomeId}
-              value={decisionOutcome}
-              onChange={(e) => setDecisionOutcome(e.target.value as "resolved" | "denied_with_reason")}
-            >
-              <option value="resolved">Удовлетворить претензию (resolved)</option>
-              <option value="denied_with_reason">Отклонить с обоснованием (denied_with_reason)</option>
-            </select>
-          </div>
+        <form onSubmit={handleSubmitDecision} className="stack">
+          <Select
+            label="Итог рассмотрения"
+            value={decisionOutcome}
+            onChange={(e) => setDecisionOutcome(e.target.value as "resolved" | "denied_with_reason")}
+          >
+            <option value="resolved">Удовлетворить претензию</option>
+            <option value="denied_with_reason">Отклонить с обоснованием</option>
+          </Select>
 
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={decisionRationaleId}>Обоснование решения (минимум 10 символов)</label>
-            <textarea
-              id={decisionRationaleId}
-              rows={4}
-              value={decisionRationale}
-              onChange={(e) => setDecisionRationale(e.target.value)}
-              placeholder="Укажите подробное обоснование на основе проверенных доказательств..."
-            />
-            <span className="muted" style={{ fontSize: "0.8rem" }}>
-              Символов: {decisionRationale.trim().length} / 10 минимум
-            </span>
-          </div>
+          <Textarea
+            label="Обоснование решения (минимум 10 символов)"
+            rows={4}
+            value={decisionRationale}
+            onChange={(e) => setDecisionRationale(e.target.value)}
+            placeholder="Укажите подробное обоснование на основе проверенных доказательств..."
+            hint={<span>Символов: {decisionRationale.trim().length} / 10 минимум</span>}
+          />
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-            <button type="button" className="ghost" onClick={() => setDecisionModalOpen(false)}>
+          <div className="row row--end row--tight">
+            <Button variant="ghost" onClick={() => setDecisionModalOpen(false)}>
               Отмена
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
-              className="primary"
+              variant="primary"
               disabled={submittingDecision || decisionRationale.trim().length < 10}
             >
               {submittingDecision ? "Сохранение..." : "Вынести решение"}
-            </button>
+            </Button>
           </div>
         </form>
       </ModalDialog>
@@ -1354,32 +1395,27 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         title="Переоткрыть претензию"
         onClose={() => setReopenModalOpen(false)}
       >
-        <form onSubmit={handleReopenClaim} style={{ display: "grid", gap: "0.75rem" }}>
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={reopenReasonId}>Причина переоткрытия (минимум 5 символов)</label>
-            <textarea
-              id={reopenReasonId}
-              rows={3}
-              value={reopenReason}
-              onChange={(e) => setReopenReason(e.target.value)}
-              placeholder="Опишите основание для пересмотра претензии..."
-            />
-            <span className="muted" style={{ fontSize: "0.8rem" }}>
-              Символов: {reopenReason.trim().length} / 5 минимум
-            </span>
-          </div>
+        <form onSubmit={handleReopenClaim} className="stack">
+          <Textarea
+            label="Причина переоткрытия (минимум 5 символов)"
+            rows={3}
+            value={reopenReason}
+            onChange={(e) => setReopenReason(e.target.value)}
+            placeholder="Опишите основание для пересмотра претензии..."
+            hint={<span>Символов: {reopenReason.trim().length} / 5 минимум</span>}
+          />
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-            <button type="button" className="ghost" onClick={() => setReopenModalOpen(false)}>
+          <div className="row row--end row--tight">
+            <Button variant="ghost" onClick={() => setReopenModalOpen(false)}>
               Отмена
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
-              className="primary"
+              variant="primary"
               disabled={submittingReopen || reopenReason.trim().length < 5}
             >
               {submittingReopen ? "Обработка..." : "Переоткрыть претензию"}
-            </button>
+            </Button>
           </div>
         </form>
       </ModalDialog>
@@ -1390,37 +1426,32 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         title="Скрыть отзыв с причиной"
         onClose={() => setHideReviewTarget(null)}
       >
-        <form onSubmit={handleHideReview} style={{ display: "grid", gap: "0.75rem" }}>
+        <form onSubmit={handleHideReview} className="stack">
           {hideReviewTarget && (
-            <p className="muted" style={{ margin: 0, fontSize: "0.875rem" }}>
+            <p className="muted">
               Отзыв с оценкой {hideReviewTarget.rating}/5 от {dt(hideReviewTarget.createdAt)}
             </p>
           )}
-          <div className="field" style={{ display: "grid", gap: "0.35rem" }}>
-            <label htmlFor={hideReviewReasonId}>Причина скрытия (минимум 5 символов)</label>
-            <textarea
-              id={hideReviewReasonId}
-              rows={3}
-              value={hideReason}
-              onChange={(e) => setHideReason(e.target.value)}
-              placeholder="Укажите причину модерации отзыва..."
-            />
-            <span className="muted" style={{ fontSize: "0.8rem" }}>
-              Символов: {hideReason.trim().length} / 5 минимум
-            </span>
-          </div>
+          <Textarea
+            label="Причина скрытия (минимум 5 символов)"
+            rows={3}
+            value={hideReason}
+            onChange={(e) => setHideReason(e.target.value)}
+            placeholder="Укажите причину модерации отзыва..."
+            hint={<span>Символов: {hideReason.trim().length} / 5 минимум</span>}
+          />
 
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-            <button type="button" className="ghost" onClick={() => setHideReviewTarget(null)}>
+          <div className="row row--end row--tight">
+            <Button variant="ghost" onClick={() => setHideReviewTarget(null)}>
               Отмена
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
-              className="primary"
+              variant="primary"
               disabled={submittingHide || hideReason.trim().length < 5}
             >
               {submittingHide ? "Сохранение..." : "Скрыть отзыв"}
-            </button>
+            </Button>
           </div>
         </form>
       </ModalDialog>

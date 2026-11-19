@@ -1,39 +1,92 @@
+import { lazy, Suspense } from "react";
+import { AnimatePresence } from "motion/react";
 import { Notice, DemoConfig } from "../types";
-import { CustomerWorkspace } from "../workspaces/CustomerWorkspace";
-import { CourierWorkspace } from "../workspaces/CourierWorkspace";
-import { PartnerWorkspace } from "../workspaces/PartnerWorkspace";
-import { DispatcherWorkspace } from "../workspaces/DispatcherWorkspace";
-import { AdminWorkspace } from "../workspaces/AdminWorkspace";
-import { FinanceWorkspace } from "../workspaces/FinanceWorkspace";
-import { SupportClaimsWorkspace } from "../workspaces/SupportClaimsWorkspace";
+import { WorkspaceTransition } from "./ui/Reveal";
+import { Skeleton, SkeletonRows } from "./ui/Skeleton";
+import type { WorkspaceKey } from "../workspaces/registry";
 
+const CustomerWorkspace = lazy(() =>
+  import("../workspaces/CustomerWorkspace").then(m => ({ default: m.CustomerWorkspace })),
+);
+const CourierWorkspace = lazy(() =>
+  import("../workspaces/CourierWorkspace").then(m => ({ default: m.CourierWorkspace })),
+);
+const PartnerWorkspace = lazy(() =>
+  import("../workspaces/PartnerWorkspace").then(m => ({ default: m.PartnerWorkspace })),
+);
+const DispatcherWorkspace = lazy(() =>
+  import("../workspaces/DispatcherWorkspace").then(m => ({ default: m.DispatcherWorkspace })),
+);
+const AdminWorkspace = lazy(() =>
+  import("../workspaces/AdminWorkspace").then(m => ({ default: m.AdminWorkspace })),
+);
+const FinanceWorkspace = lazy(() =>
+  import("../workspaces/FinanceWorkspace").then(m => ({ default: m.FinanceWorkspace })),
+);
+const SupportClaimsWorkspace = lazy(() =>
+  import("../workspaces/SupportClaimsWorkspace").then(m => ({ default: m.SupportClaimsWorkspace })),
+);
+
+function WorkspaceSkeleton() {
+  return (
+    <div className="workspace-grid" role="status" aria-live="polite" aria-label="Загрузка раздела">
+      <div className="panel stack">
+        <Skeleton variant="title" />
+        <SkeletonRows rows={3} />
+      </div>
+      <div className="panel stack">
+        <Skeleton variant="block" />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Renders exactly one role workspace at a time. An operator who holds three
+ * roles used to see all three workspaces stacked on one page; the rail now
+ * owns that choice and the router honours it.
+ */
 export function Router({
   me,
   demo,
   setNotice,
+  activeWorkspace,
 }: {
   me: { roles: string[] };
   demo: DemoConfig | null;
   setNotice: (notice: Notice) => void;
+  activeWorkspace: WorkspaceKey | null;
 }) {
-  const roles = me.roles;
+  function workspaceFor(key: WorkspaceKey) {
+    switch (key) {
+      case "customer":
+        return demo ? <CustomerWorkspace demo={demo} notify={setNotice} /> : null;
+      case "courier":
+        return <CourierWorkspace demo={demo} notify={setNotice} />;
+      case "partner":
+        return <PartnerWorkspace notify={setNotice} />;
+      case "dispatcher":
+        return <DispatcherWorkspace notify={setNotice} />;
+      case "admin":
+        return <AdminWorkspace notify={setNotice} />;
+      case "finance":
+        return <FinanceWorkspace demo={demo} notify={setNotice} />;
+      case "support":
+        return <SupportClaimsWorkspace notify={setNotice} roles={me.roles} />;
+      default:
+        return null;
+    }
+  }
 
   return (
-    <>
-      {roles.includes("customer") && demo && <CustomerWorkspace demo={demo} notify={setNotice} />}
-      {roles.includes("courier") && <CourierWorkspace demo={demo} notify={setNotice} />}
-      {(roles.includes("laundry_operator")
-        || roles.includes("laundry_supervisor")
-        || roles.includes("partner_finance")) && <PartnerWorkspace notify={setNotice} />}
-      {roles.includes("dispatcher") && <DispatcherWorkspace notify={setNotice} />}
-      {roles.includes("platform_admin") && <AdminWorkspace notify={setNotice} />}
-      {roles.includes("platform_finance") && <FinanceWorkspace demo={demo} notify={setNotice} />}
-      {(roles.includes("customer_support")
-        || roles.includes("claims_approver")
-        || roles.includes("claims_investigator")) && (
-        <SupportClaimsWorkspace notify={setNotice} roles={roles} />
-      )}
-      {/* Add others as needed */}
-    </>
+    <AnimatePresence mode="wait" initial={false}>
+      {activeWorkspace ? (
+        <WorkspaceTransition key={activeWorkspace}>
+          <Suspense fallback={<WorkspaceSkeleton />}>
+            {workspaceFor(activeWorkspace)}
+          </Suspense>
+        </WorkspaceTransition>
+      ) : null}
+    </AnimatePresence>
   );
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
@@ -13,7 +14,10 @@ import {
   Wallet,
 } from "lucide-react";
 import { api, dt, money } from "../api";
-import { DELIVERY_OUTCOME_LABELS, formatError, GARMENT_STATUS_LABELS, TIER_LABELS } from "../labels";
+import { DELIVERY_OUTCOME_LABELS, formatError, GARMENT_STATUS_LABELS, stateLabel, TIER_LABELS } from "../labels";
+import { Button } from "../components/ui/Button";
+import { Meter } from "../components/ui/Meter";
+import { StatTile } from "../components/ui/StatTile";
 
 /**
  * Panels for the three money/volume questions the product could not answer before:
@@ -39,17 +43,10 @@ function Metric({
   tone?: "default" | "good" | "warn" | "bad";
   hint?: string;
 }) {
-  const color =
-    tone === "good" ? "var(--success-ink, #0A5645)"
-      : tone === "warn" ? "var(--warning-ink, #7C4A03)"
-        : tone === "bad" ? "var(--danger-ink, #9E1C18)"
-          : "inherit";
+  const valueTone =
+    tone === "good" ? "ok" : tone === "warn" ? "warn" : tone === "bad" ? "danger" : "default";
   return (
-    <div style={{ border: "1px solid var(--border-strong)", borderRadius: 10, padding: 12 }}>
-      <div className="muted">{label}</div>
-      <div className="mono" style={{ fontSize: "1.35rem", fontWeight: 700, color }}>{value}</div>
-      {hint && <div className="muted" style={{ fontSize: "0.8125rem", marginBlockStart: 4 }}>{hint}</div>}
-    </div>
+    <StatTile label={label} value={value} hint={hint} tone={valueTone} />
   );
 }
 
@@ -57,13 +54,16 @@ function Loading({ error }: { error: string | null }) {
   if (error) {
     return (
       <div className="notice error" role="alert">
-        <span>Не удалось загрузить данные: {error}</span>
+        <span className="notice__body">
+          <AlertCircle size={16} aria-hidden="true" />
+          <span>Не удалось загрузить данные: {error}</span>
+        </span>
       </div>
     );
   }
   return (
-    <p className="muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <Loader2 size={16} aria-hidden="true" />
+    <p className="muted row row--tight">
+      <Loader2 size={16} aria-hidden="true" className="spin" />
       <span>Загрузка…</span>
     </p>
   );
@@ -71,10 +71,15 @@ function Loading({ error }: { error: string | null }) {
 
 function ReloadButton({ onClick, busy }: { onClick: () => void; busy: boolean }) {
   return (
-    <button type="button" className="ghost" onClick={onClick} disabled={busy}>
-      <RefreshCw size={16} aria-hidden="true" />
-      <span>{busy ? "Обновление…" : "Обновить"}</span>
-    </button>
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={busy}
+      leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+      onClick={onClick}
+    >
+      {busy ? "Обновление…" : "Обновить"}
+    </Button>
   );
 }
 
@@ -339,27 +344,11 @@ export function FinanceMoneyPanel({ notify }: { notify: NotifyFn }) {
                 <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
                   <span className="muted">выставлено {money(month.invoicedKopeks)}</span>
                   <span className="muted">собрано {money(month.netCollectedKopeks)}</span>
-                  <span
-                    aria-hidden="true"
-                    style={{
-                      display: "inline-block",
-                      width: 120,
-                      height: 8,
-                      borderRadius: 4,
-                      background: "var(--surface-muted, #EFF3F1)",
-                      position: "relative",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <span
-                      style={{
-                        position: "absolute",
-                        insetInlineStart: 0,
-                        top: 0,
-                        bottom: 0,
-                        width: `${Math.round((month.netCollectedKopeks / maxMonth) * 100)}%`,
-                        background: "var(--accent, #0B6B58)",
-                      }}
+                  <span style={{ inlineSize: 120 }}>
+                    <Meter
+                      value={month.netCollectedKopeks}
+                      max={maxMonth}
+                      label={`Собрано за ${month.month}`}
                     />
                   </span>
                 </span>
@@ -478,7 +467,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
               <tbody>
                 {data.byTier.map(row => (
                   <tr key={row.tier}>
-                    <td>{TIER_LABELS[row.tier] ?? row.tier}</td>
+                    <td>{stateLabel(TIER_LABELS, row.tier)}</td>
                     <td className="mono">{row.orderCount}</td>
                     <td className="mono">{money(row.amountKopeks)}</td>
                   </tr>
@@ -507,7 +496,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
                 {data.byService.map(row => (
                   <tr key={`${row.serviceId}-${row.tier}`}>
                     <td>{row.serviceName}</td>
-                    <td>{TIER_LABELS[row.tier] ?? row.tier}</td>
+                    <td>{stateLabel(TIER_LABELS, row.tier)}</td>
                     <td className="mono">{row.orderCount}</td>
                     <td className="mono">{row.unit === "gram" ? `${(row.quantity / 1000).toFixed(1)} кг` : `${row.quantity} шт`}</td>
                     <td className="mono">{money(row.amountKopeks)}</td>
@@ -697,7 +686,7 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
           <div className="button-row">
             {data.garmentStatus.map(row => (
               <span className="pill" key={row.status}>
-                {GARMENT_STATUS_LABELS[row.status] ?? row.status}: <span className="mono">{row.count}</span>
+                {stateLabel(GARMENT_STATUS_LABELS, row.status)}: <span className="mono">{row.count}</span>
               </span>
             ))}
           </div>
@@ -715,27 +704,11 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
                   <span className="muted">заказов: {day.orderCount}</span>
                   <span className="muted">вещей: {day.itemCount}</span>
                   <span className="muted">вес: {KG(day.receivedGrams)}</span>
-                  <span
-                    aria-hidden="true"
-                    style={{
-                      display: "inline-block",
-                      width: 120,
-                      height: 8,
-                      borderRadius: 4,
-                      background: "var(--surface-muted, #EFF3F1)",
-                      position: "relative",
-                      overflow: "hidden",
-                    }}
-                  >
-                    <span
-                      style={{
-                        position: "absolute",
-                        insetInlineStart: 0,
-                        top: 0,
-                        bottom: 0,
-                        width: `${Math.round((day.receivedGrams / maxDaily) * 100)}%`,
-                        background: "var(--accent, #0B6B58)",
-                      }}
+                  <span style={{ inlineSize: 120 }}>
+                    <Meter
+                      value={day.receivedGrams}
+                      max={maxDaily}
+                      label={`Приёмка за ${day.date}`}
                     />
                   </span>
                 </span>
@@ -768,7 +741,7 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
                     <td className="mono">{row.publicNumber}</td>
                     <td className="mono">{KG(row.quotedGrams)}</td>
                     <td className="mono">{KG(row.receivedGrams)}</td>
-                    <td className="mono" style={{ color: row.deltaGrams > 0 ? "var(--warning-ink, #7C4A03)" : "inherit" }}>
+                    <td className="mono" style={{ color: row.deltaGrams > 0 ? "var(--status-warn-ink)" : "inherit" }}>
                       {row.deltaGrams > 0 ? <ArrowUpRight size={13} aria-hidden="true" /> : <ArrowDownRight size={13} aria-hidden="true" />}
                       {" "}{row.deltaGrams > 0 ? "+" : ""}{KG(row.deltaGrams)}
                     </td>
@@ -993,7 +966,7 @@ export function ChurnPanel({ notify }: { notify: NotifyFn }) {
                   <td>{row.displayName || "—"}</td>
                   <td className="mono">{row.phone ?? "—"}</td>
                   <td className="mono">{row.failedAttempts}</td>
-                  <td>{DELIVERY_OUTCOME_LABELS[row.lastOutcome] ?? row.lastOutcome}</td>
+                  <td>{stateLabel(DELIVERY_OUTCOME_LABELS, row.lastOutcome)}</td>
                   <td className="mono">{dt(row.lastAttemptAt)}</td>
                 </tr>
               ))}

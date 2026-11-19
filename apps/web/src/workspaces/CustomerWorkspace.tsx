@@ -7,6 +7,7 @@ import {
   Copy,
   CreditCard,
   FileText,
+  Info,
   ListOrdered,
   MapPin,
   MessageSquare,
@@ -17,19 +18,35 @@ import {
   Trash2,
   Wallet,
 } from "lucide-react";
-import { api, ApiError, dt, money } from "../api";
+import { api, dt, money } from "../api";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { findSubtype } from "@shared/garment-taxonomy";
 import { ModalDialog } from "../components/ModalDialog";
 import { QrCodeBadge } from "../components/QrCodeBadge";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { CardHeader } from "../components/ui/Card";
+import { EmptyState } from "../components/ui/EmptyState";
+import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { CustomerMoneyPanel } from "./analytics-panels";
 import {
   ADJUSTMENT_STATE_LABELS,
   CLAIM_STATE_LABELS,
-  ERROR_LABELS,
-  EVENT_LABELS,
+  CLAIM_TYPE_LABELS,
+  CONTAINER_KIND_LABELS,
+  eventLabel,
+  FISCAL_ADAPTER_NOTE,
+  FISCAL_STATE_LABELS,
+  formatError,
+  GARMENT_STATUS_LABELS,
+  INVOICE_STATE_LABELS,
   ORDER_STATE_LABELS,
+  orderStateTone,
   PAYMENT_STATE_LABELS,
+  providerLabel,
+  REFUND_STATE_LABELS,
+  stateLabel,
+  TIER_LABELS,
 } from "../labels";
 import type { DemoConfig } from "../types";
 
@@ -205,11 +222,6 @@ const TIER_OPTIONS = [
   { value: "protected" as const, label: "Защищённый" },
 ];
 
-const TIER_LABELS: Record<string, string> = {
-  economy: "Эконом",
-  protected: "Защищённый",
-};
-
 const CLAIM_TYPE_OPTIONS = [
   { value: "damage", label: "Повреждение вещи" },
   { value: "missing", label: "Недостача" },
@@ -223,19 +235,8 @@ const UNIT_LABELS: Record<string, string> = {
   service: "услуга",
 };
 
-/** Surfaces the real server error code; the Russian label is a convenience, not a replacement. */
 function errorText(err: unknown): string {
-  if (err instanceof ApiError) {
-    const label = ERROR_LABELS[err.code];
-    return label ? `${label} (${err.code})` : err.code;
-  }
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
-
-function stateLabel(labels: Record<string, string>, state: string | null | undefined): string {
-  if (!state) return "—";
-  return labels[state] ?? state;
+  return formatError(err);
 }
 
 function windowLabel(window: WindowDto): string {
@@ -250,9 +251,9 @@ function isWindowClosed(window: WindowDto, now: number): boolean {
 }
 
 export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
+  const tabsId = useId();
   const [activeTab, setActiveTab] = useState("new");
   const [repeat, setRepeat] = useState<RepeatDto | null>(null);
-  const uid = useId();
 
   const handleRepeat = async (orderId: string) => {
     try {
@@ -275,43 +276,37 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: 
 
   return (
     <div className="workspace-grid">
-      <div className="tab-bar" role="tablist" aria-label="Разделы личного кабинета клиента">
-        {tabs.map((tab) => {
-          const Icon = tab.icon;
-          const isSelected = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              id={`${uid}-tab-${tab.id}`}
-              type="button"
-              role="tab"
-              className="tab-btn"
-              aria-selected={isSelected}
-              aria-controls={`${uid}-tabpanel-${tab.id}`}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              <Icon size={16} aria-hidden="true" />
+      <Tabs
+        idPrefix={tabsId}
+        items={tabs.map(tab => ({
+          id: tab.id,
+          label: (
+            <>
+              <tab.icon size={16} aria-hidden="true" />
               <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
+            </>
+          ),
+        }))}
+        value={activeTab}
+        onChange={setActiveTab}
+        label="Разделы личного кабинета клиента"
+      />
 
-      {tabs.map((tab) => (
-        <div
-          key={tab.id}
-          id={`${uid}-tabpanel-${tab.id}`}
-          role="tabpanel"
-          aria-labelledby={`${uid}-tab-${tab.id}`}
-          hidden={activeTab !== tab.id}
-        >
-          {tab.id === "new" && <NewOrderTab demo={demo} notify={notify} repeat={repeat} onOpenAddresses={() => setActiveTab("addresses")} />}
-          {tab.id === "my" && <MyOrdersTab demo={demo} notify={notify} onRepeat={(orderId) => void handleRepeat(orderId)} />}
-          {tab.id === "spending" && <CustomerMoneyPanel notify={notify} />}
-          {tab.id === "addresses" && <AddressesTab demo={demo} notify={notify} />}
-          {tab.id === "support" && <SupportTab notify={notify} />}
-        </div>
-      ))}
+      <TabPanel idPrefix={tabsId} id="new" active={activeTab === "new"}>
+        <NewOrderTab demo={demo} notify={notify} repeat={repeat} onOpenAddresses={() => setActiveTab("addresses")} />
+      </TabPanel>
+      <TabPanel idPrefix={tabsId} id="my" active={activeTab === "my"}>
+        <MyOrdersTab demo={demo} notify={notify} onRepeat={(orderId) => void handleRepeat(orderId)} />
+      </TabPanel>
+      <TabPanel idPrefix={tabsId} id="spending" active={activeTab === "spending"}>
+        <CustomerMoneyPanel notify={notify} />
+      </TabPanel>
+      <TabPanel idPrefix={tabsId} id="addresses" active={activeTab === "addresses"}>
+        <AddressesTab demo={demo} notify={notify} />
+      </TabPanel>
+      <TabPanel idPrefix={tabsId} id="support" active={activeTab === "support"}>
+        <SupportTab notify={notify} />
+      </TabPanel>
     </div>
   );
 }
@@ -672,10 +667,11 @@ function NewOrderTab({
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ margin: 0 }}>Новый заказ</h2>
-          <span className="pill">Демо-тарифы · суммы считает сервер</span>
-        </div>
+        <CardHeader
+          title="Новый заказ"
+          subtitle="Выберите дом, услугу и окна забора с доставкой — стоимость посчитает сервер по тарифу."
+          actions={<Badge tone="accent">Демо-тарифы</Badge>}
+        />
 
         {catalogError && (
           <div className="notice error">
@@ -711,7 +707,7 @@ function NewOrderTab({
               {catalog?.length === 0 && <option value="">Каталог пуст</option>}
               {catalog?.map((service) => (
                 <option key={service.id} value={service.id}>
-                  {service.name} ({service.code})
+                  {service.name}
                 </option>
               ))}
             </select>
@@ -762,7 +758,7 @@ function NewOrderTab({
 
           <div className="field">
             <label htmlFor={`${uid}-quantity`}>
-              Количество ({selectedService ? UNIT_LABELS[selectedService.unit] ?? selectedService.unit : "—"})
+              Количество ({selectedService ? stateLabel(UNIT_LABELS, selectedService.unit) : "—"})
             </label>
             <input
               id={`${uid}-quantity`}
@@ -786,9 +782,14 @@ function NewOrderTab({
             />
           </div>
         ) : (
-          <div className="notice" style={{ marginBlockStart: 16 }}>
-            Тариф «Эконом» — это закрытый и взвешенный пакет без поштучной описи: сколько футболок внутри,
-            никто не знает и не обещает. Вес посчитают при приёме.
+          <div className="notice info" style={{ marginBlockStart: 16 }}>
+            <span className="notice__body">
+              <Info size={16} aria-hidden="true" />
+              <span>
+                Тариф «Эконом» — это закрытый и взвешенный пакет без поштучной описи: сколько футболок внутри,
+                никто не знает и не обещает. Вес посчитают при приёме.
+              </span>
+            </span>
           </div>
         )}
 
@@ -800,40 +801,56 @@ function NewOrderTab({
 
         {building && !hasAddressInBuilding && (
           <div className="alert-banner">
-            <strong>Нужен адрес в этом доме.</strong> Расчёт стоимости сервер не посчитает без адреса
-            клиента в выбранном доме.
-            <button type="button" className="ghost" style={{ marginBlockStart: 8 }} onClick={onOpenAddresses}>
-              <MapPin size={16} aria-hidden="true" />
-              <span>Перейти в адресную книгу</span>
-            </button>
+            <span>
+              <strong>Нужен адрес в этом доме.</strong> Расчёт стоимости сервер не посчитает без адреса
+              клиента в выбранном доме.
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              leadingIcon={<MapPin size={16} aria-hidden="true" />}
+              onClick={onOpenAddresses}
+            >
+              Перейти в адресную книгу
+            </Button>
           </div>
         )}
 
         <div className="button-row">
-          <button type="button" className="primary" disabled={isBusy} onClick={() => void handleQuote()}>
-            <Banknote size={16} aria-hidden="true" />
-            <span>Рассчитать стоимость</span>
-          </button>
-          <button type="button" className="secondary" disabled={isBusy || !quote} onClick={() => void handleHold()}>
-            <Calendar size={16} aria-hidden="true" />
-            <span>Забронировать слоты</span>
-          </button>
-          <button
-            type="button"
-            className="primary"
+          <Button
+            variant="primary"
+            disabled={isBusy}
+            leadingIcon={<Banknote size={16} aria-hidden="true" />}
+            onClick={() => void handleQuote()}
+          >
+            Рассчитать стоимость
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={isBusy || !quote}
+            leadingIcon={<Calendar size={16} aria-hidden="true" />}
+            onClick={() => void handleHold()}
+          >
+            Забронировать слоты
+          </Button>
+          <Button
+            variant="primary"
             disabled={isBusy || !quote || !pickupHold || !deliveryHold}
+            leadingIcon={<Check size={16} aria-hidden="true" />}
             onClick={() => void handleBook()}
           >
-            <Check size={16} aria-hidden="true" />
-            <span>Подтвердить заказ</span>
-          </button>
+            Подтвердить заказ
+          </Button>
         </div>
       </section>
 
       <section className="panel">
         <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Расчёт</h3>
-        {!quote && (
-          <div className="empty-state">Расчёта пока нет — стоимость считает сервер по тарифу.</div>
+        {!quote && (          <EmptyState
+            icon={<Banknote size={20} aria-hidden="true" />}
+            title="Расчёта пока нет"
+            text="Стоимость считает сервер по действующему тарифу. Выберите дом, услугу и окна забора с доставкой, затем нажмите «Рассчитать стоимость»."
+          />
         )}
         {quote && (
           <>
@@ -852,13 +869,13 @@ function NewOrderTab({
                       ? catalog?.find((item) => item.id === line.serviceId)
                       : undefined;
                     const title = line.kind === "service"
-                      ? `${service?.name ?? line.description}${line.tier ? ` · ${TIER_LABELS[line.tier] ?? line.tier}` : ""}`
+                      ? `${service?.name ?? line.description}${line.tier ? ` · ${stateLabel(TIER_LABELS, line.tier)}` : ""}`
                       : line.description;
                     return (
                       <tr key={`${line.kind}-${index}`}>
                         <td>{title}</td>
                         <td className="mono">
-                          {line.quantity} {UNIT_LABELS[line.unit] ?? line.unit}
+                          {line.quantity} {stateLabel(UNIT_LABELS, line.unit)}
                         </td>
                         <td className="mono">{money(line.amountKopeks)}</td>
                       </tr>
@@ -909,7 +926,9 @@ function NewOrderTab({
             <h3 className="panel-title" style={{ margin: 0 }}>
               Заказ <span className="mono">{order.publicNumber}</span>
             </h3>
-            <span className="pill">{stateLabel(ORDER_STATE_LABELS, order.lifecycleState)}</span>
+            <Badge tone={orderStateTone(order.lifecycleState)}>
+              {stateLabel(ORDER_STATE_LABELS, order.lifecycleState)}
+            </Badge>
           </div>
           <div className="line-item total">
             <span>Сумма заказа по счёту прайса</span>
@@ -941,7 +960,7 @@ function NewOrderTab({
               <h4 className="section-title">Финансы заказа</h4>
               {invoice ? (
                 <div className="data-row">
-                  <span>Счёт <span className="mono">{invoice.number}</span> · {stateLabel({}, invoice.state)}</span>
+                  <span>Счёт <span className="mono">{invoice.number}</span> · {stateLabel(INVOICE_STATE_LABELS, invoice.state)}</span>
                   <span className="mono">{money(invoice.totalKopeks)}</span>
                 </div>
               ) : (
@@ -954,7 +973,7 @@ function NewOrderTab({
                   {finance.payments.map((payment) => (
                     <div className="data-row" key={payment.id}>
                       <span>
-                        Платёж · провайдер <span className="mono">{payment.provider}</span> ·{" "}
+                        Платёж · {providerLabel(payment.provider)} ·{" "}
                         {stateLabel(PAYMENT_STATE_LABELS, payment.state)}
                       </span>
                       <span className="mono">{money(payment.amountKopeks)}</span>
@@ -966,7 +985,7 @@ function NewOrderTab({
                 <div className="data-list" style={{ marginBlockStart: 8 }}>
                   {finance.refunds.map((refund) => (
                     <div className="data-row" key={refund.id}>
-                      <span>Возврат · {stateLabel({}, refund.state)} · {refund.reason}</span>
+                      <span>Возврат · {stateLabel(REFUND_STATE_LABELS, refund.state)} · {refund.reason}</span>
                       <span className="mono">{money(refund.amountKopeks)}</span>
                     </div>
                   ))}
@@ -975,7 +994,7 @@ function NewOrderTab({
               {finance.fiscalReceipts.length > 0 && (
                 <p className="muted" style={{ marginBlockStart: 8 }}>
                   Состояние фискальной регистрации:{" "}
-                  {finance.fiscalReceipts.map((receipt) => receipt.state).join(", ")}. {finance.note}
+                  {finance.fiscalReceipts.map((receipt) => stateLabel(FISCAL_STATE_LABELS, receipt.state)).join(", ")}. {FISCAL_ADAPTER_NOTE}
                 </p>
               )}
             </>
@@ -1281,15 +1300,22 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
   );
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="workspace-grid">
       <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ margin: 0 }}>Мои заказы</h2>
-          <button type="button" className="ghost" disabled={loading || isBusy} onClick={() => void loadOrders()}>
-            <RefreshCw size={16} aria-hidden="true" />
-            <span>Обновить</span>
-          </button>
-        </div>
+        <CardHeader
+          title="Мои заказы"
+          actions={
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loading || isBusy}
+              leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+              onClick={() => void loadOrders()}
+            >
+              Обновить
+            </Button>
+          }
+        />
 
         {loading && !orders && <p className="muted">Загрузка заказов…</p>}
         {listError && (
@@ -1298,7 +1324,11 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
           </div>
         )}
         {!loading && orders && orders.length === 0 && (
-          <div className="empty-state">Заказов пока нет.</div>
+          <EmptyState
+            icon={<ListOrdered size={20} aria-hidden="true" />}
+            title="Заказов пока нет"
+            text="Оформите первый заказ на вкладке «Новый заказ» — стоимость посчитает сервер по тарифу."
+          />
         )}
 
         {orders && orders.length > 0 && (
@@ -1316,7 +1346,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                   <br />
                   <span className="muted">{dt(order.createdAt)}</span>
                 </span>
-                <span className="pill">{stateLabel(ORDER_STATE_LABELS, order.state)}</span>
+                <Badge tone={orderStateTone(order.state)}>{stateLabel(ORDER_STATE_LABELS, order.state)}</Badge>
               </button>
             ))}
           </div>
@@ -1336,7 +1366,9 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
               <h3 className="panel-title" style={{ margin: 0 }}>
                 Заказ <span className="mono">{detail.publicNumber}</span>
               </h3>
-              <span className="pill">{stateLabel(ORDER_STATE_LABELS, detail.lifecycleState)}</span>
+              <Badge tone={orderStateTone(detail.lifecycleState)}>
+                {stateLabel(ORDER_STATE_LABELS, detail.lifecycleState)}
+              </Badge>
             </div>
             <div className="line-item total">
               <span>Сумма заказа</span>
@@ -1435,7 +1467,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                         <td className="mono">{garment.itemCode}</td>
                         <td>{garment.category}</td>
                         <td>{garment.description}</td>
-                        <td>{garment.status}</td>
+                        <td>{stateLabel(GARMENT_STATUS_LABELS, garment.status)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1450,7 +1482,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                   {detail.containers.map((container) => (
                     <div className="data-row" key={container.id}>
                       <span>
-                        <span className="mono">{container.code}</span> · {container.kind}
+                        <span className="mono">{container.code}</span> · {CONTAINER_KIND_LABELS[container.kind] ?? "Мешок"}
                       </span>
                       <span className="mono">пломба {container.sealSerial ?? "—"}</span>
                     </div>
@@ -1481,22 +1513,21 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                   <div className="button-row">
                     {detail.adjustments.filter(adjustment => adjustment.state === "proposed").map(adjustment => (
                       <div className="button-row" key={adjustment.id}>
-                        <button
-                          type="button"
+                        <Button
+                          variant="primary"
                           disabled={busy !== null || !detail.acceptedQuoteHash}
+                          leadingIcon={<Check size={16} aria-hidden="true" />}
                           onClick={() => void handleAdjustmentDecision(adjustment.id, true)}
                         >
-                          <Check size={16} aria-hidden="true" />
-                          <span>Согласовать доплату {money(adjustment.deltaKopeks)}</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="danger-btn"
+                          Согласовать доплату {money(adjustment.deltaKopeks)}
+                        </Button>
+                        <Button
+                          variant="danger"
                           disabled={busy !== null}
                           onClick={() => void handleAdjustmentDecision(adjustment.id, false)}
                         >
-                          <span>Отказаться от доплаты</span>
-                        </button>
+                          Отказаться от доплаты
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -1513,7 +1544,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                 {invoice ? (
                   <div className="data-row">
                     <span>
-                      Счёт <span className="mono">{invoice.number}</span> · {invoice.state}
+                      Счёт <span className="mono">{invoice.number}</span> · {stateLabel(INVOICE_STATE_LABELS, invoice.state)}
                     </span>
                     <span className="mono">{money(invoice.totalKopeks)}</span>
                   </div>
@@ -1527,7 +1558,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                     {finance.payments.map((payment) => (
                       <div className="data-row" key={payment.id}>
                         <span>
-                          Платёж · провайдер <span className="mono">{payment.provider}</span> ·{" "}
+                          Платёж · {providerLabel(payment.provider)} ·{" "}
                           {stateLabel(PAYMENT_STATE_LABELS, payment.state)}
                         </span>
                         <span className="mono">{money(payment.amountKopeks)}</span>
@@ -1539,7 +1570,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                   <div className="data-list">
                     {finance.refunds.map((refund) => (
                       <div className="data-row" key={refund.id}>
-                        <span>Возврат · {refund.state} · {refund.reason}</span>
+                        <span>Возврат · {stateLabel(REFUND_STATE_LABELS, refund.state)} · {refund.reason}</span>
                         <span className="mono">{money(refund.amountKopeks)}</span>
                       </div>
                     ))}
@@ -1548,7 +1579,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                   <p className="muted">Возвратов по заказу не зафиксировано.</p>
                 )}
                 <p className="muted" style={{ marginBlockStart: 8 }}>
-                  Провайдер: <span className="mono">{finance.providerMode}</span>. {finance.note}
+                  Провайдер: {providerLabel(finance.providerMode)}. {FISCAL_ADAPTER_NOTE}
                 </p>
               </>
             )}
@@ -1563,7 +1594,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                 {orderClaims.map((claim) => (
                   <div className="data-row" key={claim.id}>
                     <span>
-                      {claim.claimType} · {stateLabel(CLAIM_STATE_LABELS, claim.state)}
+                      {CLAIM_TYPE_LABELS[claim.claimType] ?? "Другое"} · {stateLabel(CLAIM_STATE_LABELS, claim.state)}
                       <br />
                       <span className="muted">{claim.description}</span>
                     </span>
@@ -1666,7 +1697,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
               <div className="data-list">
                 {timeline.map((event, index) => (
                   <div className="data-row" key={`${event.event_type}-${index}`}>
-                    <span>{stateLabel(EVENT_LABELS, event.event_type)}</span>
+                    <span>{eventLabel(event.event_type)}</span>
                     <span className="mono">{dt(event.created_at)}</span>
                   </div>
                 ))}
@@ -1794,15 +1825,22 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) 
   };
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="workspace-grid">
       <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ margin: 0 }}>Адресная книга</h2>
-          <button type="button" className="ghost" disabled={loading || busy} onClick={() => void loadAddresses()}>
-            <RefreshCw size={16} aria-hidden="true" />
-            <span>Обновить</span>
-          </button>
-        </div>
+        <CardHeader
+          title="Адресная книга"
+          actions={
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loading || busy}
+              leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+              onClick={() => void loadAddresses()}
+            >
+              Обновить
+            </Button>
+          }
+        />
 
         {loadError && (
           <div className="notice error">
@@ -1811,7 +1849,11 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) 
         )}
         {loading && !addresses && <p className="muted">Загрузка адресов…</p>}
         {!loading && addresses && addresses.length === 0 && (
-          <div className="empty-state">Адресов пока нет — добавьте дом, в котором вас забирают и доставляют.</div>
+          <EmptyState
+            icon={<MapPin size={20} aria-hidden="true" />}
+            title="Адресов пока нет"
+            text="Добавьте дом, в котором вас забирают и доставляют — без адреса сервер не посчитает стоимость."
+          />
         )}
         {addresses && addresses.length > 0 && (
           <div className="data-list">
@@ -1984,15 +2026,22 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
   const isBusy = busy !== null;
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="workspace-grid">
       <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ margin: 0 }}>Обращения в поддержку</h2>
-          <button type="button" className="ghost" disabled={loading || isBusy} onClick={() => void loadThreads()}>
-            <RefreshCw size={16} aria-hidden="true" />
-            <span>Обновить</span>
-          </button>
-        </div>
+        <CardHeader
+          title="Обращения в поддержку"
+          actions={
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loading || isBusy}
+              leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+              onClick={() => void loadThreads()}
+            >
+              Обновить
+            </Button>
+          }
+        />
 
         {listError && (
           <div className="notice error">
@@ -2001,7 +2050,11 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
         )}
         {loading && !threads && <p className="muted">Загрузка обращений…</p>}
         {!loading && threads && threads.length === 0 && (
-          <div className="empty-state">Обращений пока нет.</div>
+          <EmptyState
+            icon={<MessageSquare size={20} aria-hidden="true" />}
+            title="Обращений пока нет"
+            text="Задайте вопрос поддержке — ответ придёт в этот же кабинет."
+          />
         )}
         {threads && threads.length > 0 && (
           <div className="data-list">
@@ -2018,7 +2071,9 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
                   <br />
                   <span className="muted">{dt(thread.createdAt)}</span>
                 </span>
-                <span className="pill">{thread.state === "open" ? "Открыто" : "Закрыто"}</span>
+                <Badge tone={thread.state === "open" ? "warn" : "ok"}>
+                  {thread.state === "open" ? "Открыто" : "Закрыто"}
+                </Badge>
               </button>
             ))}
           </div>
@@ -2029,7 +2084,9 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
         <section className="panel">
           <div className="panel-head">
             <h3 className="panel-title" style={{ margin: 0 }}>{threadDetail.thread.subject}</h3>
-            <span className="pill">{threadDetail.thread.state === "open" ? "Открыто" : "Закрыто"}</span>
+            <Badge tone={threadDetail.thread.state === "open" ? "warn" : "ok"}>
+              {threadDetail.thread.state === "open" ? "Открыто" : "Закрыто"}
+            </Badge>
           </div>
           {threadDetail.messages.length === 0 ? (
             <p className="muted">Сообщений пока нет.</p>
@@ -2103,7 +2160,11 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       <section className="panel">
         <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Отзывы о сервисе</h3>
         {reviews.length === 0 ? (
-          <div className="empty-state">Отзывов пока нет.</div>
+          <EmptyState
+          icon={<MessageSquare size={20} aria-hidden="true" />}
+          title="Отзывов пока нет"
+          text="Отзыв можно оставить после завершённого заказа — оценка помогает операторам."
+        />
         ) : (
           <div className="data-list">
             {reviews.map((review) => (

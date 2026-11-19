@@ -13,7 +13,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import { api, dt, type DemoConfig } from "../api";
-import { formatError, ORDER_STATE_LABELS, ROLE_LABELS } from "../labels";
+import { formatError, ORDER_STATE_LABELS, ROLE_LABELS, stateLabel } from "../labels";
 
 export type Me = { userId: string; organizationId: string; roles: string[] };
 
@@ -119,7 +119,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
     const seen = new Set(entries.map(([key]) => key));
     for (const u of demo?.demoUsers ?? []) {
       if (!seen.has(u.role)) {
-        entries.push([u.role, ROLE_LABELS[u.role] ?? u.role]);
+        entries.push([u.role, stateLabel(ROLE_LABELS, u.role)]);
         seen.add(u.role);
       }
     }
@@ -514,7 +514,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                       }}
                     >
                       <span style={{ display: "grid", gap: 2 }}>
-                        <span>{ROLE_LABELS[u.role] ?? u.role}</span>
+                        <span>{stateLabel(ROLE_LABELS, u.role)}</span>
                         {u.displayName && (
                           <span className="muted" style={{ fontSize: "0.8rem", fontWeight: 400 }}>
                             {u.displayName}
@@ -688,7 +688,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                     {trackResult.publicNumber ?? trackNumber.trim()}
                   </span>
                   <span className="pill info">
-                    {ORDER_STATE_LABELS[trackResult.state] ?? trackResult.state}
+                    {stateLabel(ORDER_STATE_LABELS, trackResult.state)}
                   </span>
                 </div>
                 <div className="muted" style={{ fontSize: "0.875rem" }}>

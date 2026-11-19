@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
+import { IconButton } from "./ui/IconButton";
 
 type ModalDialogProps = {
   open: boolean;
@@ -43,15 +44,14 @@ export function ModalDialog({ open, title, onClose, children }: ModalDialogProps
     <dialog ref={ref} className="modal-dialog" aria-labelledby={titleId}>
       <div className="dialog-head">
         <h2 id={titleId} className="panel-title">{title}</h2>
-        <button
-          type="button"
-          className="ghost no-print"
-          aria-label="Закрыть окно"
+        <IconButton
+          label="Закрыть окно"
+          icon={<X size={18} aria-hidden="true" />}
+          variant="ghost"
+          size="sm"
+          className="no-print"
           onClick={onClose}
-        >
-          <X size={18} aria-hidden="true" />
-          <span>Закрыть</span>
-        </button>
+        />
       </div>
       <div className="dialog-body">{children}</div>
     </dialog>

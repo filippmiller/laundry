@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -22,7 +22,27 @@ import { ApiError, DemoConfig, api, dt, money, newKey } from "../api";
 import { GarmentIcon } from "../components/garment-icons";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { QrScannerDialog } from "../components/QrScannerDialog";
-import { ORDER_STATE_LABELS, formatError } from "../labels";
+import {
+  Badge,
+  type BadgeTone,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  Checkbox,
+  EmptyState,
+  Field,
+  IconButton,
+  Input,
+  PageHeader,
+  Reveal,
+  Select,
+  Stagger,
+  StatGrid,
+  StatTile,
+  cx,
+} from "../components/ui";
+import { ORDER_STATE_LABELS, formatError, stateLabel } from "../labels";
 import { findSubtype } from "@shared/garment-taxonomy";
 import {
   QueuedScan,
@@ -135,14 +155,63 @@ const STOP_STATE_LABELS: Record<string, string> = {
   arrived: "На месте",
   completed: "Выполнена",
   skipped: "Пропущена",
+  rescheduled: "Перенесена",
   failed: "Не выполнена",
 };
 
 const SHIFT_STATE_LABELS: Record<string, string> = {
+  planned: "Запланирована",
   open: "Открыта",
   active: "Открыта",
   completed: "Закрыта",
   closed: "Закрыта",
+  abandoned: "Прервана",
+};
+
+/** Badge tones for the route-stop lifecycle: waiting warns, motion informs, failure alarms. */
+const STOP_STATE_TONES: Record<string, BadgeTone> = {
+  pending: "warn",
+  assigned: "info",
+  en_route: "info",
+  started: "info",
+  arrived: "info",
+  completed: "ok",
+  skipped: "neutral",
+  failed: "danger",
+};
+
+/** Badge tones for the order lifecycle, mirroring the shared status mapping. */
+const ORDER_STATE_TONES: Record<string, BadgeTone> = {
+  draft: "neutral",
+  confirmed: "info",
+  scheduled: "info",
+  pickup_assigned: "info",
+  picked_up: "info",
+  at_hub: "info",
+  partner_received: "info",
+  inspection: "info",
+  awaiting_approval: "warn",
+  processing: "info",
+  quality_check: "info",
+  ready: "info",
+  out_for_delivery: "info",
+  delivered: "ok",
+  closed: "ok",
+  cancelled: "danger",
+};
+
+const SHIFT_STATE_TONES: Record<string, BadgeTone> = {
+  open: "info",
+  active: "info",
+  completed: "ok",
+  closed: "ok",
+};
+
+/** The queued scans carry raw API types — the courier reads them in Russian. */
+const SCAN_TYPE_LABELS: Record<string, string> = {
+  order: "Заказ",
+  seal: "Пломба",
+  container: "Контейнер",
 };
 
 const DELIVERY_OUTCOME_OPTIONS: Array<{ value: DeliveryOutcome; label: string }> = [
@@ -152,8 +221,6 @@ const DELIVERY_OUTCOME_OPTIONS: Array<{ value: DeliveryOutcome; label: string }>
   { value: "refused", label: "Отказ получателя" },
   { value: "damaged", label: "Повреждение при доставке" },
 ];
-
-const TAP_STYLE = { minHeight: 44 } as const;
 
 /**
  * The next code in a series: "BAG-001" becomes "BAG-002", "DEMO-SEAL-007" becomes
@@ -388,7 +455,6 @@ export function CourierWorkspace({
   demo: DemoConfig | null;
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
 }) {
-  const baseId = useId();
   const deviceId = useMemo(() => localDeviceId(), []);
 
   // Network & simulated offline mode
@@ -963,556 +1029,557 @@ export function CourierWorkspace({
     }
   };
 
-  const offlineToggleId = `${baseId}-offline-toggle`;
-  const intakeModeId = `${baseId}-intake-mode`;
-  const containerCodeId = `${baseId}-container-code`;
-  const sealSerialId = `${baseId}-seal-serial`;
-  const weightGramsId = `${baseId}-weight-grams`;
-  const handoffCodeId = `${baseId}-handoff-code`;
-  const dualConfirmId = `${baseId}-dual-confirm`;
-  const deliveryOutcomeId = `${baseId}-delivery-outcome`;
-  const deliveryPinId = `${baseId}-delivery-pin`;
-  const deliveryNoteId = `${baseId}-delivery-note`;
-
   const showGarmentsEditor = intakeMode === "protected_items" || intakeMode === "mixed";
   const declaredItems = orderDetails?.declaredItems ?? [];
   const orderGarments = orderDetails?.garments ?? [];
 
   return (
-    <div style={{ display: "grid", gap: 16, maxWidth: 960, marginInline: "auto" }}>
+    <div className="workspace-grid">
+      <PageHeader
+        eyebrow="Курьер"
+        title="Рабочее место курьера"
+        lede="Смена, маршрутный лист, приёмка на адресе и выдача заказов клиенту."
+      />
+
       {/* 1. Смена курьера */}
-      <section className="panel" aria-label="Смена курьера">
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Truck size={20} aria-hidden="true" />
-            <div>
-              <h2 style={{ margin: 0 }}>Смена курьера</h2>
-              <div className="muted" style={{ fontSize: 13 }}>
-                {shift ? (
-                  <>
-                    ID: {shift.shiftId.slice(0, 8)} · Статус:{" "}
-                    {SHIFT_STATE_LABELS[shift.state] ?? shift.state}
-                    {shift.startedAt ? ` · Начата ${dt(shift.startedAt)}` : ""}
-                  </>
+      <section aria-label="Смена курьера">
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                <Truck size={20} aria-hidden="true" />
+                <span>Смена курьера</span>
+              </span>
+            }
+            subtitle={
+              shift ? (
+                <>
+                  ID: {shift.shiftId.slice(0, 8)} ·{" "}
+                  <Badge tone={SHIFT_STATE_TONES[shift.state] ?? "info"}>
+                    Статус: {stateLabel(SHIFT_STATE_LABELS, shift.state)}
+                  </Badge>
+                  {shift.startedAt ? ` · Начала ${dt(shift.startedAt)}` : ""}
+                </>
+              ) : (
+                <>
+                  Активная смена не открыта
+                  {demo?.shiftId ? ` · Демо-смена: ${demo.shiftId.slice(0, 8)}` : ""}
+                </>
+              )
+            }
+            actions={
+              <>
+                <Button
+                  variant="secondary"
+                  leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+                  disabled={shiftLoading}
+                  onClick={() => void loadShift()}
+                >
+                  Обновить смену
+                </Button>
+                {!shift ? (
+                  <Button
+                    variant="primary"
+                    leadingIcon={<Play size={16} aria-hidden="true" />}
+                    disabled={shiftLoading}
+                    onClick={() => void handleOpenShift()}
+                  >
+                    Открыть смену
+                  </Button>
                 ) : (
-                  <>
-                    Активная смена не открыта
-                    {demo?.shiftId ? ` · Демо-смена: ${demo.shiftId.slice(0, 8)}` : ""}
-                  </>
+                  <Button
+                    variant="secondary"
+                    leadingIcon={<Square size={16} aria-hidden="true" />}
+                    disabled={shiftLoading}
+                    onClick={() => void handleCompleteShift()}
+                  >
+                    Закрыть смену
+                  </Button>
                 )}
+              </>
+            }
+          />
+          <CardBody>
+            {shiftReconciliation && (
+              <div role="status">
+                <Card quiet>
+                  <div className="row">
+                    <CheckCircle2 size={18} aria-hidden="true" />
+                    <strong>Сверка по закрытой смене</strong>
+                  </div>
+                  <StatGrid>
+                    <StatTile label="Точек маршрута" value={shiftReconciliation.stops} />
+                    <StatTile label="Сканов принято" value={shiftReconciliation.scans.accepted} />
+                    <StatTile label="Сканов отклонено" value={shiftReconciliation.scans.rejected} />
+                  </StatGrid>
+                </Card>
               </div>
-            </div>
-          </div>
-
-          <div className="button-row" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            <button
-              type="button"
-              className="secondary"
-              style={TAP_STYLE}
-              disabled={shiftLoading}
-              onClick={() => void loadShift()}
-            >
-              <RefreshCw size={16} aria-hidden="true" />
-              <span>Обновить смену</span>
-            </button>
-
-            {!shift ? (
-              <button
-                type="button"
-                className="primary"
-                style={TAP_STYLE}
-                disabled={shiftLoading}
-                onClick={() => void handleOpenShift()}
-              >
-                <Play size={16} aria-hidden="true" />
-                <span>Открыть смену</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="secondary"
-                style={TAP_STYLE}
-                disabled={shiftLoading}
-                onClick={() => void handleCompleteShift()}
-              >
-                <Square size={16} aria-hidden="true" />
-                <span>Закрыть смену</span>
-              </button>
             )}
-          </div>
-        </div>
-
-        {shiftReconciliation && (
-          <div
-            className="card"
-            role="status"
-            style={{
-              marginTop: 12,
-              padding: 12,
-              borderRadius: 10,
-              border: "1px solid var(--border, #d0d7de)",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
-              <CheckCircle2 size={18} aria-hidden="true" />
-              <span>Сверка по закрытой смене</span>
-            </div>
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 16,
-                marginTop: 8,
-                fontSize: 14,
-              }}
-            >
-              <span>Точек маршрута: {shiftReconciliation.stops}</span>
-              <span>Сканов принято: {shiftReconciliation.scans.accepted}</span>
-              <span>Сканов отклонено: {shiftReconciliation.scans.rejected}</span>
-            </div>
-          </div>
-        )}
+          </CardBody>
+        </Card>
       </section>
 
       {/* 2. Офлайн-очередь и сканер QR/штрихкодов */}
-      <section className="panel" aria-label="Офлайн-очередь и сканер QR">
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            marginBottom: 12,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {isOnline ? <Wifi size={20} aria-hidden="true" /> : <WifiOff size={20} aria-hidden="true" />}
-            <div>
-              <h2 style={{ margin: 0 }}>Офлайн-очередь и сканер QR</h2>
-              <div className="muted" style={{ fontSize: 13 }}>
-                Связь: {isOnline ? "В сети" : "Офлайн (сохранение в IndexedDB)"} · Устройство:{" "}
-                {deviceId.slice(0, 8)} · В очереди: {pendingQueueCount}
-              </div>
+      <section aria-label="Офлайн-очередь и сканер QR">
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                {isOnline ? (
+                  <Wifi size={20} aria-hidden="true" />
+                ) : (
+                  <WifiOff size={20} aria-hidden="true" />
+                )}
+                <span>Офлайн-очередь и сканер QR</span>
+              </span>
+            }
+            subtitle={`Связь: ${isOnline ? "В сети" : "Офлайн (сохранение в IndexedDB)"} · Устройство: ${deviceId.slice(0, 8)} · В очереди: ${pendingQueueCount}`}
+            actions={
+              <Checkbox
+                label="Офлайн-режим (тест без сети)"
+                checked={simulatedOffline}
+                onChange={e => setSimulatedOffline(e.target.checked)}
+              />
+            }
+          />
+          <CardBody>
+            <div className="button-row">
+              <Button
+                variant="primary"
+                leadingIcon={<QrCode size={18} aria-hidden="true" />}
+                onClick={() => setScannerOpen(true)}
+              >
+                Камера / Ручной скан QR
+              </Button>
+
+              <Button
+                variant="secondary"
+                leadingIcon={<ScanLine size={18} aria-hidden="true" />}
+                disabled={!selectedStop}
+                onClick={() => void handleScanCurrentOrder()}
+              >
+                Сканировать текущий заказ
+              </Button>
+
+              <Button
+                variant="secondary"
+                leadingIcon={<RefreshCw size={18} aria-hidden="true" />}
+                disabled={syncing || !isOnline}
+                onClick={() => void syncQueue()}
+              >
+                {syncing ? "Синхронизация..." : `Синхронизировать очередь (${pendingQueueCount})`}
+              </Button>
             </div>
-          </div>
 
-          <label
-            htmlFor={offlineToggleId}
-            style={{
-              ...TAP_STYLE,
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 10,
-              paddingInline: 12,
-              borderRadius: 8,
-              border: "1px solid var(--border, #d0d7de)",
-              cursor: "pointer",
-              userSelect: "none",
-            }}
-          >
-            <input
-              id={offlineToggleId}
-              type="checkbox"
-              checked={simulatedOffline}
-              onChange={e => setSimulatedOffline(e.target.checked)}
-              style={{ width: 20, height: 20 }}
-            />
-            <span>Офлайн-режим (тест без сети)</span>
-          </label>
-        </div>
-
-        <div className="button-row" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <button
-            type="button"
-            className="primary"
-            style={TAP_STYLE}
-            onClick={() => setScannerOpen(true)}
-          >
-            <QrCode size={18} aria-hidden="true" />
-            <span>Камера / Ручной скан QR</span>
-          </button>
-
-          <button
-            type="button"
-            className="secondary"
-            style={TAP_STYLE}
-            disabled={!selectedStop}
-            onClick={() => void handleScanCurrentOrder()}
-          >
-            <ScanLine size={18} aria-hidden="true" />
-            <span>Сканировать текущий заказ</span>
-          </button>
-
-          <button
-            type="button"
-            className="secondary"
-            style={TAP_STYLE}
-            disabled={syncing || !isOnline}
-            onClick={() => void syncQueue()}
-          >
-            <RefreshCw size={18} aria-hidden="true" />
-            <span>
-              {syncing ? "Синхронизация..." : `Синхронизировать очередь (${pendingQueueCount})`}
-            </span>
-          </button>
-        </div>
-
-        {pendingScans.length > 0 && (
-          <div style={{ marginTop: 12 }}>
-            <div className="muted" style={{ fontSize: 13, marginBottom: 6 }}>
-              Ожидают синхронизации ({pendingScans.length}):
-            </div>
-            <div style={{ display: "grid", gap: 6 }}>
-              {pendingScans.map(scan => (
-                <div
-                  key={scan.clientEventId}
-                  style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    padding: "8px 10px",
-                    borderRadius: 8,
-                    border: "1px solid var(--border, #d0d7de)",
-                    fontSize: 13,
-                  }}
-                >
-                  <span>
-                    <strong>{scan.scannedType}</strong>: {scan.scannedId}
-                  </span>
-                  <span className="muted">{dt(scan.capturedAt)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {lastSync && (
-          <div
-            className="card"
-            role="status"
-            style={{
-              marginTop: 12,
-              padding: 12,
-              borderRadius: 10,
-              border: "1px solid var(--border, #d0d7de)",
-            }}
-          >
-            <div style={{ fontWeight: 600, fontSize: 14 }}>
-              Последняя синхронизация ({dt(lastSync.syncedAt)})
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 16, marginTop: 6, fontSize: 14 }}>
-              <span>В очереди осталось: {pendingQueueCount}</span>
-              <span>Принято: {lastSync.accepted}</span>
-              <span>Дубликатов: {lastSync.duplicate}</span>
-              <span>Отклонено: {lastSync.rejected}</span>
-            </div>
-            {lastSync.rejectedReasons.length > 0 && (
-              <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
-                {lastSync.rejectedReasons.map((rej, idx) => (
-                  <div
-                    key={`${rej.clientEventId}-${idx}`}
-                    className="alert-banner"
-                    style={{ display: "flex", alignItems: "center", gap: 8 }}
-                  >
-                    <AlertTriangle size={16} aria-hidden="true" />
-                    <span>
-                      {rej.scannedId ? `${rej.scannedId}: ` : ""}
-                      {rej.reason}
-                    </span>
-                  </div>
-                ))}
+            {pendingScans.length > 0 && (
+              <div className="stack stack--tight">
+                <span className="muted">Ожидают синхронизации ({pendingScans.length}):</span>
+                <ul className="list">
+                  {pendingScans.map(scan => (
+                    <li key={scan.clientEventId} className="list-item">
+                      <span>
+                        <Badge tone="neutral">
+                          {stateLabel(SCAN_TYPE_LABELS, scan.scannedType)}
+                        </Badge>
+                        : {scan.scannedId}
+                      </span>
+                      <span className="muted">{dt(scan.capturedAt)}</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
-          </div>
-        )}
+
+            {lastSync && (
+              <div role="status">
+                <Card quiet>
+                  <div className="row">
+                    <RefreshCw size={18} aria-hidden="true" />
+                    <strong>Последняя синхронизация ({dt(lastSync.syncedAt)})</strong>
+                  </div>
+                  <StatGrid>
+                    <StatTile label="В очереди осталось" value={pendingQueueCount} />
+                    <StatTile label="Принято" value={lastSync.accepted} />
+                    <StatTile label="Дубликатов" value={lastSync.duplicate} />
+                    <StatTile label="Отклонено" value={lastSync.rejected} />
+                  </StatGrid>
+                  {lastSync.rejectedReasons.length > 0 && (
+                    <div className="stack stack--tight">
+                      {lastSync.rejectedReasons.map((rej, idx) => (
+                        <div key={`${rej.clientEventId}-${idx}`} className="alert-banner">
+                          <AlertTriangle size={16} aria-hidden="true" />
+                          <span>
+                            {rej.scannedId ? `${rej.scannedId}: ` : ""}
+                            {rej.reason}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </Card>
+              </div>
+            )}
+          </CardBody>
+        </Card>
       </section>
 
       {/* 3. Маршрутный лист */}
-      <section className="panel" aria-label="Маршрутный лист">
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            marginBottom: 12,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <MapPin size={20} aria-hidden="true" />
-            <h2 style={{ margin: 0 }}>Маршрутный лист</h2>
-          </div>
+      <section aria-label="Маршрутный лист">
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                <MapPin size={20} aria-hidden="true" />
+                <span>Маршрутный лист</span>
+              </span>
+            }
+            actions={
+              <Button
+                variant="secondary"
+                leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+                disabled={routeLoading}
+                onClick={() => void loadRoute()}
+              >
+                Обновить маршрут
+              </Button>
+            }
+          />
+          <CardBody>
+            {stops.length === 0 ? (
+              <EmptyState
+                icon={<MapPin size={20} aria-hidden="true" />}
+                title={
+                  routeLoading
+                    ? "Загрузка маршрута..."
+                    : "На текущий момент точки маршрута не назначены."
+                }
+              />
+            ) : (
+              <Stagger as="ul" className="list">
+                {stops.map(stop => {
+                  const isSelected = selectedStop?.stopId === stop.stopId;
+                  const kindLabel = stop.kind === "pickup" ? "Забор" : "Доставка";
+                  const stopStateLabel = stateLabel(STOP_STATE_LABELS, stop.state);
+                  const orderStateLabel = stateLabel(ORDER_STATE_LABELS, stop.orderState);
+                  return (
+                    <Reveal as="li" key={stop.stopId}>
+                      <button
+                        type="button"
+                        className={cx("list-item", isSelected && "selected")}
+                        aria-pressed={isSelected}
+                        onClick={() => setSelectedStopId(stop.stopId)}
+                      >
+                        <span className="row row--tight">
+                          <strong>#{stop.sequence}</strong>
+                          <span>{stop.publicNumber}</span>
+                          <span>· {kindLabel}</span>
+                          {stop.address && <span>· {stop.address}</span>}
+                        </span>
+                        <span className="row row--tight">
+                          <Badge tone={STOP_STATE_TONES[stop.state] ?? "neutral"}>
+                            Точка: {stopStateLabel}
+                          </Badge>
+                          {orderStateLabel ? (
+                            <Badge tone={ORDER_STATE_TONES[stop.orderState] ?? "neutral"}>
+                              Заказ: {orderStateLabel}
+                            </Badge>
+                          ) : null}
+                        </span>
+                      </button>
+                    </Reveal>
+                  );
+                })}
+              </Stagger>
+            )}
 
-          <button
-            type="button"
-            className="secondary"
-            style={TAP_STYLE}
-            disabled={routeLoading}
-            onClick={() => void loadRoute()}
-          >
-            <RefreshCw size={16} aria-hidden="true" />
-            <span>Обновить маршрут</span>
-          </button>
-        </div>
+            {selectedStop && (
+              <div className="row row--between">
+                <div className="stack stack--tight">
+                  <strong>
+                    Выбрана точка #{selectedStop.sequence} ({selectedStop.publicNumber})
+                  </strong>
+                  <span className="row row--tight">
+                    <span className="muted">
+                      Тип: {selectedStop.kind === "pickup" ? "Забор" : "Доставка"}
+                    </span>
+                    <Badge tone={STOP_STATE_TONES[selectedStop.state] ?? "neutral"}>
+                      Статус точки: {stateLabel(STOP_STATE_LABELS, selectedStop.state)}
+                    </Badge>
+                    <Badge tone={ORDER_STATE_TONES[selectedStop.orderState] ?? "neutral"}>
+                      Статус заказа:{" "}
+                      {stateLabel(ORDER_STATE_LABELS, selectedStop.orderState)}
+                    </Badge>
+                  </span>
+                </div>
 
-        {stops.length === 0 ? (
-          <p className="muted" style={{ margin: 0 }}>
-            {routeLoading ? "Загрузка маршрута..." : "На текущий момент точки маршрута не назначены."}
-          </p>
-        ) : (
-          <div style={{ display: "grid", gap: 8 }}>
-            {stops.map(stop => {
-              const isSelected = selectedStop?.stopId === stop.stopId;
-              const kindLabel = stop.kind === "pickup" ? "Забор" : "Доставка";
-              const stopStateLabel = STOP_STATE_LABELS[stop.state] ?? stop.state;
-              const orderStateLabel = ORDER_STATE_LABELS[stop.orderState] ?? stop.orderState;
-              return (
-                <button
-                  key={stop.stopId}
-                  type="button"
-                  onClick={() => setSelectedStopId(stop.stopId)}
-                  className={isSelected ? "primary" : "secondary"}
-                  style={{
-                    ...TAP_STYLE,
-                    width: "100%",
-                    textAlign: "left",
-                    display: "flex",
-                    flexWrap: "wrap",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    padding: "12px 14px",
-                  }}
-                >
-                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-                    <strong>#{stop.sequence}</strong>
-                    <span>{stop.publicNumber}</span>
-                    <span>· {kindLabel}</span>
-                    {stop.address && <span>· {stop.address}</span>}
-                  </div>
-                  <div style={{ fontSize: 13 }}>
-                    <span>Точка: {stopStateLabel}</span>
-                    {orderStateLabel ? ` · Заказ: ${orderStateLabel}` : ""}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
+                <div className="button-row">
+                  <Button
+                    variant="secondary"
+                    leadingIcon={<Navigation size={16} aria-hidden="true" />}
+                    disabled={stopActionBusy}
+                    onClick={() => void handleStopTransition("start")}
+                  >
+                    Выехал
+                  </Button>
 
-        {selectedStop && (
-          <div
-            style={{
-              marginTop: 14,
-              paddingTop: 14,
-              borderTop: "1px solid var(--border, #d0d7de)",
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 10,
-            }}
-          >
-            <div style={{ fontSize: 14 }}>
-              <strong>
-                Выбрана точка #{selectedStop.sequence} ({selectedStop.publicNumber})
-              </strong>
-              <div className="muted" style={{ fontSize: 13 }}>
-                Тип: {selectedStop.kind === "pickup" ? "Забор" : "Доставка"} · Статус точки:{" "}
-                {STOP_STATE_LABELS[selectedStop.state] ?? selectedStop.state} · Статус заказа:{" "}
-                {ORDER_STATE_LABELS[selectedStop.orderState] ?? selectedStop.orderState}
+                  <Button
+                    variant="primary"
+                    leadingIcon={<Clock size={16} aria-hidden="true" />}
+                    disabled={stopActionBusy}
+                    onClick={() => void handleStopTransition("arrive")}
+                  >
+                    Прибыл
+                  </Button>
+                </div>
               </div>
-            </div>
-
-            <div className="button-row" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              <button
-                type="button"
-                className="secondary"
-                style={TAP_STYLE}
-                disabled={stopActionBusy}
-                onClick={() => void handleStopTransition("start")}
-              >
-                <Navigation size={16} aria-hidden="true" />
-                <span>Выехал</span>
-              </button>
-
-              <button
-                type="button"
-                className="primary"
-                style={TAP_STYLE}
-                disabled={stopActionBusy}
-                onClick={() => void handleStopTransition("arrive")}
-              >
-                <Clock size={16} aria-hidden="true" />
-                <span>Прибыл</span>
-              </button>
-            </div>
-          </div>
-        )}
+            )}
+          </CardBody>
+        </Card>
       </section>
 
       {/* 4. Приёмка на адресе (для kind === "pickup") */}
       {selectedStop?.kind === "pickup" && (
-        <section className="panel" aria-label="Приёмка на адресе">
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-            <PackagePlus size={20} aria-hidden="true" />
-            <div>
-              <h2 style={{ margin: 0 }}>Приёмка на адресе — {selectedStop.publicNumber}</h2>
-              <div className="muted" style={{ fontSize: 13 }}>
-                Опломбирование мешка и поштучная опись (при защищённом или смешанном тарифе)
-              </div>
-            </div>
-          </div>
+        <section aria-label="Приёмка на адресе">
+          <Card>
+            <CardHeader
+              title={
+                <span className="row row--tight">
+                  <PackagePlus size={20} aria-hidden="true" />
+                  <span>Приёмка на адресе — {selectedStop.publicNumber}</span>
+                </span>
+              }
+              subtitle="Опломбирование мешка и поштучная опись (при защищённом или смешанном тарифе)"
+            />
+            <CardBody>
+              <form onSubmit={e => void handleSubmitIntake(e)} className="stack">
+                <Select
+                  label="Режим приёмки"
+                  value={intakeMode}
+                  onChange={e => setIntakeMode(e.target.value as IntakeMode)}
+                >
+                  <option value="economy_bag">Эконом (мешок + пломба)</option>
+                  <option value="protected_items">Защищённый (поштучная опись)</option>
+                  <option value="mixed">Смешанный</option>
+                </Select>
 
-          <form onSubmit={e => void handleSubmitIntake(e)} style={{ display: "grid", gap: 12 }}>
-            <div className="field">
-              <label htmlFor={intakeModeId}>Режим приёмки</label>
-              <select
-                id={intakeModeId}
-                style={TAP_STYLE}
-                value={intakeMode}
-                onChange={e => setIntakeMode(e.target.value as IntakeMode)}
-              >
-                <option value="economy_bag">Эконом (мешок + пломба)</option>
-                <option value="protected_items">Защищённый (поштучная опись)</option>
-                <option value="mixed">Смешанный</option>
-              </select>
-            </div>
+                <div className="grid-two">
+                  <Field label="Код контейнера / мешка">
+                    {({ id }) => (
+                      <div className="row row--tight">
+                        <Input
+                          id={id}
+                          value={containerCode}
+                          onChange={e => setContainerCode(e.target.value)}
+                          placeholder="BAG-001"
+                        />
+                        <IconButton
+                          label="Сканировать QR мешка"
+                          icon={<QrCode size={18} aria-hidden="true" />}
+                          variant="secondary"
+                          onClick={() => setScannerOpen(true)}
+                        />
+                      </div>
+                    )}
+                  </Field>
 
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                gap: 12,
-              }}
-            >
-              <div className="field">
-                <label htmlFor={containerCodeId}>Код контейнера / мешка</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    id={containerCodeId}
-                    style={{ ...TAP_STYLE, flex: 1 }}
-                    value={containerCode}
-                    onChange={e => setContainerCode(e.target.value)}
-                    placeholder="BAG-001"
+                  <Field label="Серийный номер пломбы">
+                    {({ id }) => (
+                      <div className="row row--tight">
+                        <Input
+                          id={id}
+                          value={sealSerial}
+                          onChange={e => setSealSerial(e.target.value)}
+                          placeholder="DEMO-SEAL-001"
+                        />
+                        <IconButton
+                          label="Сканировать QR пломбы"
+                          icon={<QrCode size={18} aria-hidden="true" />}
+                          variant="secondary"
+                          onClick={() => setScannerOpen(true)}
+                        />
+                      </div>
+                    )}
+                  </Field>
+
+                  <Input
+                    label="Вес (граммы)"
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={weightGrams}
+                    onChange={e => setWeightGrams(e.target.value)}
+                    placeholder="2500"
                   />
-                  <button
-                    type="button"
-                    className="secondary"
-                    style={{ ...TAP_STYLE, minWidth: 44 }}
-                    aria-label="Сканировать QR мешка"
-                    onClick={() => setScannerOpen(true)}
-                  >
-                    <QrCode size={18} aria-hidden="true" />
-                  </button>
-                </div>
-              </div>
 
-              <div className="field">
-                <label htmlFor={sealSerialId}>Серийный номер пломбы</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    id={sealSerialId}
-                    style={{ ...TAP_STYLE, flex: 1 }}
-                    value={sealSerial}
-                    onChange={e => setSealSerial(e.target.value)}
-                    placeholder="DEMO-SEAL-001"
-                  />
-                  <button
-                    type="button"
-                    className="secondary"
-                    style={{ ...TAP_STYLE, minWidth: 44 }}
-                    aria-label="Сканировать QR пломбы"
-                    onClick={() => setScannerOpen(true)}
-                  >
-                    <QrCode size={18} aria-hidden="true" />
-                  </button>
+                  <Field label="6-значный PIN-код клиента (необязательно)">
+                    {({ id }) => (
+                      <div className="row row--tight">
+                        <Input
+                          id={id}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={handoffCode}
+                          onChange={e => setHandoffCode(e.target.value)}
+                          placeholder="123456"
+                        />
+                        <IconButton
+                          label="Считать QR заказа и PIN"
+                          icon={<Hash size={18} aria-hidden="true" />}
+                          variant="secondary"
+                          onClick={() => setScannerOpen(true)}
+                        />
+                      </div>
+                    )}
+                  </Field>
                 </div>
-              </div>
 
-              <div className="field">
-                <label htmlFor={weightGramsId}>Вес (граммы)</label>
-                <input
-                  id={weightGramsId}
-                  type="number"
-                  min={1}
-                  step={1}
-                  style={TAP_STYLE}
-                  value={weightGrams}
-                  onChange={e => setWeightGrams(e.target.value)}
-                  placeholder="2500"
+                {showGarmentsEditor && (
+                  <div className="stack">
+                    {declaredItems.length > 0 && (
+                      <Card quiet>
+                        <CardHeader title="Клиент заявил" />
+                        <ul className="garment-picked">
+                          {declaredItems.map(declared => {
+                            const accepted = picked.find(
+                              item => item.subtypeId === declared.subtypeId,
+                            );
+                            const acceptedQuantity = accepted?.quantity ?? 0;
+                            const diff = acceptedQuantity - declared.quantity;
+                            return (
+                              <li key={declared.subtypeId}>
+                                <GarmentIcon
+                                  icon={findSubtype(declared.subtypeId)?.icon ?? "bag"}
+                                  size={22}
+                                />
+                                <span className="garment-picked-label">{declared.label}</span>
+                                <span className="garment-picked-qty">
+                                  заявлено {declared.quantity}
+                                </span>
+                                <span className="garment-picked-qty">
+                                  принято {acceptedQuantity}
+                                </span>
+                                {diff === 0 ? (
+                                  <Badge tone="ok">совпадает</Badge>
+                                ) : (
+                                  <Badge tone={diff > 0 ? "warn" : "danger"}>
+                                    {diff > 0 ? `+${diff}` : diff}
+                                  </Badge>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </Card>
+                    )}
+
+                    <GarmentPicker
+                      value={picked}
+                      onChange={handlePickedChange}
+                      title="Что приняли"
+                      hint="Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Только ценность и дефекты, если они есть."
+                      renderExtra={item => (
+                        <span className="garment-row-fields">
+                          <input
+                            type="number"
+                            min={0}
+                            step={100}
+                            value={itemMeta[item.subtypeId]?.declaredValueRub ?? "5000"}
+                            onChange={e =>
+                              handleMetaChange(item.subtypeId, "declaredValueRub", e.target.value)
+                            }
+                            aria-label={`Объявленная ценность: ${item.label}`}
+                          />
+                          <input
+                            type="text"
+                            placeholder="дефекты, если есть"
+                            value={itemMeta[item.subtypeId]?.note ?? ""}
+                            onChange={e => handleMetaChange(item.subtypeId, "note", e.target.value)}
+                            aria-label={`Примечание: ${item.label}`}
+                          />
+                        </span>
+                      )}
+                    />
+                  </div>
+                )}
+
+                <Checkbox
+                  label="Клиент и курьер подтвердили передачу и опись"
+                  checked={dualConfirmed}
+                  onChange={e => setDualConfirmed(e.target.checked)}
                 />
-              </div>
 
-              <div className="field">
-                <label htmlFor={handoffCodeId}>6-значный PIN-код клиента (необязательно)</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    id={handoffCodeId}
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    style={{ ...TAP_STYLE, flex: 1 }}
-                    value={handoffCode}
-                    onChange={e => setHandoffCode(e.target.value)}
-                    placeholder="123456"
-                  />
-                  <button
-                    type="button"
-                    className="secondary"
-                    style={{ ...TAP_STYLE, minWidth: 44 }}
-                    aria-label="Считать QR заказа и PIN"
-                    onClick={() => setScannerOpen(true)}
+                <div className="button-row">
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    leadingIcon={<ShieldCheck size={18} aria-hidden="true" />}
+                    disabled={intakeBusy || !dualConfirmed}
                   >
-                    <Hash size={18} aria-hidden="true" />
-                  </button>
+                    {intakeBusy ? "Сохранение..." : "Зафиксировать приёмку"}
+                  </Button>
                 </div>
-              </div>
-            </div>
+              </form>
+            </CardBody>
+          </Card>
+        </section>
+      )}
 
-            {showGarmentsEditor && (
-              <div
-                style={{
-                  display: "grid",
-                  gap: 10,
-                  padding: 12,
-                  borderRadius: 10,
-                  border: "1px solid var(--border, #d0d7de)",
-                }}
-              >
-                {declaredItems.length > 0 && (
-                  <div className="panel panel-muted">
-                    <div className="panel-head">
-                      <h3 className="panel-title">Клиент заявил</h3>
-                    </div>
-                    <ul className="garment-picked">
-                      {declaredItems.map((declared) => {
-                        const accepted = picked.find((item) => item.subtypeId === declared.subtypeId);
-                        const acceptedQuantity = accepted?.quantity ?? 0;
-                        const diff = acceptedQuantity - declared.quantity;
+      {/* 5. Выдача заказа клиенту (для kind === "delivery") */}
+      {selectedStop?.kind === "delivery" && (
+        <section aria-label="Выдача заказа клиенту">
+          <Card>
+            <CardHeader
+              title={
+                <span className="row row--tight">
+                  <PackageCheck size={20} aria-hidden="true" />
+                  <span>Выдача заказа — {selectedStop.publicNumber}</span>
+                </span>
+              }
+              subtitle={
+                orderLoading
+                  ? "Загрузка состава заказа..."
+                  : orderGarments.length > 0
+                    ? `Вещей к выдаче в заказе: ${orderGarments.length}`
+                    : "Поштучная опись отсутствует (выдача мешком / эконом)"
+              }
+            />
+            <CardBody>
+              <form onSubmit={e => void handleSubmitDelivery(e)} className="stack">
+                <Select
+                  label="Результат доставки"
+                  value={deliveryOutcome}
+                  onChange={e => setDeliveryOutcome(e.target.value as DeliveryOutcome)}
+                >
+                  {DELIVERY_OUTCOME_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </Select>
+
+                {orderGarments.length > 0 && (
+                  <div className="stack stack--tight">
+                    <strong>Состав заказа (отметьте выдаваемые вещи):</strong>
+                    <ul className="list">
+                      {orderGarments.map(g => {
+                        const gid = g.id ?? g.garmentId ?? g.itemCode;
                         return (
-                          <li key={declared.subtypeId}>
-                            <GarmentIcon icon={findSubtype(declared.subtypeId)?.icon ?? "bag"} size={22} />
-                            <span className="garment-picked-label">{declared.label}</span>
-                            <span className="garment-picked-qty">заявлено {declared.quantity}</span>
-                            <span className="garment-picked-qty">принято {acceptedQuantity}</span>
-                            {diff === 0 ? (
-                              <span className="pill ok">совпадает</span>
-                            ) : (
-                              <span className={`pill ${diff > 0 ? "warn" : "danger"}`}>
-                                {diff > 0 ? `+${diff}` : diff}
-                              </span>
+                          <li key={gid} className="list-item">
+                            <Checkbox
+                              label={
+                                <>
+                                  <strong>{g.itemCode}</strong> · {g.category}
+                                  {g.description ? ` — ${g.description}` : ""}
+                                </>
+                              }
+                              checked={Boolean(checkedGarments[gid])}
+                              onChange={e =>
+                                setCheckedGarments(prev => ({ ...prev, [gid]: e.target.checked }))
+                              }
+                            />
+                            {g.declaredValueKopeks !== undefined && (
+                              <span className="muted">{money(g.declaredValueKopeks)}</span>
                             )}
                           </li>
                         );
@@ -1521,211 +1588,50 @@ export function CourierWorkspace({
                   </div>
                 )}
 
-                <GarmentPicker
-                  value={picked}
-                  onChange={handlePickedChange}
-                  title="Что приняли"
-                  hint="Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Только ценность и дефекты, если они есть."
-                  renderExtra={item => (
-                    <span className="garment-row-fields">
-                      <input
-                        type="number"
-                        min={0}
-                        step={100}
-                        value={itemMeta[item.subtypeId]?.declaredValueRub ?? "5000"}
-                        onChange={e => handleMetaChange(item.subtypeId, "declaredValueRub", e.target.value)}
-                        aria-label={`Объявленная ценность: ${item.label}`}
-                      />
-                      <input
-                        type="text"
-                        placeholder="дефекты, если есть"
-                        value={itemMeta[item.subtypeId]?.note ?? ""}
-                        onChange={e => handleMetaChange(item.subtypeId, "note", e.target.value)}
-                        aria-label={`Примечание: ${item.label}`}
-                      />
-                    </span>
-                  )}
-                />
-              </div>
-            )}
-
-            <label
-              htmlFor={dualConfirmId}
-              style={{
-                ...TAP_STYLE,
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "8px 12px",
-                borderRadius: 8,
-                border: "1px solid var(--border, #d0d7de)",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                id={dualConfirmId}
-                type="checkbox"
-                checked={dualConfirmed}
-                onChange={e => setDualConfirmed(e.target.checked)}
-                style={{ width: 20, height: 20 }}
-              />
-              <span>Клиент и курьер подтвердили передачу и опись</span>
-            </label>
-
-            <div className="button-row">
-              <button
-                type="submit"
-                className="primary"
-                style={TAP_STYLE}
-                disabled={intakeBusy || !dualConfirmed}
-              >
-                <ShieldCheck size={18} aria-hidden="true" />
-                <span>{intakeBusy ? "Сохранение..." : "Зафиксировать приёмку"}</span>
-              </button>
-            </div>
-          </form>
-        </section>
-      )}
-
-      {/* 5. Выдача заказа клиенту (для kind === "delivery") */}
-      {selectedStop?.kind === "delivery" && (
-        <section className="panel" aria-label="Выдача заказа клиенту">
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-            <PackageCheck size={20} aria-hidden="true" />
-            <div>
-              <h2 style={{ margin: 0 }}>Выдача заказа — {selectedStop.publicNumber}</h2>
-              <div className="muted" style={{ fontSize: 13 }}>
-                {orderLoading
-                  ? "Загрузка состава заказа..."
-                  : orderGarments.length > 0
-                    ? `Вещей к выдаче в заказе: ${orderGarments.length}`
-                    : "Поштучная опись отсутствует (выдача мешком / эконом)"}
-              </div>
-            </div>
-          </div>
-
-          <form onSubmit={e => void handleSubmitDelivery(e)} style={{ display: "grid", gap: 12 }}>
-            <div className="field">
-              <label htmlFor={deliveryOutcomeId}>Результат доставки</label>
-              <select
-                id={deliveryOutcomeId}
-                style={TAP_STYLE}
-                value={deliveryOutcome}
-                onChange={e => setDeliveryOutcome(e.target.value as DeliveryOutcome)}
-              >
-                {DELIVERY_OUTCOME_OPTIONS.map(opt => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {orderGarments.length > 0 && (
-              <div
-                style={{
-                  display: "grid",
-                  gap: 8,
-                  padding: 12,
-                  borderRadius: 10,
-                  border: "1px solid var(--border, #d0d7de)",
-                }}
-              >
-                <strong>Состав заказа (отметьте выдаваемые вещи):</strong>
-                {orderGarments.map(g => {
-                  const gid = g.id ?? g.garmentId ?? g.itemCode;
-                  const checkboxId = `${baseId}-deliv-garment-${gid}`;
-                  return (
-                    <label
-                      key={gid}
-                      htmlFor={checkboxId}
-                      style={{
-                        ...TAP_STYLE,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 10,
-                        padding: "8px 10px",
-                        borderRadius: 8,
-                        border: "1px solid var(--border, #d0d7de)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <input
-                          id={checkboxId}
-                          type="checkbox"
-                          checked={Boolean(checkedGarments[gid])}
-                          onChange={e =>
-                            setCheckedGarments(prev => ({ ...prev, [gid]: e.target.checked }))
-                          }
-                          style={{ width: 20, height: 20 }}
+                <div className="grid-two">
+                  <Field label="PIN-код получателя (подтверждение)">
+                    {({ id }) => (
+                      <div className="row row--tight">
+                        <Input
+                          id={id}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={deliveryPin}
+                          onChange={e => setDeliveryPin(e.target.value)}
+                          placeholder="123456"
                         />
-                        <span>
-                          <strong>{g.itemCode}</strong> · {g.category}
-                          {g.description ? ` — ${g.description}` : ""}
-                        </span>
-                      </span>
-                      {g.declaredValueKopeks !== undefined && (
-                        <span className="muted">{money(g.declaredValueKopeks)}</span>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-            )}
+                        <IconButton
+                          label="Сканировать QR получателя"
+                          icon={<QrCode size={18} aria-hidden="true" />}
+                          variant="secondary"
+                          onClick={() => setScannerOpen(true)}
+                        />
+                      </div>
+                    )}
+                  </Field>
 
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                gap: 12,
-              }}
-            >
-              <div className="field">
-                <label htmlFor={deliveryPinId}>PIN-код получателя (подтверждение)</label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    id={deliveryPinId}
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    style={{ ...TAP_STYLE, flex: 1 }}
-                    value={deliveryPin}
-                    onChange={e => setDeliveryPin(e.target.value)}
-                    placeholder="123456"
+                  <Input
+                    label="Примечание / подтверждение"
+                    value={deliveryNote}
+                    onChange={e => setDeliveryNote(e.target.value)}
+                    placeholder="Например: Передано лично клиенту у двери"
                   />
-                  <button
-                    type="button"
-                    className="secondary"
-                    style={{ ...TAP_STYLE, minWidth: 44 }}
-                    aria-label="Сканировать QR получателя"
-                    onClick={() => setScannerOpen(true)}
-                  >
-                    <QrCode size={18} aria-hidden="true" />
-                  </button>
                 </div>
-              </div>
 
-              <div className="field">
-                <label htmlFor={deliveryNoteId}>Примечание / подтверждение</label>
-                <input
-                  id={deliveryNoteId}
-                  style={TAP_STYLE}
-                  value={deliveryNote}
-                  onChange={e => setDeliveryNote(e.target.value)}
-                  placeholder="Например: Передано лично клиенту у двери"
-                />
-              </div>
-            </div>
-
-            <div className="button-row">
-              <button type="submit" className="primary" style={TAP_STYLE} disabled={deliveryBusy}>
-                <PackageCheck size={18} aria-hidden="true" />
-                <span>{deliveryBusy ? "Сохранение..." : "Зафиксировать попытку доставки"}</span>
-              </button>
-            </div>
-          </form>
+                <div className="button-row">
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    leadingIcon={<PackageCheck size={18} aria-hidden="true" />}
+                    disabled={deliveryBusy}
+                  >
+                    {deliveryBusy ? "Сохранение..." : "Зафиксировать попытку доставки"}
+                  </Button>
+                </div>
+              </form>
+            </CardBody>
+          </Card>
         </section>
       )}
 

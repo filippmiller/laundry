@@ -10,13 +10,25 @@ import {
   RotateCcw,
   Scale,
   ShieldAlert,
-  Wallet,
   XCircle,
 } from "lucide-react";
 import { api, DemoConfig, dt, money } from "../api";
 import { DocumentKind, DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
-import { formatError, PAYMENT_STATE_LABELS } from "../labels";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { PageHeader } from "../components/ui/PageHeader";
+import { StatGrid, StatTile } from "../components/ui/StatTile";
+import {
+  COMPENSATION_STATE_LABELS,
+  FISCAL_STATE_LABELS,
+  formatError,
+  INVOICE_STATE_LABELS,
+  PARTNER_INVOICE_STATE_LABELS,
+  PAYMENT_STATE_LABELS,
+  providerLabel,
+  stateLabel,
+} from "../labels";
 import { FinanceMoneyPanel } from "./analytics-panels";
 
 type InvoiceItem = {
@@ -240,7 +252,7 @@ export function FinanceWorkspace({
           reason,
         },
       });
-      notify({ kind: "ok", text: "Оспаривание (chargeback) зарегистрировано" });
+      notify({ kind: "ok", text: "Оспаривание (чарджбэк) зарегистрировано" });
       setChargebackTarget(null);
       await loadFinance();
     } catch (err) {
@@ -322,27 +334,27 @@ export function FinanceWorkspace({
   const partners = demo?.partners ?? [];
 
   return (
-    <div style={{ display: "grid", gap: 18 }}>
-      <div className="alert-banner" role="status" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0 }} />
+    <div className="workspace-grid">
+      <div className="alert-banner" role="status">
+        <AlertTriangle size={18} aria-hidden="true" />
         <span>Платёжный и фискальный шлюзы работают в демонстрационном режиме (54-ФЗ не подключён)</span>
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-        <h2 className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <Wallet size={20} aria-hidden="true" />
-          <span>Финансовый контур и сверка</span>
-        </h2>
-        <button
-          type="button"
-          className="ghost"
-          onClick={() => void loadFinance()}
-          disabled={loading}
-        >
-          <RefreshCw size={16} aria-hidden="true" />
-          <span>{loading ? "Обновление..." : "Обновить данные"}</span>
-        </button>
-      </div>
+      <PageHeader
+        eyebrow="Денежный контур"
+        title="Финансовый контур и сверка"
+        lede="Дебиторка, кредиторка, платёжные операции и компенсации — все цифры считает сервер по журналу."
+        actions={
+          <Button
+            variant="ghost"
+            leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+            onClick={() => void loadFinance()}
+            disabled={loading}
+          >
+            {loading ? "Обновление…" : "Обновить данные"}
+          </Button>
+        }
+      />
 
       {/* 0. Денежный контур: дебиторка, кредиторка, вклад */}
       <FinanceMoneyPanel notify={notify} />
@@ -354,40 +366,25 @@ export function FinanceWorkspace({
           <span>Финансовая сверка и дрифт</span>
         </h3>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-            gap: 12,
-            marginBlockEnd: driftCount > 0 ? 14 : 0,
-          }}
-        >
-          <div style={{ border: "1px solid var(--border-strong)", borderRadius: 10, padding: 12 }}>
-            <div className="muted">Проводок в журнале</div>
-            <div className="mono" style={{ fontSize: "1.4rem", fontWeight: 700 }}>{journalsCount}</div>
-          </div>
-          <div style={{ border: "1px solid var(--border-strong)", borderRadius: 10, padding: 12 }}>
-            <div className="muted">Событий платёжного inbox</div>
-            <div className="mono" style={{ fontSize: "1.4rem", fontWeight: 700 }}>{paymentEventsCount}</div>
-          </div>
-          <div style={{ border: "1px solid var(--border-strong)", borderRadius: 10, padding: 12 }}>
-            <div className="muted">Возвратов</div>
-            <div className="mono" style={{ fontSize: "1.4rem", fontWeight: 700 }}>{refundsCount}</div>
-          </div>
-          <div style={{ border: "1px solid var(--border-strong)", borderRadius: 10, padding: 12 }}>
-            <div className="muted">Аномалий сверки (drift)</div>
-            <div className="mono" style={{ fontSize: "1.4rem", fontWeight: 700 }}>{driftCount}</div>
-          </div>
-        </div>
+        <StatGrid>
+          <StatTile label="Проводок в журнале" value={journalsCount} />
+          <StatTile label="Входящих платёжных событий" value={paymentEventsCount} />
+          <StatTile label="Возвратов" value={refundsCount} />
+          <StatTile
+            label="Аномалий сверки"
+            value={driftCount}
+            tone={driftCount > 0 ? "danger" : "ok"}
+          />
+        </StatGrid>
 
         {driftCount > 0 && (
           <div className="notice error" role="alert">
             <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, marginBlockEnd: 6 }}>
               <AlertTriangle size={16} aria-hidden="true" />
-              <span>Обнаружено расхождение сверки (payment drift)</span>
+              <span>Обнаружено расхождение сверки платежей</span>
             </div>
             <div className="muted" style={{ marginBlockEnd: 6 }}>
-              Затронутые идентификаторы платёжных намерений (paymentIntentId):
+              Затронутые платёжные операции:
             </div>
             <ul style={{ margin: 0, paddingInlineStart: 18 }}>
               {drift.map((item, idx) => {
@@ -430,25 +427,29 @@ export function FinanceWorkspace({
                   <tr key={inv.id}>
                     <td className="mono">{inv.number}</td>
                     <td className="mono">{money(inv.totalKopeks)}</td>
-                    <td>{inv.state}</td>
+                    <td>
+                      <Badge tone={inv.state === "paid" ? "ok" : "warn"}>
+                        {stateLabel(INVOICE_STATE_LABELS, inv.state)}
+                      </Badge>
+                    </td>
                     <td>
                       <div className="button-row" style={{ marginBlock: 0 }}>
-                        <button
-                          type="button"
-                          className="ghost"
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          leadingIcon={<Printer size={15} aria-hidden="true" />}
                           onClick={() => setPrintDoc({ kind: "customer_invoice", id: inv.id })}
                         >
-                          <Printer size={15} aria-hidden="true" />
-                          <span>Печать счёта</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
+                          Печать счёта
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          leadingIcon={<FileText size={15} aria-hidden="true" />}
                           onClick={() => setPrintDoc({ kind: "upd_draft", id: inv.id })}
                         >
-                          <FileText size={15} aria-hidden="true" />
-                          <span>УПД (черновик)</span>
-                        </button>
+                          УПД (черновик)
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -458,7 +459,7 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h4 style={{ marginBlock: "8px 10px" }}>Платёжные операции (intents)</h4>
+        <h4 style={{ marginBlock: "8px 10px" }}>Платёжные операции</h4>
         {intents.length === 0 ? (
           <p className="muted">Платёжные операции отсутствуют.</p>
         ) : (
@@ -478,26 +479,26 @@ export function FinanceWorkspace({
                   <tr key={intent.id}>
                     <td className="mono">{intent.id}</td>
                     <td className="mono">{money(intent.amountKopeks)}</td>
-                    <td>{PAYMENT_STATE_LABELS[intent.state] ?? intent.state}</td>
-                    <td className="mono">{intent.provider}</td>
+                    <td>{stateLabel(PAYMENT_STATE_LABELS, intent.state)}</td>
+                    <td>{providerLabel(intent.provider)}</td>
                     <td>
                       <div className="button-row" style={{ marginBlock: 0 }}>
-                        <button
-                          type="button"
-                          className="ghost"
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          leadingIcon={<RotateCcw size={15} aria-hidden="true" />}
                           onClick={() => openRefundModal(intent)}
                         >
-                          <RotateCcw size={15} aria-hidden="true" />
-                          <span>Возврат</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost"
+                          Возврат
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          leadingIcon={<ShieldAlert size={15} aria-hidden="true" />}
                           onClick={() => openChargebackModal(intent)}
                         >
-                          <ShieldAlert size={15} aria-hidden="true" />
-                          <span>Оспорить (Chargeback)</span>
-                        </button>
+                          Оспорить (чарджбэк)
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -535,27 +536,31 @@ export function FinanceWorkspace({
                     <tr key={comp.id}>
                       <td className="mono">{comp.claimId}</td>
                       <td className="mono">{money(comp.amountKopeks)}</td>
-                      <td>{comp.state}</td>
+                      <td>
+                        <Badge tone={comp.state === "approved" ? "ok" : comp.state === "rejected" ? "danger" : "warn"}>
+                          {stateLabel(COMPENSATION_STATE_LABELS, comp.state)}
+                        </Badge>
+                      </td>
                       <td>
                         <div className="button-row" style={{ marginBlock: 0 }}>
-                          <button
-                            type="button"
-                            className="primary"
+                          <Button
+                            variant="primary"
+                            size="sm"
                             disabled={isBusy}
+                            leadingIcon={<CheckCircle2 size={15} aria-hidden="true" />}
                             onClick={() => void decideCompensation(comp, true)}
                           >
-                            <CheckCircle2 size={15} aria-hidden="true" />
-                            <span>Одобрить</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost"
+                            Одобрить
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
                             disabled={isBusy}
+                            leadingIcon={<XCircle size={15} aria-hidden="true" />}
                             onClick={() => void decideCompensation(comp, false)}
                           >
-                            <XCircle size={15} aria-hidden="true" />
-                            <span>Отклонить</span>
-                          </button>
+                            Отклонить
+                          </Button>
                         </div>
                       </td>
                     </tr>
@@ -587,7 +592,7 @@ export function FinanceWorkspace({
                   >
                     {partners.map(p => (
                       <option key={p.id} value={p.id}>
-                        {p.name} ({p.id})
+                        {p.name}
                       </option>
                     ))}
                   </select>
@@ -629,14 +634,14 @@ export function FinanceWorkspace({
           </div>
 
           <div className="button-row" style={{ marginBlock: 0 }}>
-            <button
+            <Button
               type="submit"
-              className="primary"
+              variant="primary"
               disabled={busyAction === "partner-invoice"}
+              leadingIcon={<FileText size={16} aria-hidden="true" />}
             >
-              <FileText size={16} aria-hidden="true" />
-              <span>Сформировать акт партнёру</span>
-            </button>
+              Сформировать акт партнёру
+            </Button>
           </div>
         </form>
 
@@ -659,16 +664,20 @@ export function FinanceWorkspace({
                   <tr key={p.id}>
                     <td className="mono">{p.number}</td>
                     <td className="mono">{money(p.totalKopeks)}</td>
-                    <td>{p.state}</td>
                     <td>
-                      <button
-                        type="button"
-                        className="ghost"
+                      <Badge tone={p.state === "settled" ? "ok" : p.state === "disputed" ? "danger" : "warn"}>
+                        {stateLabel(PARTNER_INVOICE_STATE_LABELS, p.state)}
+                      </Badge>
+                    </td>
+                    <td>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        leadingIcon={<Printer size={15} aria-hidden="true" />}
                         onClick={() => setPrintDoc({ kind: "partner_act", id: p.id })}
                       >
-                        <Printer size={15} aria-hidden="true" />
-                        <span>Печать акта</span>
-                      </button>
+                        Печать акта
+                      </Button>
                     </td>
                   </tr>
                 ))}
@@ -694,8 +703,8 @@ export function FinanceWorkspace({
               <tbody>
                 {fiscalReceipts.map((rec, idx) => (
                   <tr key={rec.id ?? `fiscal-${idx}`}>
-                    <td className="mono">{rec.provider}</td>
-                    <td>{rec.state}</td>
+                    <td>{providerLabel(rec.provider)}</td>
+                    <td>{stateLabel(FISCAL_STATE_LABELS, rec.state)}</td>
                     <td className="muted">{rec.error ?? "—"}</td>
                     <td className="mono">{dt(rec.createdAt)}</td>
                   </tr>
@@ -743,17 +752,17 @@ export function FinanceWorkspace({
               />
             </div>
             <div className="button-row" style={{ marginBlock: 0 }}>
-              <button
+              <Button
                 type="submit"
-                className="primary"
+                variant="primary"
                 disabled={busyAction === `refund-${refundTarget.id}` || refundReason.trim().length < 3}
+                leadingIcon={<RotateCcw size={16} aria-hidden="true" />}
               >
-                <RotateCcw size={16} aria-hidden="true" />
-                <span>Подтвердить возврат</span>
-              </button>
-              <button type="button" className="ghost" onClick={() => setRefundTarget(null)}>
-                <span>Отмена</span>
-              </button>
+                Подтвердить возврат
+              </Button>
+              <Button variant="ghost" onClick={() => setRefundTarget(null)}>
+                Отмена
+              </Button>
             </div>
           </form>
         )}
@@ -762,7 +771,7 @@ export function FinanceWorkspace({
       {/* Chargeback Modal */}
       <ModalDialog
         open={chargebackTarget !== null}
-        title="Оспаривание платежа (Chargeback)"
+        title="Оспаривание платежа (чарджбэк)"
         onClose={() => setChargebackTarget(null)}
       >
         {chargebackTarget && (
@@ -780,24 +789,24 @@ export function FinanceWorkspace({
                 minLength={3}
                 value={chargebackReason}
                 onChange={e => setChargebackReason(e.target.value)}
-                placeholder="Опишите основание диспута / chargeback"
+                placeholder="Опишите основание диспута или чарджбэка"
               />
             </div>
             <div className="button-row" style={{ marginBlock: 0 }}>
-              <button
+              <Button
                 type="submit"
-                className="primary"
+                variant="primary"
                 disabled={
                   busyAction === `chargeback-${chargebackTarget.id}` ||
                   chargebackReason.trim().length < 3
                 }
+                leadingIcon={<ShieldAlert size={16} aria-hidden="true" />}
               >
-                <ShieldAlert size={16} aria-hidden="true" />
-                <span>Зарегистрировать chargeback</span>
-              </button>
-              <button type="button" className="ghost" onClick={() => setChargebackTarget(null)}>
-                <span>Отмена</span>
-              </button>
+                Зарегистрировать чарджбэк
+              </Button>
+              <Button variant="ghost" onClick={() => setChargebackTarget(null)}>
+                Отмена
+              </Button>
             </div>
           </form>
         )}

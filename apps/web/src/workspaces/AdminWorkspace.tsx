@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -12,9 +12,19 @@ import {
   Users,
 } from "lucide-react";
 import { api, dt, money, newKey } from "../api";
-import { EVENT_LABELS, ROLE_LABELS, formatError } from "../labels";
+import { ADMIN_AUDIT_ACTION_LABELS, eventLabel, resourceTypeLabel, ROLE_LABELS, formatError, stateLabel } from "../labels";
 import { ModalDialog } from "../components/ModalDialog";
 import { FinanceMoneyPanel } from "./analytics-panels";
+import { Badge, type BadgeTone } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Card, CardHeader } from "../components/ui/Card";
+import { DataTable, type DataTableColumn } from "../components/ui/DataTable";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Input, Select } from "../components/ui/Field";
+import { IconButton } from "../components/ui/IconButton";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Reveal, Stagger } from "../components/ui/Reveal";
+import { StatGrid, StatTile } from "../components/ui/StatTile";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -95,10 +105,24 @@ const SEVERITY_LABELS: Record<string, string> = {
   low: "Низкий",
 };
 
-const SEVERITY_PILL_CLASS: Record<string, string> = {
-  high: "danger",
-  medium: "warn",
-  low: "info",
+/** API codes that reach the operator as Latin text — the operator reads them in Russian. */
+const FRAUD_KIND_LABELS: Record<string, string> = {
+  claim_velocity: "Скорость претензий",
+  cancel_velocity: "Скорость отмен",
+  refund_without_delivery: "Возврат без доставки",
+  repeated_partial_delivery: "Повторная частичная доставка",
+  shared_devices: "Общие устройства",
+};
+
+const FRAUD_SUBJECT_LABELS: Record<string, string> = {
+  customer: "Клиент",
+  courier: "Курьер",
+  order: "Заказ",
+  device: "Устройство",
+};
+
+const FRAUD_RECOMMENDATION_LABELS: Record<string, string> = {
+  manual_review: "Ручная проверка",
 };
 
 function unwrapList<T>(res: unknown, keys: string[]): T[] {
@@ -116,11 +140,14 @@ function getMemberId(member: AdminMember): string {
   return member.userId ?? member.id ?? member.phone;
 }
 
-function getSeverityTone(severity: string): string {
-  return SEVERITY_PILL_CLASS[severity.toLowerCase()] ?? "info";
+function getSeverityTone(severity: string): BadgeTone {
+  const tone = severity.toLowerCase();
+  if (tone === "high") return "danger";
+  if (tone === "medium") return "warn";
+  return "info";
 }
 
-function getMemberStateTone(state: string): string {
+function getMemberStateTone(state: string): BadgeTone {
   if (state === "active") return "ok";
   if (state === "suspended") return "warn";
   if (state === "revoked") return "danger";
@@ -146,13 +173,6 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
   // Admin session revocation form state
   const [adminSessionId, setAdminSessionId] = useState("");
   const [adminSessionReason, setAdminSessionReason] = useState("");
-
-  // Explicit accessible IDs for all form controls
-  const adminSessionIdInputId = useId();
-  const adminSessionReasonInputId = useId();
-  const modalRoleSelectId = useId();
-  const modalStateSelectId = useId();
-  const modalReasonInputId = useId();
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -255,7 +275,7 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
         });
         notify({
           kind: "ok",
-          text: `Роль «${ROLE_LABELS[grantRoleValue] ?? grantRoleValue}» выдана пользователю ${modal.member.phone}`,
+          text: `Роль «${stateLabel(ROLE_LABELS, grantRoleValue)}» выдана пользователю ${modal.member.phone}`,
         });
       } else if (modal.kind === "revoke_role") {
         const key = newKey();
@@ -266,7 +286,7 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
         );
         notify({
           kind: "ok",
-          text: `Роль «${ROLE_LABELS[modal.role] ?? modal.role}» отозвана у пользователя ${modal.member.phone}`,
+          text: `Роль «${stateLabel(ROLE_LABELS, modal.role)}» отозвана у пользователя ${modal.member.phone}`,
         });
       } else if (modal.kind === "change_state") {
         await api(`/admin/members/${encodeURIComponent(userId)}/state`, {
@@ -275,7 +295,7 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
         });
         notify({
           kind: "ok",
-          text: `Статус доступа обновлён: ${MEMBER_STATE_LABELS[targetStateValue] ?? targetStateValue}`,
+          text: `Статус доступа обновлён: ${stateLabel(MEMBER_STATE_LABELS, targetStateValue)}`,
         });
       }
 
@@ -341,361 +361,342 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
   const capturedKopeks =
     metrics?.capturedKopeks ?? metrics?.capturedTotalKopeks ?? metrics?.payments?.capturedKopeks ?? metrics?.revenueKopeks ?? 0;
 
+  const memberColumns: DataTableColumn<AdminMember>[] = [
+    { key: "phone", header: "Телефон", render: (member) => <span className="mono">{member.phone}</span> },
+    { key: "name", header: "Имя", render: (member) => member.displayName || "—" },
+    { key: "partner", header: "Партнёр", render: (member) => member.partnerName || "—" },
+    {
+      key: "state",
+      header: "Статус",
+      render: (member) => (
+        <Badge tone={getMemberStateTone(member.state)}>
+          {stateLabel(MEMBER_STATE_LABELS, member.state)}
+        </Badge>
+      ),
+    },
+    {
+      key: "roles",
+      header: "Роли",
+      render: (member) =>
+        member.roles.length === 0 ? (
+          <span className="muted">Нет ролей</span>
+        ) : (
+          <div className="row row--tight">
+            {member.roles.map((role) => (
+              <span key={role} className="row row--tight">
+                <Badge tone="info">{stateLabel(ROLE_LABELS, role)}</Badge>
+                <IconButton
+                  size="sm"
+                  label={`Отозвать роль ${stateLabel(ROLE_LABELS, role)} у ${member.phone}`}
+                  title="Отозвать роль"
+                  icon={<UserMinus size={12} aria-hidden="true" />}
+                  disabled={busy}
+                  onClick={() => openRevokeRoleModal(member, role)}
+                />
+              </span>
+            ))}
+          </div>
+        ),
+    },
+    {
+      key: "actions",
+      header: "Действия",
+      render: (member) => (
+        <div className="row row--tight">
+          <Button
+            variant="ghost"
+            size="sm"
+            leadingIcon={<UserPlus size={14} aria-hidden="true" />}
+            disabled={busy}
+            onClick={() => openGrantRoleModal(member)}
+          >
+            Выдать роль
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            leadingIcon={<UserCog size={14} aria-hidden="true" />}
+            disabled={busy}
+            onClick={() => openChangeStateModal(member)}
+          >
+            Статус доступа
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
+  const signalColumns: DataTableColumn<FraudSignal>[] = [
+    {
+      key: "severity",
+      header: "Уровень",
+      render: (signal) => (
+        <Badge tone={getSeverityTone(signal.severity)}>
+          {stateLabel(SEVERITY_LABELS, signal.severity.toLowerCase())}
+        </Badge>
+      ),
+    },
+    {
+      key: "kind",
+      header: "Тип сигнала",
+      render: (signal) => stateLabel(FRAUD_KIND_LABELS, signal.kind),
+    },
+    {
+      key: "subject",
+      header: "Субъект",
+      render: (signal) => (
+        <span className="row row--tight">
+          <span>{stateLabel(FRAUD_SUBJECT_LABELS, signal.subjectType)}</span>
+          {signal.subjectId ? <span className="muted mono">({signal.subjectId})</span> : null}
+        </span>
+      ),
+    },
+    {
+      key: "recommendation",
+      header: "Рекомендация",
+      render: (signal) => stateLabel(FRAUD_RECOMMENDATION_LABELS, signal.recommendation),
+    },
+  ];
+
+  const auditColumns: DataTableColumn<AuditEvent>[] = [
+    { key: "time", header: "Время", render: (event) => <span className="mono">{dt(event.occurredAt ?? event.createdAt)}</span> },
+    {
+      key: "action",
+      header: "Действие",
+      render: (event) => ADMIN_AUDIT_ACTION_LABELS[event.action] ?? eventLabel(event.action),
+    },
+    {
+      key: "resource",
+      header: "Ресурс",
+      render: (event) => (
+        <span className="row row--tight">
+          <span>{resourceTypeLabel(event.resourceType)}</span>
+          {event.resourceId ? <span className="mono muted-strong">{event.resourceId}</span> : null}
+        </span>
+      ),
+    },
+    { key: "reason", header: "Причина", render: (event) => event.reason || "—" },
+  ];
+
   return (
-    <div className="workspace-stack">
+    <div className="workspace-grid">
+      <PageHeader eyebrow="Администрирование" title="Участники, роли и аудит" />
+
       {/* 0. Денежный контур: сколько нам должны и сколько должны мы */}
       <FinanceMoneyPanel notify={notify} />
 
       {/* 1. Сводка и метрики платформы */}
-      <section className="panel">
-        <div className="panel-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <Activity size={18} aria-hidden="true" />
-            <span>Сводка и метрики платформы</span>
-          </h2>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => void loadAll()}
-            disabled={loading || busy}
-          >
-            <RefreshCw size={16} aria-hidden="true" />
-            <span>{loading ? "Обновление..." : "Обновить"}</span>
-          </button>
-        </div>
-
-        <div
-          className="stats-grid"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-            gap: "0.75rem",
-            marginTop: "0.75rem",
-          }}
-        >
-          <div className="stat-card">
-            <div className="stat-label">Участники</div>
-            <div className="stat-value">{members.length}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Сигналы антифрода</div>
-            <div className="stat-value">{signals.length}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Заказы в работе</div>
-            <div className="stat-value">{activeOrdersCount}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Открытые претензии</div>
-            <div className="stat-value">{openClaimsCount}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Принято (демо)</div>
-            <div className="stat-value">{money(capturedKopeks)}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">События аудита</div>
-            <div className="stat-value">{auditEvents.length}</div>
-          </div>
-        </div>
-      </section>
+      <Card as="section">
+        <CardHeader
+          title={
+            <span className="row row--tight">
+              <Activity size={18} aria-hidden="true" />
+              <span>Сводка и метрики платформы</span>
+            </span>
+          }
+          actions={
+            <Button
+              variant="ghost"
+              leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+              onClick={() => void loadAll()}
+              disabled={loading || busy}
+            >
+              {loading ? "Обновление..." : "Обновить"}
+            </Button>
+          }
+        />
+        <StatGrid>
+          <StatTile label="Участники" value={members.length} />
+          <StatTile label="Сигналы антифрода" value={signals.length} />
+          <StatTile label="Заказы в работе" value={activeOrdersCount} />
+          <StatTile label="Открытые претензии" value={openClaimsCount} />
+          <StatTile label="Принято (демо)" value={money(capturedKopeks)} />
+          <StatTile label="События аудита" value={auditEvents.length} />
+        </StatGrid>
+      </Card>
 
       {/* 2. Управление участниками и RBAC */}
-      <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <Users size={18} aria-hidden="true" />
-            <span>Управление участниками и RBAC</span>
-          </h2>
-        </div>
+      <Card as="section">
+        <CardHeader
+          title={
+            <span className="row row--tight">
+              <Users size={18} aria-hidden="true" />
+              <span>Управление участниками и RBAC</span>
+            </span>
+          }
+        />
 
         {members.length === 0 ? (
-          <p className="muted">{loading ? "Загрузка списка участников..." : "Участники не найдены."}</p>
+          loading ? (
+            <p className="muted">Загрузка списка участников...</p>
+          ) : (
+            <EmptyState
+              icon={<Users size={20} aria-hidden="true" />}
+              title="Участники не найдены."
+            />
+          )
         ) : (
-          <div className="table-wrap" style={{ overflowX: "auto" }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Телефон</th>
-                  <th>Имя</th>
-                  <th>Партнёр</th>
-                  <th>Статус</th>
-                  <th>Роли</th>
-                  <th>Действия</th>
-                </tr>
-              </thead>
-              <tbody>
-                {members.map((member) => {
-                  const memberId = getMemberId(member);
-                  return (
-                    <tr key={memberId}>
-                      <td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-                        {member.phone}
-                      </td>
-                      <td>{member.displayName || "—"}</td>
-                      <td>{member.partnerName || "—"}</td>
-                      <td>
-                        <span className={`pill ${getMemberStateTone(member.state)}`}>
-                          {MEMBER_STATE_LABELS[member.state] ?? member.state}
-                        </span>
-                      </td>
-                      <td>
-                        {member.roles.length === 0 ? (
-                          <span className="muted">Нет ролей</span>
-                        ) : (
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                            {member.roles.map((role) => (
-                              <span
-                                key={role}
-                                className="pill info"
-                                style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
-                              >
-                                <span>{ROLE_LABELS[role] ?? role}</span>
-                                <button
-                                  type="button"
-                                  className="ghost"
-                                  aria-label={`Отозвать роль ${ROLE_LABELS[role] ?? role} у ${member.phone}`}
-                                  title="Отозвать роль"
-                                  disabled={busy}
-                                  onClick={() => openRevokeRoleModal(member, role)}
-                                  style={{ padding: "0.1rem 0.25rem", minHeight: "auto" }}
-                                >
-                                  <UserMinus size={12} aria-hidden="true" />
-                                </button>
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </td>
-                      <td>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-                          <button
-                            type="button"
-                            className="ghost"
-                            disabled={busy}
-                            onClick={() => openGrantRoleModal(member)}
-                          >
-                            <UserPlus size={14} aria-hidden="true" />
-                            <span>Выдать роль</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="ghost"
-                            disabled={busy}
-                            onClick={() => openChangeStateModal(member)}
-                          >
-                            <UserCog size={14} aria-hidden="true" />
-                            <span>Статус доступа</span>
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={memberColumns}
+            rows={members}
+            rowKey={(member) => getMemberId(member)}
+            caption="Участники платформы, их роли и статус доступа"
+          />
         )}
-      </section>
+      </Card>
 
       {/* 3. Отзыв сессии */}
-      <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <KeyRound size={18} aria-hidden="true" />
-            <span>Управление и отзыв сессий</span>
-          </h2>
-        </div>
+      <Card as="section">
+        <CardHeader
+          title={
+            <span className="row row--tight">
+              <KeyRound size={18} aria-hidden="true" />
+              <span>Управление и отзыв сессий</span>
+            </span>
+          }
+        />
 
-        <div style={{ display: "grid", gap: "1.25rem", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
-          <div>
-            <h3 style={{ marginTop: 0, marginBottom: "0.5rem", fontSize: "0.95rem" }}>Мои активные сессии</h3>
+        <div className="grid-two">
+          <div className="stack">
+            <h3 className="section-title">Мои активные сессии</h3>
             {ownSessions.length === 0 ? (
-              <p className="muted">{loading ? "Загрузка сессий..." : "Активные сессии не найдены."}</p>
+              loading ? (
+                <p className="muted">Загрузка сессий...</p>
+              ) : (
+                <EmptyState
+                  icon={<KeyRound size={20} aria-hidden="true" />}
+                  title="Активные сессии не найдены."
+                />
+              )
             ) : (
-              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.5rem" }}>
+              <Stagger as="ul" className="data-list">
                 {ownSessions.map((session) => {
                   const isCurrent = Boolean(session.current ?? session.isCurrent);
                   const isRevoked = Boolean(session.revokedAt);
                   return (
-                    <li
-                      key={session.id}
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: "0.75rem",
-                        padding: "0.6rem 0.75rem",
-                        border: "1px solid var(--border, #d8dee6)",
-                        borderRadius: "8px",
-                      }}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div
-                          style={{
-                            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                            fontSize: "0.85rem",
-                            wordBreak: "break-all",
-                          }}
-                        >
-                          {session.id}
-                        </div>
-                        <div className="muted" style={{ fontSize: "0.8rem" }}>
+                    <Reveal as="li" key={session.id} className="data-row">
+                      <span className="data-row__main">
+                        <span className="mono">{session.id}</span>
+                        <span className="muted">
                           Создана: {dt(session.createdAt)}
                           {session.lastSeenAt ? ` · Активность: ${dt(session.lastSeenAt)}` : ""}
                           {session.ipAddress ? ` · IP: ${session.ipAddress}` : ""}
-                        </div>
-                        {isCurrent && <span className="pill ok">Текущая</span>}
-                        {isRevoked && <span className="pill danger">Отозвана</span>}
-                      </div>
+                        </span>
+                        <span className="row row--tight">
+                          {isCurrent && <Badge tone="ok">Текущая</Badge>}
+                          {isRevoked && <Badge tone="danger">Отозвана</Badge>}
+                        </span>
+                      </span>
                       {!isRevoked && (
-                        <button
-                          type="button"
-                          className="ghost"
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          leadingIcon={<Shield size={14} aria-hidden="true" />}
                           disabled={busy}
                           onClick={() => void handleRevokeOwnSession(session.id)}
                         >
-                          <Shield size={14} aria-hidden="true" />
-                          <span>Завершить</span>
-                        </button>
+                          Завершить
+                        </Button>
                       )}
-                    </li>
+                    </Reveal>
                   );
                 })}
-              </ul>
+              </Stagger>
             )}
           </div>
 
-          <form onSubmit={(e) => void handleAdminRevokeSession(e)} style={{ display: "grid", gap: "0.75rem", alignContent: "start" }}>
-            <h3 style={{ marginTop: 0, marginBottom: 0, fontSize: "0.95rem" }}>Принудительный отзыв сессии (Админ)</h3>
-            <div className="field">
-              <label htmlFor={adminSessionIdInputId}>ID сессии</label>
-              <input
-                id={adminSessionIdInputId}
-                type="text"
-                value={adminSessionId}
-                onChange={(e) => setAdminSessionId(e.target.value)}
-                placeholder="Например, sess_01H..."
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor={adminSessionReasonInputId}>Причина отзыва для аудита (от 5 символов)</label>
-              <input
-                id={adminSessionReasonInputId}
-                type="text"
-                value={adminSessionReason}
-                onChange={(e) => setAdminSessionReason(e.target.value)}
-                placeholder="Компрометация устройства или проверка безопасности"
-                minLength={5}
-                required
-              />
-            </div>
-            <div>
-              <button type="submit" disabled={busy}>
-                <Shield size={16} aria-hidden="true" />
-                <span>Отозвать сессию</span>
-              </button>
+          <form className="stack" onSubmit={(e) => void handleAdminRevokeSession(e)}>
+            <h3 className="section-title">Принудительный отзыв сессии (Админ)</h3>
+            <Input
+              label="ID сессии"
+              type="text"
+              value={adminSessionId}
+              onChange={(e) => setAdminSessionId(e.target.value)}
+              placeholder="Например, sess_01H..."
+              required
+            />
+            <Input
+              label="Причина отзыва для аудита (от 5 символов)"
+              type="text"
+              value={adminSessionReason}
+              onChange={(e) => setAdminSessionReason(e.target.value)}
+              placeholder="Компрометация устройства или проверка безопасности"
+              minLength={5}
+              required
+            />
+            <div className="button-row">
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={busy}
+                leadingIcon={<Shield size={16} aria-hidden="true" />}
+              >
+                Отозвать сессию
+              </Button>
             </div>
           </form>
         </div>
-      </section>
+      </Card>
 
       {/* 4. Очередь сигналов антифрода */}
-      <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <AlertTriangle size={18} aria-hidden="true" />
-            <span>Очередь сигналов антифрода</span>
-          </h2>
-        </div>
+      <Card as="section">
+        <CardHeader
+          title={
+            <span className="row row--tight">
+              <AlertTriangle size={18} aria-hidden="true" />
+              <span>Очередь сигналов антифрода</span>
+            </span>
+          }
+        />
 
         {signals.length === 0 ? (
-          <p className="muted">{loading ? "Загрузка сигналов антифрода..." : "Подозрительных сигналов не обнаружено."}</p>
+          loading ? (
+            <p className="muted">Загрузка сигналов антифрода...</p>
+          ) : (
+            <EmptyState
+              icon={<AlertTriangle size={20} aria-hidden="true" />}
+              title="Подозрительных сигналов не обнаружено."
+            />
+          )
         ) : (
-          <div className="table-wrap" style={{ overflowX: "auto" }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Уровень</th>
-                  <th>Тип сигнала</th>
-                  <th>Субъект</th>
-                  <th>Рекомендация</th>
-                </tr>
-              </thead>
-              <tbody>
-                {signals.map((signal, idx) => {
-                  const sevKey = signal.severity.toLowerCase();
-                  return (
-                    <tr key={signal.id ?? `${signal.kind}-${signal.subjectType}-${idx}`}>
-                      <td>
-                        <span className={`pill ${getSeverityTone(signal.severity)}`}>
-                          {SEVERITY_LABELS[sevKey] ?? signal.severity}
-                        </span>
-                      </td>
-                      <td style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-                        {signal.kind}
-                      </td>
-                      <td>
-                        <span>{signal.subjectType}</span>
-                        {signal.subjectId ? (
-                          <span className="muted" style={{ marginLeft: "0.35rem", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-                            ({signal.subjectId})
-                          </span>
-                        ) : null}
-                      </td>
-                      <td>{signal.recommendation}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={signalColumns}
+            rows={signals}
+            rowKey={(signal, index) => signal.id ?? `${signal.kind}-${signal.subjectType}-${index}`}
+            caption="Очередь сигналов антифрода с рекомендациями по проверке"
+          />
         )}
-      </section>
+      </Card>
 
       {/* 5. Журнал аудита */}
-      <section className="panel">
-        <div className="panel-head">
-          <h2 className="panel-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <ClipboardList size={18} aria-hidden="true" />
-            <span>Журнал аудита</span>
-          </h2>
-        </div>
+      <Card as="section">
+        <CardHeader
+          title={
+            <span className="row row--tight">
+              <ClipboardList size={18} aria-hidden="true" />
+              <span>Журнал аудита</span>
+            </span>
+          }
+        />
 
         {auditEvents.length === 0 ? (
-          <p className="muted">{loading ? "Загрузка журнала аудита..." : "Записи аудита отсутствуют."}</p>
+          loading ? (
+            <p className="muted">Загрузка журнала аудита...</p>
+          ) : (
+            <EmptyState
+              icon={<ClipboardList size={20} aria-hidden="true" />}
+              title="Записи аудита отсутствуют."
+            />
+          )
         ) : (
-          <div className="table-wrap" style={{ overflowX: "auto" }}>
-            <table
-              className="data-table"
-              style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: "0.85rem" }}
-            >
-              <thead>
-                <tr>
-                  <th>Время</th>
-                  <th>Действие</th>
-                  <th>Ресурс</th>
-                  <th>Причина</th>
-                </tr>
-              </thead>
-              <tbody>
-                {auditEvents.map((ev, idx) => (
-                  <tr key={ev.id ?? `${ev.action}-${ev.occurredAt ?? idx}`}>
-                    <td>{dt(ev.occurredAt ?? ev.createdAt)}</td>
-                    <td>{EVENT_LABELS[ev.action] ?? ev.action}</td>
-                    <td>
-                      {ev.resourceType}
-                      {ev.resourceId ? `:${ev.resourceId}` : ""}
-                    </td>
-                    <td>{ev.reason || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={auditColumns}
+            rows={auditEvents}
+            rowKey={(event, index) => event.id ?? `${event.action}-${event.occurredAt ?? index}`}
+            caption="Журнал аудита платформы"
+          />
         )}
-      </section>
+      </Card>
 
       {/* Модальное окно действий над участником */}
       <ModalDialog
@@ -704,7 +705,7 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
           modal?.kind === "grant_role"
             ? `Выдать роль: ${modal.member.phone}`
             : modal?.kind === "revoke_role"
-              ? `Отозвать роль: ${ROLE_LABELS[modal.role] ?? modal.role}`
+              ? `Отозвать роль: ${stateLabel(ROLE_LABELS, modal.role)}`
               : modal?.kind === "change_state"
                 ? `Статус доступа: ${modal.member.phone}`
                 : ""
@@ -712,70 +713,61 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
         onClose={closeModal}
       >
         {modal ? (
-          <form onSubmit={(e) => void handleMemberModalSubmit(e)} style={{ display: "grid", gap: "0.85rem" }}>
+          <form className="stack" onSubmit={(e) => void handleMemberModalSubmit(e)}>
             {modal.kind === "grant_role" && (
-              <div className="field">
-                <label htmlFor={modalRoleSelectId}>Роль</label>
-                <select
-                  id={modalRoleSelectId}
-                  value={grantRoleValue}
-                  onChange={(e) => setGrantRoleValue(e.target.value)}
-                >
-                  {Object.entries(ROLE_LABELS).map(([roleKey, roleLabel]) => (
-                    <option key={roleKey} value={roleKey}>
-                      {roleLabel} ({roleKey})
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <Select
+                label="Роль"
+                value={grantRoleValue}
+                onChange={(e) => setGrantRoleValue(e.target.value)}
+              >
+                {Object.entries(ROLE_LABELS).map(([roleKey, roleLabel]) => (
+                  <option key={roleKey} value={roleKey}>
+                    {roleLabel}
+                  </option>
+                ))}
+              </Select>
             )}
 
             {modal.kind === "revoke_role" && (
-              <p style={{ margin: 0 }}>
-                Отозвать роль <strong>{ROLE_LABELS[modal.role] ?? modal.role}</strong> у пользователя{" "}
+              <p>
+                Отозвать роль <strong>{stateLabel(ROLE_LABELS, modal.role)}</strong> у пользователя{" "}
                 <strong>{modal.member.displayName || modal.member.phone}</strong>?
               </p>
             )}
 
             {modal.kind === "change_state" && (
-              <div className="field">
-                <label htmlFor={modalStateSelectId}>Новый статус доступа</label>
-                <select
-                  id={modalStateSelectId}
-                  value={targetStateValue}
-                  onChange={(e) => setTargetStateValue(e.target.value as MemberState)}
-                >
-                  <option value="active">Активен (active)</option>
-                  <option value="suspended">Приостановлен (suspended)</option>
-                  <option value="revoked">Отозван (revoked)</option>
-                </select>
-              </div>
+              <Select
+                label="Новый статус доступа"
+                value={targetStateValue}
+                onChange={(e) => setTargetStateValue(e.target.value as MemberState)}
+              >
+                <option value="active">Активен</option>
+                <option value="suspended">Приостановлен</option>
+                <option value="revoked">Отозван</option>
+              </Select>
             )}
 
-            <div className="field">
-              <label htmlFor={modalReasonInputId}>Причина изменения (от 5 символов)</label>
-              <input
-                id={modalReasonInputId}
-                type="text"
-                value={memberActionReason}
-                onChange={(e) => setMemberActionReason(e.target.value)}
-                placeholder="Укажите обоснование для журнала аудита"
-                minLength={5}
-                required
-              />
-            </div>
+            <Input
+              label="Причина изменения (от 5 символов)"
+              type="text"
+              value={memberActionReason}
+              onChange={(e) => setMemberActionReason(e.target.value)}
+              placeholder="Укажите обоснование для журнала аудита"
+              minLength={5}
+              required
+            />
 
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-              <button type="button" className="ghost" onClick={closeModal} disabled={busy}>
+            <div className="row row--end row--tight">
+              <Button variant="ghost" disabled={busy} onClick={closeModal}>
                 Отмена
-              </button>
-              <button type="submit" disabled={busy}>
+              </Button>
+              <Button type="submit" variant="primary" disabled={busy}>
                 {modal.kind === "grant_role"
                   ? "Выдать роль"
                   : modal.kind === "revoke_role"
                     ? "Отозвать роль"
                     : "Сохранить статус"}
-              </button>
+              </Button>
             </div>
           </form>
         ) : null}
