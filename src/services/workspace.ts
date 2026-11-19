@@ -1,8 +1,10 @@
-import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  claims, compensations, courierShifts, custodyEvents, evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
-  garmentEvidence, garments, orders, outboxEvents, sessions, supportThreads,
+  buildings, claims, compensations, courierShifts, custodyEvents, customerAddresses,
+  evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
+  garmentEvidence, garments, notifications, orders, outboxEvents, sessions, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -92,13 +94,15 @@ export async function opsMetrics(db: Db, principal: Principal) {
   };
 }
 
-/**
- * A removed asset is parked in this state. The schema has no `deleted_at` column and the
- * `evidence_state` enum has no tombstone value, so `expired` is the only state that means
- * "no longer served"; the row itself survives so access events and legal holds keep their
- * foreign key and the audit trail stays intact.
- */
-const TOMBSTONE_STATUS = "expired" as const;
+export const ALLOWED_EVIDENCE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+  "video/mp4",
+]);
+export const MAX_EVIDENCE_BYTES = 15 * 1024 * 1024; // 15 MB
+const SERVABLE_EVIDENCE_STATES = new Set(["verified", "retained", "legal_hold"]);
 
 type EvidenceOrderScope = { customerId: string; assignedPartnerId: string | null };
 
@@ -214,6 +218,14 @@ export async function registerEvidence(
   if (!/^[a-f0-9]{64}$/.test(input.sha256)) {
     throw new AppError("VALIDATION_ERROR", "SHA256_FORMAT_INVALID");
   }
+  const mimeType = input.mimeType ?? "image/jpeg";
+  if (!ALLOWED_EVIDENCE_MIME_TYPES.has(mimeType)) {
+    throw new AppError("VALIDATION_ERROR", "EVIDENCE_MIME_NOT_ALLOWED", { mimeType });
+  }
+  const sizeBytes = input.sizeBytes ?? 0;
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 0 || sizeBytes > MAX_EVIDENCE_BYTES) {
+    throw new AppError("VALIDATION_ERROR", "EVIDENCE_SIZE_INVALID", { sizeBytes, maxBytes: MAX_EVIDENCE_BYTES });
+  }
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "evidence:register", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
@@ -228,12 +240,102 @@ export async function registerEvidence(
       objectKey: input.objectKey,
       sha256: input.sha256,
       purpose: input.purpose,
-      mimeType: input.mimeType ?? "image/jpeg",
-      sizeBytes: input.sizeBytes ?? 0,
+      mimeType,
+      sizeBytes,
       status: "pending_upload",
       createdBy: principal.userId,
     }).returning({ id: evidenceAssets.id });
     return { evidenceId: asset.id, status: "pending_upload" as const };
+  });
+}
+
+/**
+ * Verifies uploaded evidence bytes against the registered SHA-256 digest, MIME allowlist and
+ * 15 MB size ceiling, then transitions the asset from `pending_upload` to `verified`.
+ */
+export async function uploadEvidence(
+  db: Db,
+  principal: Principal,
+  input: {
+    evidenceId: string;
+    contentBase64?: string;
+    bytes?: Buffer;
+    mimeType?: string;
+    key: string;
+  },
+) {
+  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  const payloadBytes = input.bytes ?? (input.contentBase64 !== undefined ? Buffer.from(input.contentBase64, "base64") : null);
+  if (!payloadBytes || payloadBytes.byteLength === 0 || payloadBytes.byteLength > MAX_EVIDENCE_BYTES) {
+    throw new AppError("VALIDATION_ERROR", "EVIDENCE_SIZE_INVALID", {
+      sizeBytes: payloadBytes?.byteLength ?? 0,
+      maxBytes: MAX_EVIDENCE_BYTES,
+    });
+  }
+  const actualSha256 = createHash("sha256").update(payloadBytes).digest("hex");
+
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "evidence:upload",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({
+      evidenceId: input.evidenceId,
+      actualSha256,
+      mimeType: input.mimeType ?? null,
+      sizeBytes: payloadBytes.byteLength,
+      actorId: principal.userId,
+    }),
+  }, async tx => {
+    const [asset] = await tx.select().from(evidenceAssets).where(and(
+      eq(evidenceAssets.id, input.evidenceId),
+      eq(evidenceAssets.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!asset) throw errors.notFound("evidence");
+    await authorizeEvidenceOwner(tx, principal, asset);
+    if (asset.deletedAt !== null || asset.status === "expired") {
+      throw errors.notFound("evidence");
+    }
+    if (asset.status === "quarantined") {
+      throw new AppError("FORBIDDEN", "EVIDENCE_QUARANTINED", { evidenceId: asset.id });
+    }
+    const effectiveMime = input.mimeType ?? asset.mimeType;
+    if (!ALLOWED_EVIDENCE_MIME_TYPES.has(effectiveMime)) {
+      throw new AppError("VALIDATION_ERROR", "EVIDENCE_MIME_NOT_ALLOWED", { mimeType: effectiveMime });
+    }
+    if (actualSha256 !== asset.sha256) {
+      throw new AppError("VALIDATION_ERROR", "EVIDENCE_SHA256_MISMATCH", {
+        expected: asset.sha256,
+        actual: actualSha256,
+      });
+    }
+    if (asset.status === "pending_upload") {
+      await tx.update(evidenceAssets).set({
+        status: "verified",
+        mimeType: effectiveMime,
+        sizeBytes: payloadBytes.byteLength,
+      }).where(eq(evidenceAssets.id, asset.id));
+      await appendEvent(tx, {
+        principal,
+        aggregateType: "evidence",
+        aggregateId: asset.id,
+        eventType: "evidence.verified",
+        payload: {
+          ownerType: asset.ownerType,
+          ownerId: asset.ownerId,
+          sha256: actualSha256,
+          mimeType: effectiveMime,
+          sizeBytes: payloadBytes.byteLength,
+        },
+      });
+    }
+    return {
+      evidenceId: asset.id,
+      status: asset.status === "pending_upload" ? ("verified" as const) : asset.status,
+      sha256: actualSha256,
+      mimeType: effectiveMime,
+      sizeBytes: payloadBytes.byteLength,
+    };
   });
 }
 
@@ -256,7 +358,8 @@ export async function listEvidence(db: Db, principal: Principal, ownerType: stri
     eq(evidenceAssets.organizationId, principal.organizationId),
     eq(evidenceAssets.ownerType, ownerType),
     eq(evidenceAssets.ownerId, ownerId),
-    ne(evidenceAssets.status, TOMBSTONE_STATUS),
+    isNull(evidenceAssets.deletedAt),
+    ne(evidenceAssets.status, "expired"),
   )).orderBy(desc(evidenceAssets.capturedAt));
   // Reading evidence is itself auditable: every list access is logged.
   if (rows.length) {
@@ -303,7 +406,8 @@ export async function listGarmentEvidence(db: Db, principal: Principal, garmentI
     .where(and(
       eq(garmentEvidence.organizationId, principal.organizationId),
       eq(garmentEvidence.garmentId, garment.id),
-      ne(evidenceAssets.status, TOMBSTONE_STATUS),
+      isNull(evidenceAssets.deletedAt),
+      ne(evidenceAssets.status, "expired"),
     ))
     .orderBy(desc(evidenceAssets.capturedAt));
   if (rows.length) {
@@ -329,6 +433,7 @@ export async function readEvidence(db: Db, principal: Principal, evidenceId: str
     mimeType: evidenceAssets.mimeType,
     sizeBytes: evidenceAssets.sizeBytes,
     status: evidenceAssets.status,
+    deletedAt: evidenceAssets.deletedAt,
     capturedAt: evidenceAssets.capturedAt,
   }).from(evidenceAssets).where(and(
     eq(evidenceAssets.id, evidenceId),
@@ -336,7 +441,10 @@ export async function readEvidence(db: Db, principal: Principal, evidenceId: str
   )).limit(1);
   if (!asset) throw errors.notFound("evidence");
   await authorizeEvidenceOwner(db, principal, asset);
-  if (asset.status === TOMBSTONE_STATUS) throw errors.notFound("evidence");
+  if (asset.deletedAt !== null || asset.status === "expired") throw errors.notFound("evidence");
+  if (!SERVABLE_EVIDENCE_STATES.has(asset.status)) {
+    throw new AppError("FORBIDDEN", "EVIDENCE_NOT_VERIFIED", { status: asset.status });
+  }
   await db.insert(evidenceAccessEvents).values({
     assetId: asset.id, actorId: principal.userId, purpose: "owner_read",
   });
@@ -374,7 +482,7 @@ export async function deleteEvidence(
 
     await authorizeEvidenceOwner(tx, principal, asset);
 
-    if (asset.status === "legal_hold") {
+    if (asset.legalHoldCount > 0 || asset.status === "legal_hold") {
       throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id });
     }
     const [activeHold] = await tx.select({ id: evidenceLegalHolds.id }).from(evidenceLegalHolds).where(and(
@@ -386,14 +494,14 @@ export async function deleteEvidence(
       throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id, holdId: activeHold.id });
     }
 
-    // Tombstone, never erase: the asset row, its access events and its legal holds all stay, so
-    // the audit trail of who read or held this evidence survives the deletion.
-    if (asset.status === TOMBSTONE_STATUS) {
+    // Tombstone via `deleted_at`, never erase: the asset row, its access events and its legal holds
+    // all stay intact so the audit trail survives deletion without overloading `status = 'expired'`.
+    if (asset.deletedAt !== null) {
       return { evidenceId: asset.id, deleted: true as const, alreadyDeleted: true as const };
     }
+    const deletedAt = new Date();
     await tx.update(evidenceAssets).set({
-      status: TOMBSTONE_STATUS,
-      retentionUntil: new Date(),
+      deletedAt,
     }).where(eq(evidenceAssets.id, asset.id));
     await appendEvent(tx, {
       principal,
@@ -401,10 +509,100 @@ export async function deleteEvidence(
       aggregateId: asset.id,
       eventType: "evidence.deleted",
       // The digest identifies the object for the audit trail; the storage key is never published.
-      payload: { ownerType: asset.ownerType, ownerId: asset.ownerId, sha256: asset.sha256 },
+      payload: { ownerType: asset.ownerType, ownerId: asset.ownerId, sha256: asset.sha256, deletedAt: deletedAt.toISOString() },
     });
-    return { evidenceId: asset.id, deleted: true as const };
+    return { evidenceId: asset.id, deleted: true as const, deletedAt };
   });
+}
+
+/**
+ * Retention sweep: expires evidence assets past `retention_until` that have no active legal holds
+ * and have not yet been tombstoned, while preserving `evidence_access_events` and `evidence_legal_holds`.
+ */
+export async function runEvidenceRetentionSweep(db: Db, now = new Date()) {
+  const expired = await db.update(evidenceAssets)
+    .set({ status: "expired", deletedAt: now })
+    .where(and(
+      lte(evidenceAssets.retentionUntil, now),
+      eq(evidenceAssets.legalHoldCount, 0),
+      isNull(evidenceAssets.deletedAt),
+      sql`NOT EXISTS (
+        SELECT 1 FROM evidence_legal_holds h
+        WHERE h.asset_id = ${evidenceAssets.id} AND h.released_at IS NULL
+      )`,
+    ))
+    .returning({ id: evidenceAssets.id });
+  return { expired: expired.length, expiredIds: expired.map(row => row.id) };
+}
+
+/**
+ * Privacy export for the signed-in user: returns only the caller's own non-internal records
+ * scoped to their tenant. Never exposes internal hashes, door codes, storage keys, or other users' data.
+ */
+export async function exportMyPrivacyData(db: Db, principal: Principal) {
+  const [[user], addressRows, orderRows, claimRows, notificationRows] = await Promise.all([
+    db.select({
+      id: users.id,
+      phone: users.phone,
+      displayName: users.displayName,
+      createdAt: users.createdAt,
+    }).from(users).where(eq(users.id, principal.userId)).limit(1),
+    db.select({
+      id: customerAddresses.id,
+      buildingId: customerAddresses.buildingId,
+      address: buildings.address,
+      apartment: customerAddresses.apartment,
+      notes: customerAddresses.notes,
+      createdAt: customerAddresses.createdAt,
+    }).from(customerAddresses)
+      .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
+      .where(and(
+        eq(customerAddresses.organizationId, principal.organizationId),
+        eq(customerAddresses.customerId, principal.userId),
+      ))
+      .orderBy(desc(customerAddresses.createdAt))
+      .limit(100),
+    db.select({
+      id: orders.id,
+      publicNumber: orders.publicNumber,
+      lifecycleState: orders.lifecycleState,
+      createdAt: orders.createdAt,
+    }).from(orders).where(and(
+      eq(orders.organizationId, principal.organizationId),
+      eq(orders.customerId, principal.userId),
+    )).orderBy(desc(orders.createdAt)).limit(200),
+    db.select({
+      id: claims.id,
+      orderId: claims.orderId,
+      claimType: claims.claimType,
+      state: claims.state,
+      description: claims.description,
+      openedAt: claims.openedAt,
+    }).from(claims).where(and(
+      eq(claims.organizationId, principal.organizationId),
+      eq(claims.openedBy, principal.userId),
+    )).orderBy(desc(claims.openedAt)).limit(100),
+    db.select({
+      id: notifications.id,
+      orderId: notifications.orderId,
+      channel: notifications.channel,
+      template: notifications.template,
+      readAt: notifications.readAt,
+      createdAt: notifications.createdAt,
+    }).from(notifications).where(and(
+      eq(notifications.organizationId, principal.organizationId),
+      eq(notifications.recipientId, principal.userId),
+    )).orderBy(desc(notifications.createdAt)).limit(200),
+  ]);
+
+  return {
+    exportedAt: new Date().toISOString(),
+    profile: user ?? { id: principal.userId, phone: null, displayName: null, createdAt: null },
+    addresses: addressRows,
+    orders: orderRows,
+    claims: claimRows,
+    notifications: notificationRows,
+  };
 }
 
 /**

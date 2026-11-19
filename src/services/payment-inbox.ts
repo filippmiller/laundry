@@ -18,13 +18,21 @@ type ClaimedEvent = {
 };
 
 /**
- * Leased inbox processing: rows are claimed with FOR UPDATE SKIP LOCKED, so several workers can
- * drain the queue without applying one provider event twice. A row that keeps failing stays
- * visible with its error instead of being silently dropped.
+ * Leased inbox processing: rows are claimed with FOR UPDATE SKIP LOCKED in a short claim
+ * transaction, then each claimed event runs in its OWN independent transaction so a failure
+ * mid-event rolls back ALL of that event's writes (`payment_intents`, `ledger_entries`, etc.),
+ * records the error cleanly in `payment_events`, and never aborts or corrupts sibling events.
  */
-export async function processPaymentInbox(db: Db, input: { limit?: number } = {}) {
+export async function processPaymentInbox(
+  db: Db,
+  input: {
+    limit?: number;
+    /** Optional hook invoked inside the per-event transaction after `applyEvent` (used for failpoint tests). */
+    afterApply?: (event: ClaimedEvent, tx: Tx) => Promise<void> | void;
+  } = {},
+) {
   const limit = Math.min(input.limit ?? 50, 200);
-  return db.transaction(async tx => {
+  const rows = await db.transaction(async tx => {
     const claimed = await tx.execute(sql`
       UPDATE payment_events SET state = 'processing', attempts = attempts + 1
       WHERE id IN (
@@ -37,12 +45,15 @@ export async function processPaymentInbox(db: Db, input: { limit?: number } = {}
       RETURNING id, organization_id AS "organizationId", event_type AS "eventType",
                 payment_intent_id AS "paymentIntentId", attempts
     `);
-    const rows = claimed.rows as unknown as ClaimedEvent[];
-    let processed = 0;
-    let failed = 0;
+    return claimed.rows as unknown as ClaimedEvent[];
+  });
 
-    for (const row of rows) {
-      try {
+  let processed = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    try {
+      await db.transaction(async tx => {
         if (!row.paymentIntentId) throw new Error("INTENT_MISSING");
         const [intent] = await tx.select().from(paymentIntents).where(and(
           eq(paymentIntents.id, row.paymentIntentId),
@@ -50,19 +61,22 @@ export async function processPaymentInbox(db: Db, input: { limit?: number } = {}
         )).limit(1);
         if (!intent) throw new Error("INTENT_NOT_FOUND");
         await applyEvent(tx, row.eventType, intent);
+        if (input.afterApply) {
+          await input.afterApply(row, tx);
+        }
         await tx.update(paymentEvents)
           .set({ state: "processed", processedAt: new Date(), error: null })
           .where(eq(paymentEvents.id, row.id));
-        processed += 1;
-      } catch (error) {
-        await tx.update(paymentEvents)
-          .set({ state: "failed", error: (error as Error)?.message ?? "UNKNOWN" })
-          .where(eq(paymentEvents.id, row.id));
-        failed += 1;
-      }
+      });
+      processed += 1;
+    } catch (error) {
+      await db.update(paymentEvents)
+        .set({ state: "failed", error: (error as Error)?.message ?? "UNKNOWN" })
+        .where(eq(paymentEvents.id, row.id));
+      failed += 1;
     }
-    return { claimed: rows.length, processed, failed };
-  });
+  }
+  return { claimed: rows.length, processed, failed };
 }
 
 type Intent = typeof paymentIntents.$inferSelect;

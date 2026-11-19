@@ -63,6 +63,7 @@ export const evidenceAssets = pgTable("evidence_assets", {
   retentionUntil: timestamp("retention_until", { withTimezone: true }),
   legalHoldCount: integer("legal_hold_count").notNull().default(0),
   status: evidenceState("status").notNull().default("pending_upload"),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdBy: uuid("created_by").references(() => users.id),
 }, t => [
   uniqueIndex("evidence_object_key_unique").on(t.objectKey),

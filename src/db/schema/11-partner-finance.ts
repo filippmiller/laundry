@@ -52,5 +52,8 @@ export const partnerPayouts = pgTable("partner_payouts", {
   amountKopeks: bigint("amount_kopeks", { mode: "number" }).notNull(),
   state: text("state").notNull().default("scheduled"),
   reference: text("reference"),
+  createdBy: uuid("created_by").references(() => users.id),
+  approvedBy: uuid("approved_by").references(() => users.id),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [index("partner_payouts_partner_idx").on(t.organizationId, t.partnerId)]);

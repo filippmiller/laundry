@@ -259,10 +259,10 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Lane D evidence ABAC", () => {
     const deleted = await deleteEvidence(db, s.customerA, { evidenceId: s.orderEvidence.evidenceId, key: `del-${rid()}` });
     expect(deleted.deleted).toBe(true);
 
-    // The asset is tombstoned, not erased, and its access events are kept.
+    // The asset is tombstoned via deleted_at, not erased, and its access events are kept.
     const [asset] = await db.select().from(evidenceAssets).where(eq(evidenceAssets.id, s.orderEvidence.evidenceId));
     expect(asset).toBeDefined();
-    expect(asset.status).toBe("expired");
+    expect(asset.deletedAt).not.toBeNull();
     const access = await db.select().from(evidenceAccessEvents)
       .where(eq(evidenceAccessEvents.assetId, s.orderEvidence.evidenceId));
     expect(access.length).toBeGreaterThan(0);

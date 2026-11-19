@@ -24,8 +24,9 @@ import {
 import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt, startStop, dispatchOverview } from "../services/delivery.js";
 import { decideClaim, getClaim, openClaim, reopenClaim } from "../services/claims.js";
 import {
-  capturePayment, createCustomerInvoice, createPartnerInvoice, disputePartnerLine, handlePaymentWebhook,
-  orderFinance, partnerAccruals, refundPayment,
+  approvePartnerCreditNote, approvePartnerPayout, capturePayment, createCustomerInvoice, createPartnerInvoice,
+  createPartnerPayout, disputePartnerLine, handlePaymentWebhook, orderFinance, partnerAccruals, refundPayment,
+  settleClaimCompensation,
 } from "../services/finance.js";
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
 import { MAX_DECLARED_ROWS, MAX_PICKED_QUANTITY } from "../../shared/garment-taxonomy.js";
@@ -42,8 +43,8 @@ import {
 } from "../services/customer.js";
 import { completeShift, currentShift, openShift } from "../services/courier-shift.js";
 import {
-  decideCompensation, deleteEvidence, listEvidence, listMySessions, opsMetrics, proposeCompensation,
-  readEvidence, registerEvidence, revokeOwnSession, searchOrders,
+  decideCompensation, deleteEvidence, exportMyPrivacyData, listEvidence, listMySessions, opsMetrics,
+  proposeCompensation, readEvidence, registerEvidence, revokeOwnSession, searchOrders, uploadEvidence,
 } from "../services/workspace.js";
 import { seedDemo } from "../services/seed.js";
 import { apiFinanceOverview } from "../services/api-overview.js";
@@ -100,6 +101,8 @@ type RouteDef = {
   roles?: Role[];
   /** Per-route abuse limit; falls back to the global limiter. */
   rateLimit?: { max: number; timeWindow: string };
+  /** Optional per-route body size override (e.g. evidence upload). */
+  bodyLimit?: number;
   public?: boolean;
   body?: z.ZodType;
   query?: z.ZodType;
@@ -249,6 +252,7 @@ export function buildApp(db: Db) {
       app.route({
         method: def.method,
         url: `/api/v1${def.path}`,
+        bodyLimit: def.bodyLimit,
         config: def.rateLimit ? { rateLimit: def.rateLimit } : undefined,
         preHandler: def.public
           ? (def.method === "POST" && def.path !== "/webhooks/payments/:provider" ? originHook : undefined)
@@ -442,6 +446,10 @@ export function buildApp(db: Db) {
   add({
     method: "GET", path: "/me", summary: "Current principal", tags: ["Auth"],
     handler: ctx => ({ ...ctx.principal, sessionId: undefined }),
+  });
+  add({
+    method: "GET", path: "/me/privacy-export", summary: "Export signed-in user's non-internal personal data", tags: ["Auth", "Customer"],
+    handler: ctx => exportMyPrivacyData(db, ctx.principal),
   });
   add({
     method: "GET", path: "/auth/sessions", summary: "My active sessions", tags: ["Auth"],
@@ -945,6 +953,22 @@ export function buildApp(db: Db) {
     handler: ctx => readEvidence(db, ctx.principal, ctx.params.id),
   });
   add({
+    method: "POST", path: "/evidence/:id/upload", summary: "Upload and verify evidence bytes against SHA-256, MIME allowlist and size ceiling", tags: ["Customer", "Support"],
+    params: idSchema,
+    bodyLimit: 22 * 1024 * 1024,
+    body: z.object({
+      contentBase64: z.string().min(1),
+      mimeType: z.string().max(80).optional(),
+      key: z.string().min(1).optional(),
+    }),
+    handler: ctx => uploadEvidence(db, ctx.principal, {
+      evidenceId: ctx.params.id,
+      contentBase64: ctx.body.contentBase64,
+      mimeType: ctx.body.mimeType,
+      key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
     method: "DELETE", path: "/evidence/:id", summary: "Delete evidence asset unless under legal hold", tags: ["Customer", "Support"],
     params: idSchema,
     handler: ctx => deleteEvidence(db, ctx.principal, {
@@ -958,6 +982,17 @@ export function buildApp(db: Db) {
     body: z.object({ amountKopeks: z.number().int().min(1), key: z.string().min(1).optional() }),
     handler: ctx => proposeCompensation(db, ctx.principal, {
       claimId: ctx.params.id, amountKopeks: ctx.body.amountKopeks, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/claims/:id/compensation/settle", summary: "Finance settles an approved claim compensation", tags: ["Finance"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    body: z.object({ compensationId: z.uuid().optional(), key: z.string().min(1).optional() }),
+    handler: ctx => settleClaimCompensation(db, ctx.principal, {
+      claimId: ctx.params.id,
+      compensationId: ctx.body.compensationId,
+      key: ctx.body.key ?? idempotencyKey(ctx),
     }),
   });
   add({
@@ -1094,6 +1129,42 @@ export function buildApp(db: Db) {
     params: idSchema, body: z.object({ reason: z.string().min(5), key: z.string().optional() }),
     handler: ctx => disputePartnerLine(db, ctx.principal, {
       lineId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/finance/partner-credit-notes/:id/approve", summary: "Approve a partner credit note", tags: ["Finance"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    body: z.object({ key: z.string().min(1).optional() }),
+    handler: ctx => approvePartnerCreditNote(db, ctx.principal, {
+      creditNoteId: ctx.params.id,
+      key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/finance/partner-payouts", summary: "Schedule a partner payout (requires second approver)", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    body: z.object({
+      partnerId: z.uuid(),
+      amountKopeks: z.number().int().positive(),
+      reference: z.string().max(120).optional(),
+      key: z.string().min(1).optional(),
+    }),
+    handler: ctx => createPartnerPayout(db, ctx.principal, {
+      partnerId: ctx.body.partnerId,
+      amountKopeks: ctx.body.amountKopeks,
+      reference: ctx.body.reference,
+      key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/finance/partner-payouts/:id/approve", summary: "Approve a scheduled partner payout (dual-control)", tags: ["Finance"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    body: z.object({ key: z.string().min(1).optional() }),
+    handler: ctx => approvePartnerPayout(db, ctx.principal, {
+      payoutId: ctx.params.id,
+      key: ctx.body.key ?? idempotencyKey(ctx),
     }),
   });
   add({

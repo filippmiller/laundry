@@ -14,6 +14,8 @@ export type VrptwStopInput = {
   orderId: string;
   buildingId: string;
   address: string;
+  lat?: number | null;
+  lng?: number | null;
   kind: string;
   windowStart: Date | null;
   windowEnd: Date | null;
@@ -23,7 +25,14 @@ export type VrptwStopInput = {
 export type VrptwOptions = {
   vehicleCapacityGrams?: number;
   depot?: { lat: number; lon: number };
+  /**
+   * Explicit opt-in for synthetic SHA-256 coordinate simulation when real building coordinates
+   * are missing. Blocked in production unless `ALLOW_ROUTING_SIMULATION=true`.
+   */
+  simulationOnly?: boolean;
 };
+
+export type RoutingMode = "GEOCODED" | "MANUAL_ORDER" | "SIMULATION_ONLY";
 
 export type VrptwResult = {
   orderedStopIds: string[];
@@ -32,7 +41,9 @@ export type VrptwResult = {
   optimizedDistanceMeters: number;
   savedMeters: number;
   consolidatedBuildings: number;
-  engine: "builtin_vrptw_2opt" | "vroom";
+  mode: RoutingMode;
+  distanceVerified: boolean;
+  engine: "builtin_vrptw_2opt" | "vroom" | "manual_order";
 };
 
 const DEFAULT_DEPOT = { lat: 55.7558, lon: 37.6173 };
@@ -56,7 +67,19 @@ export function haversineMeters(a: { lat: number; lon: number }, b: { lat: numbe
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-/** Deterministic coordinate lookup within the Moscow courtyard grid. */
+export function hasValidCoords(stop: { lat?: number | null; lng?: number | null }): boolean {
+  return typeof stop.lat === "number"
+    && typeof stop.lng === "number"
+    && Number.isFinite(stop.lat)
+    && Number.isFinite(stop.lng)
+    && stop.lat >= -90 && stop.lat <= 90
+    && stop.lng >= -180 && stop.lng <= 180;
+}
+
+/**
+ * Deterministic synthetic coordinate generator within the Moscow courtyard grid.
+ * Used ONLY when `simulationOnly: true` is explicitly requested in non-production environments.
+ */
 export function buildingCoords(buildingId: string, address: string): { lat: number; lon: number } {
   const seed = buildingId.trim() || address.trim() || "moscow-default";
   const digest = createHash("sha256").update(seed).digest();
@@ -66,6 +89,16 @@ export function buildingCoords(buildingId: string, address: string): { lat: numb
     lat: 55.65 + u * 0.20,
     lon: 37.45 + v * 0.34,
   };
+}
+
+function resolveStopCoords(stop: VrptwStopInput, allowSimulation: boolean): { lat: number; lon: number } {
+  if (hasValidCoords(stop)) {
+    return { lat: stop.lat!, lon: stop.lng! };
+  }
+  if (allowSimulation) {
+    return buildingCoords(stop.buildingId, stop.address);
+  }
+  throw new AppError("VALIDATION_ERROR", "BUILDING_COORDS_MISSING", { buildingId: stop.buildingId });
 }
 
 function tourDistanceMeters(coords: Array<{ lat: number; lon: number }>, depot: { lat: number; lon: number }): number {
@@ -86,7 +119,7 @@ type BuildingGroup = {
   earliestEndMs: number;
 };
 
-function groupStopsByBuilding(stops: VrptwStopInput[]): BuildingGroup[] {
+function groupStopsByBuilding(stops: VrptwStopInput[], allowSimulation: boolean): BuildingGroup[] {
   const byKey = new Map<string, VrptwStopInput[]>();
   for (const stop of stops) {
     const key = stop.buildingId || stop.address || stop.stopId;
@@ -116,7 +149,7 @@ function groupStopsByBuilding(stops: VrptwStopInput[]): BuildingGroup[] {
     );
     groups.push({
       key,
-      coords: buildingCoords(first.buildingId, first.address),
+      coords: resolveStopCoords(first, allowSimulation),
       stops: sorted,
       earliestStartMs,
       earliestEndMs,
@@ -179,7 +212,7 @@ function twoOpt(groups: BuildingGroup[], depot: { lat: number; lon: number }, in
 export function solveVrptwRoute(
   stops: VrptwStopInput[],
   options: VrptwOptions = {},
-): Omit<VrptwResult, "engine"> & { engine: "builtin_vrptw_2opt" } {
+): VrptwResult {
   const depot = options.depot ?? DEFAULT_DEPOT;
   if (options.vehicleCapacityGrams !== undefined && options.vehicleCapacityGrams >= 0) {
     const totalWeightGrams = stops.reduce((sum, stop) => sum + Math.max(0, stop.weightGrams), 0);
@@ -199,14 +232,68 @@ export function solveVrptwRoute(
       optimizedDistanceMeters: 0,
       savedMeters: 0,
       consolidatedBuildings: 0,
+      mode: "GEOCODED",
+      distanceVerified: true,
       engine: "builtin_vrptw_2opt" as const,
     };
   }
 
-  const naiveCoords = stops.map(stop => buildingCoords(stop.buildingId, stop.address));
+  const allGeocoded = stops.every(hasValidCoords);
+  if (!allGeocoded) {
+    if (options.simulationOnly) {
+      if (process.env.NODE_ENV === "production" && process.env.ALLOW_ROUTING_SIMULATION !== "true") {
+        throw new AppError("FORBIDDEN", "ROUTING_SIMULATION_FORBIDDEN_IN_PRODUCTION");
+      }
+    } else {
+      // Honest manual-ordering fallback: consolidate stops by building and order by time-window
+      // urgency without fabricating distances or savedMeters.
+      const byKey = new Map<string, VrptwStopInput[]>();
+      for (const stop of stops) {
+        const key = stop.buildingId || stop.address || stop.stopId;
+        const list = byKey.get(key);
+        if (list) list.push(stop);
+        else byKey.set(key, [stop]);
+      }
+      const manualGroups = [...byKey.values()].map(groupStops => {
+        const sorted = [...groupStops].sort((a, b) => {
+          const endA = a.windowEnd ? a.windowEnd.getTime() : Number.POSITIVE_INFINITY;
+          const endB = b.windowEnd ? b.windowEnd.getTime() : Number.POSITIVE_INFINITY;
+          if (endA !== endB) return endA - endB;
+          const startA = a.windowStart ? a.windowStart.getTime() : Number.POSITIVE_INFINITY;
+          const startB = b.windowStart ? b.windowStart.getTime() : Number.POSITIVE_INFINITY;
+          return startA - startB;
+        });
+        const earliestEndMs = sorted.reduce(
+          (min, s) => Math.min(min, s.windowEnd ? s.windowEnd.getTime() : Number.POSITIVE_INFINITY),
+          Number.POSITIVE_INFINITY,
+        );
+        return { stops: sorted, earliestEndMs };
+      });
+      manualGroups.sort((a, b) => a.earliestEndMs - b.earliestEndMs);
+      const orderedStops = manualGroups.flatMap(g => g.stops);
+      const consolidatedBuildings = manualGroups.filter(g => g.stops.length > 1).length;
+      return {
+        orderedStopIds: orderedStops.map(stop => stop.stopId),
+        orderedStops,
+        naiveDistanceMeters: 0,
+        optimizedDistanceMeters: 0,
+        savedMeters: 0,
+        consolidatedBuildings,
+        mode: "MANUAL_ORDER",
+        distanceVerified: false,
+        engine: "manual_order",
+      };
+    }
+  }
+
+  const allowSimulation = !allGeocoded && Boolean(options.simulationOnly);
+  const mode: RoutingMode = allGeocoded ? "GEOCODED" : "SIMULATION_ONLY";
+  const distanceVerified = allGeocoded;
+
+  const naiveCoords = stops.map(stop => resolveStopCoords(stop, allowSimulation));
   const naiveDistanceMeters = Math.round(tourDistanceMeters(naiveCoords, depot));
 
-  const groups = groupStopsByBuilding(stops);
+  const groups = groupStopsByBuilding(stops, allowSimulation);
   const consolidatedBuildings = groups.filter(group => group.stops.length > 1).length;
 
   const finiteStarts = groups.map(g => g.earliestStartMs).filter(Number.isFinite);
@@ -268,7 +355,7 @@ export function solveVrptwRoute(
 
   const orderedStops = bestGroups.flatMap(group => group.stops);
   const optimizedDistanceMeters = Math.round(
-    tourDistanceMeters(orderedStops.map(stop => buildingCoords(stop.buildingId, stop.address)), depot),
+    tourDistanceMeters(orderedStops.map(stop => resolveStopCoords(stop, allowSimulation)), depot),
   );
   const savedMeters = Math.max(0, naiveDistanceMeters - optimizedDistanceMeters);
 
@@ -279,6 +366,8 @@ export function solveVrptwRoute(
     optimizedDistanceMeters,
     savedMeters,
     consolidatedBuildings,
+    mode,
+    distanceVerified,
     engine: "builtin_vrptw_2opt" as const,
   };
 }
@@ -286,12 +375,13 @@ export function solveVrptwRoute(
 async function tryVroomSolve(
   vroomUrl: string,
   stops: VrptwStopInput[],
-  fallback: Omit<VrptwResult, "engine"> & { engine: "builtin_vrptw_2opt" },
+  fallback: VrptwResult,
   vehicleCapacityGrams?: number,
 ): Promise<VrptwResult> {
+  if (!fallback.distanceVerified) return fallback;
   const depot = DEFAULT_DEPOT;
   const jobs = stops.map((stop, idx) => {
-    const coords = buildingCoords(stop.buildingId, stop.address);
+    const coords = resolveStopCoords(stop, false);
     const job: Record<string, unknown> = {
       id: idx + 1,
       location: [coords.lon, coords.lat],
@@ -339,7 +429,7 @@ async function tryVroomSolve(
     }
     const vroomDist = typeof data?.routes?.[0]?.distance === "number"
       ? Math.round(data.routes[0].distance)
-      : Math.round(tourDistanceMeters(orderedStops.map(s => buildingCoords(s.buildingId, s.address)), depot));
+      : Math.round(tourDistanceMeters(orderedStops.map(s => resolveStopCoords(s, false)), depot));
 
     return {
       orderedStopIds: orderedStops.map(s => s.stopId),
@@ -348,6 +438,8 @@ async function tryVroomSolve(
       optimizedDistanceMeters: vroomDist,
       savedMeters: Math.max(0, fallback.naiveDistanceMeters - vroomDist),
       consolidatedBuildings: fallback.consolidatedBuildings,
+      mode: "GEOCODED",
+      distanceVerified: true,
       engine: "vroom" as const,
     };
   } catch {
@@ -358,7 +450,7 @@ async function tryVroomSolve(
 export async function optimizeShiftRoutes(
   db: Db,
   principal: Principal,
-  input: { shiftId: string; vehicleCapacityGrams?: number; key: string },
+  input: { shiftId: string; vehicleCapacityGrams?: number; simulationOnly?: boolean; key: string },
 ) {
   assertRole(principal, ...ROLE_GROUPS.dispatcher);
   return withIdempotencyFlat(db, {
@@ -399,6 +491,8 @@ export async function optimizeShiftRoutes(
         optimizedDistanceMeters: 0,
         savedMeters: 0,
         consolidatedBuildings: 0,
+        mode: "GEOCODED" as RoutingMode,
+        distanceVerified: true,
         engine: "builtin_vrptw_2opt" as const,
         updatedStops: 0,
         updatedRoutes: 0,
@@ -412,6 +506,8 @@ export async function optimizeShiftRoutes(
       orderId: routeStops.orderId,
       buildingId: sql<string>`COALESCE(${routeStops.buildingId}, ${customerAddresses.buildingId})`,
       address: buildings.address,
+      lat: buildings.lat,
+      lng: buildings.lng,
       kind: routeStops.kind,
       state: routeStops.state,
       sequence: routeStops.sequence,
@@ -438,6 +534,8 @@ export async function optimizeShiftRoutes(
         optimizedDistanceMeters: 0,
         savedMeters: 0,
         consolidatedBuildings: 0,
+        mode: "GEOCODED" as RoutingMode,
+        distanceVerified: true,
         engine: "builtin_vrptw_2opt" as const,
         updatedStops: 0,
         updatedRoutes: 0,
@@ -478,6 +576,8 @@ export async function optimizeShiftRoutes(
         orderId: row.orderId,
         buildingId: row.buildingId,
         address: row.address,
+        lat: row.lat,
+        lng: row.lng,
         kind: row.kind,
         windowStart: row.windowStart,
         windowEnd: row.windowEnd,
@@ -485,9 +585,12 @@ export async function optimizeShiftRoutes(
       };
     });
 
-    const fallback = solveVrptwRoute(solverStops, { vehicleCapacityGrams: vehicleCapacity });
+    const fallback = solveVrptwRoute(solverStops, {
+      vehicleCapacityGrams: vehicleCapacity,
+      simulationOnly: input.simulationOnly,
+    });
     const vroomUrl = process.env.VROOM_URL?.trim();
-    const solved: VrptwResult = vroomUrl
+    const solved: VrptwResult = vroomUrl && fallback.distanceVerified
       ? await tryVroomSolve(vroomUrl, solverStops, fallback, vehicleCapacity)
       : fallback;
 
@@ -559,6 +662,8 @@ export async function optimizeShiftRoutes(
         optimizedDistanceMeters: solved.optimizedDistanceMeters,
         savedMeters: solved.savedMeters,
         consolidatedBuildings: solved.consolidatedBuildings,
+        mode: solved.mode,
+        distanceVerified: solved.distanceVerified,
         engine: solved.engine,
       },
     });
@@ -571,6 +676,8 @@ export async function optimizeShiftRoutes(
       optimizedDistanceMeters: solved.optimizedDistanceMeters,
       savedMeters: solved.savedMeters,
       consolidatedBuildings: solved.consolidatedBuildings,
+      mode: solved.mode,
+      distanceVerified: solved.distanceVerified,
       engine: solved.engine,
       updatedStops: solved.orderedStops.length,
       updatedRoutes: touchedRouteIds.length,

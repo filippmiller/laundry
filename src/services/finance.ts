@@ -1,10 +1,10 @@
 import { and, asc, desc, eq, inArray, notInArray, or, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
-  compensations, customerApprovals, customerInvoiceLines, customerInvoices, fiscalReceipts,
+  claims, compensations, customerApprovals, customerInvoiceLines, customerInvoices, fiscalReceipts,
   garments, intakeManifestLines, intakeManifests, ledgerAccounts, ledgerEntries, ledgerJournals,
-  orderAdjustments, orderLines, orders, organizations, partnerDisputes, partnerInvoiceLines,
-  partnerInvoices, partners, partnerServiceAccruals, paymentEvents, paymentIntents, quotes,
+  orderAdjustments, orderLines, orders, organizations, partnerCreditNotes, partnerDisputes, partnerInvoiceLines,
+  partnerInvoices, partnerPayouts, partners, partnerServiceAccruals, paymentEvents, paymentIntents, quotes,
   refunds, services, users,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -900,4 +900,259 @@ export async function renderRussianDocument(
     return buildCustomerInvoiceDoc(db, principal.organizationId, legalSeller, cInvoice, true);
   }
   throw errors.notFound("upd_draft");
+}
+
+/** Finance/admin approval of a partner credit note; posts a balancing partner_payable adjustment. */
+export async function approvePartnerCreditNote(
+  db: Db,
+  principal: Principal,
+  input: { creditNoteId: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "finance:partner_credit_note_approve",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const locked = await tx.execute(sql`
+      SELECT id FROM partner_credit_notes
+      WHERE id = ${input.creditNoteId} AND organization_id = ${principal.organizationId}
+      FOR UPDATE
+    `);
+    if (!(locked.rows as unknown[]).length) throw errors.notFound("partner credit note");
+    const [note] = await tx.select().from(partnerCreditNotes).where(and(
+      eq(partnerCreditNotes.id, input.creditNoteId),
+      eq(partnerCreditNotes.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!note) throw errors.notFound("partner credit note");
+    if (note.state === "approved") {
+      return { creditNoteId: note.id, state: "approved" as const, approvedBy: note.approvedBy, alreadyApproved: true as const };
+    }
+    if (note.state !== "draft") {
+      throw new AppError("CONFLICT_VERSION", "CREDIT_NOTE_NOT_APPROVABLE", { state: note.state });
+    }
+    await tx.update(partnerCreditNotes).set({
+      state: "approved",
+      approvedBy: principal.userId,
+    }).where(eq(partnerCreditNotes.id, note.id));
+    if (note.amountKopeks > 0) {
+      const existing = await findExistingJournal(tx, principal.organizationId, "partner_credit_note", note.id);
+      if (!existing) {
+        await postJournal(tx, {
+          organizationId: principal.organizationId,
+          sourceType: "partner_credit_note",
+          sourceId: note.id,
+          description: `Кредит-нота партнёра: ${note.reason}`,
+          lines: [
+            { accountCode: "partner_payable", debitKopeks: note.amountKopeks },
+            { accountCode: "processing_expense", creditKopeks: note.amountKopeks },
+          ],
+        });
+      }
+    }
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "partner_credit_note",
+      aggregateId: note.id,
+      eventType: "partner_credit_note.approved",
+      payload: { invoiceId: note.invoiceId, amountKopeks: note.amountKopeks },
+    });
+    return { creditNoteId: note.id, state: "approved" as const, approvedBy: principal.userId };
+  });
+}
+
+/** Schedules a partner payout in `scheduled` state; requires a second finance/admin approver to release. */
+export async function createPartnerPayout(
+  db: Db,
+  principal: Principal,
+  input: { partnerId: string; amountKopeks: number; reference?: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  if (!Number.isInteger(input.amountKopeks) || input.amountKopeks <= 0) {
+    throw new AppError("VALIDATION_ERROR", "AMOUNT_INVALID");
+  }
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "finance:partner_payout_create",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const [partner] = await tx.select({ id: partners.id }).from(partners).where(and(
+      eq(partners.id, input.partnerId),
+      eq(partners.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!partner) throw errors.notFound("partner");
+    const [payout] = await tx.insert(partnerPayouts).values({
+      organizationId: principal.organizationId,
+      partnerId: partner.id,
+      amountKopeks: input.amountKopeks,
+      state: "scheduled",
+      reference: input.reference ?? null,
+      createdBy: principal.userId,
+    }).returning();
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "partner_payout",
+      aggregateId: payout.id,
+      eventType: "partner_payout.created",
+      payload: { partnerId: partner.id, amountKopeks: input.amountKopeks },
+    });
+    return {
+      payoutId: payout.id,
+      partnerId: partner.id,
+      amountKopeks: payout.amountKopeks,
+      state: "scheduled" as const,
+      createdBy: principal.userId,
+    };
+  });
+}
+
+/**
+ * Dual-control approval of a scheduled partner payout: the approver MUST be a different user
+ * from `created_by`. Posts a balanced double-entry journal (`partner_payable` debit / `bank` credit).
+ */
+export async function approvePartnerPayout(
+  db: Db,
+  principal: Principal,
+  input: { payoutId: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "finance:partner_payout_approve",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const locked = await tx.execute(sql`
+      SELECT id FROM partner_payouts
+      WHERE id = ${input.payoutId} AND organization_id = ${principal.organizationId}
+      FOR UPDATE
+    `);
+    if (!(locked.rows as unknown[]).length) throw errors.notFound("partner payout");
+    const [payout] = await tx.select().from(partnerPayouts).where(and(
+      eq(partnerPayouts.id, input.payoutId),
+      eq(partnerPayouts.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!payout) throw errors.notFound("partner payout");
+    if (payout.state === "approved") {
+      return {
+        payoutId: payout.id,
+        state: "approved" as const,
+        approvedBy: payout.approvedBy,
+        alreadyApproved: true as const,
+      };
+    }
+    if (payout.state !== "scheduled") {
+      throw new AppError("CONFLICT_VERSION", "PAYOUT_NOT_APPROVABLE", { state: payout.state });
+    }
+    if (payout.createdBy && payout.createdBy === principal.userId) {
+      throw new AppError("FORBIDDEN", "DUAL_CONTROL_REQUIRED", { payoutId: payout.id });
+    }
+    const approvedAt = new Date();
+    await tx.update(partnerPayouts).set({
+      state: "approved",
+      approvedBy: principal.userId,
+      approvedAt,
+    }).where(eq(partnerPayouts.id, payout.id));
+
+    const existing = await findExistingJournal(tx, principal.organizationId, "partner_payout", payout.id);
+    if (!existing) {
+      await postJournal(tx, {
+        organizationId: principal.organizationId,
+        sourceType: "partner_payout",
+        sourceId: payout.id,
+        description: `Выплата партнёру ${payout.reference ?? payout.id.slice(0, 8)}`,
+        lines: [
+          { accountCode: "partner_payable", debitKopeks: payout.amountKopeks },
+          { accountCode: "bank", creditKopeks: payout.amountKopeks },
+        ],
+      });
+    }
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "partner_payout",
+      aggregateId: payout.id,
+      eventType: "partner_payout.approved",
+      payload: { partnerId: payout.partnerId, amountKopeks: payout.amountKopeks },
+    });
+    return {
+      payoutId: payout.id,
+      state: "approved" as const,
+      approvedBy: principal.userId,
+      approvedAt,
+    };
+  });
+}
+
+/** Settles an approved claim compensation and posts a balanced `claims_expense` / `clearing` journal. */
+export async function settleClaimCompensation(
+  db: Db,
+  principal: Principal,
+  input: { claimId: string; compensationId?: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "finance:claim_compensation_settle",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const [claim] = await tx.select({ id: claims.id }).from(claims).where(and(
+      eq(claims.id, input.claimId),
+      eq(claims.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!claim) throw errors.notFound("claim");
+
+    const compRows = await tx.select().from(compensations).where(and(
+      eq(compensations.organizationId, principal.organizationId),
+      eq(compensations.claimId, claim.id),
+      ...(input.compensationId ? [eq(compensations.id, input.compensationId)] : []),
+    )).orderBy(desc(compensations.createdAt));
+
+    const target = compRows.find(row => row.state === "approved") ?? compRows.find(row => row.state === "paid");
+    if (!target) {
+      throw new AppError("FINANCIAL_HOLD", "COMPENSATION_NOT_APPROVED", { claimId: claim.id });
+    }
+    if (target.state === "paid") {
+      return {
+        claimId: claim.id,
+        compensationId: target.id,
+        amountKopeks: target.amountKopeks,
+        state: "paid" as const,
+        alreadySettled: true as const,
+      };
+    }
+
+    await tx.update(compensations).set({ state: "paid" }).where(eq(compensations.id, target.id));
+    const existing = await findExistingJournal(tx, principal.organizationId, "claim_compensation", target.id);
+    const journalId = existing?.id ?? await postJournal(tx, {
+      organizationId: principal.organizationId,
+      sourceType: "claim_compensation",
+      sourceId: target.id,
+      description: `Выплата компенсации по претензии ${claim.id.slice(0, 8)}`,
+      lines: [
+        { accountCode: "claims_expense", debitKopeks: target.amountKopeks },
+        { accountCode: "clearing", creditKopeks: target.amountKopeks },
+      ],
+    });
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "claim",
+      aggregateId: claim.id,
+      eventType: "claim.compensation_settled",
+      payload: { compensationId: target.id, amountKopeks: target.amountKopeks, journalId },
+    });
+    return {
+      claimId: claim.id,
+      compensationId: target.id,
+      amountKopeks: target.amountKopeks,
+      journalId,
+      state: "paid" as const,
+    };
+  });
 }

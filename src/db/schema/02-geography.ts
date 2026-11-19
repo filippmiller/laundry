@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, doublePrecision, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { organizations, users } from "./01-identity.js";
 
 export const cities = pgTable("cities", {
@@ -23,6 +23,8 @@ export const buildings = pgTable("buildings", {
   cityId: uuid("city_id").notNull().references(() => cities.id),
   zoneId: uuid("zone_id").references(() => serviceZones.id),
   address: text("address").notNull(),
+  lat: doublePrecision("lat"),
+  lng: doublePrecision("lng"),
   timezone: text("timezone").notNull().default("Europe/Moscow"),
   accessNotes: text("access_notes"),
   active: text("active").notNull().default("true"),

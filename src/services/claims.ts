@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, garments, orders,
@@ -52,7 +52,8 @@ export async function openClaim(
       eq(evidenceAssets.organizationId, principal.organizationId),
       eq(evidenceAssets.ownerType, "order"),
       eq(evidenceAssets.ownerId, order.id),
-      inArray(evidenceAssets.status, ["verified", "legal_hold"]),
+      isNull(evidenceAssets.deletedAt),
+      inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
       inArray(evidenceAssets.purpose, [...CLAIM_EVIDENCE_PURPOSES]),
     );
     const orderEvidence = await tx.select().from(evidenceAssets).where(evidenceScope);
@@ -150,11 +151,24 @@ export async function decideClaim(
     });
     await tx.update(claims).set({ state: input.outcome, version: claim.version + 1 })
       .where(and(eq(claims.id, claim.id), eq(claims.version, claim.version)));
+    const releasedHolds = await tx.update(evidenceLegalHolds)
+      .set({ releasedAt: new Date() })
+      .where(and(
+        eq(evidenceLegalHolds.organizationId, principal.organizationId),
+        eq(evidenceLegalHolds.claimId, claim.id),
+        isNull(evidenceLegalHolds.releasedAt),
+      ))
+      .returning({ id: evidenceLegalHolds.id, assetId: evidenceLegalHolds.assetId });
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.decided",
-      payload: { outcome: input.outcome, previousVersion: claim.version }, reason: input.rationale,
+      payload: {
+        outcome: input.outcome,
+        previousVersion: claim.version,
+        releasedHoldCount: releasedHolds.length,
+      },
+      reason: input.rationale,
     });
-    return { claimId: claim.id, state: input.outcome, version: claim.version + 1 };
+    return { claimId: claim.id, state: input.outcome, version: claim.version + 1, releasedHoldCount: releasedHolds.length };
   });
 }
 
