@@ -194,3 +194,65 @@ subtype overlay, the quantity slider, the wheel gesture and the live reconciliat
 described, and one acceptance was recorded end to end (`LA-20261118-944751C6` locally: three garments,
 canonical category `футболка`, `subtypeId` recorded in `condition_json`).
 
+---
+
+## Redeploy: the four quick wins (commit `1a7635a`, 2026-11-19)
+
+The preview was rebuilt on `1a7635a` with `scripts/deploy-preview.sh` (same `.env`, same database
+volume, same stack). The migration service applied `drizzle/0020` (`order_adjustments.details_json`)
+and the API answered `/health/ready` after 2 attempts.
+
+This commit carries the four S-effort ideas from the second brainstorm **and** the audit fixes that
+were open in the same working tree (idempotency fingerprint, slot-hold replay, OTP rollback, trusted
+proxy hops, `23505 → 409`, and 12 regression tests). Both bodies of work are described separately in
+the commit message; neither was hidden.
+
+What changed in the running product:
+
+- **The weight variance becomes a proposal, not a silent charge.** The operator's inspection now
+  measures the received weight against the quote, and if the difference is at least 300 g **and** at
+  least 5 %, the order moves to `awaiting_approval` with a priced proposal. Scenario `s16` of the
+  demo book ships exactly that case: 2 000 g quoted, 2 600 g received, a 30 % overage and a 540 ₽
+  surcharge.
+- **The customer sees the arithmetic and decides.** The customer workspace shows the quoted weight,
+  the received weight, the reason in plain Russian and two buttons — «Согласовать доплату 540,00 ₽»
+  and «Отказаться от доплаты». Nothing is charged without that consent, and the decline path
+  restores the quoted amount.
+- **Repeat order in one tap.** «Повторить заказ» refills the new-order form from the previous order
+  (service, tier, weight, building, declared items) and requests a **fresh** quote; the old order is
+  never mutated and no money moves.
+- **Chronometry and churn are visible to the dispatcher.** «Сколько идёт заказ» reports the median
+  and the p90 of every stage straight from the event log, and «Кто скоро уйдёт» lists customers whose
+  deliveries failed twice or more.
+
+Verified from outside the host, against the public URL:
+
+```
+npm run smoke:live   -> 18/18 PASS, LIVE_PREVIEW_OK
+POST /api/v1/dev/seed -> 200, demoBook { orders: 17, customers: 4, protectedOrders: 4,
+                                         garments: 14, invoices: 12, captures: 11,
+                                         refunds: 1, claims: 1 }
+```
+
+Repository gates on the deployed commit: `lint` clean, `typecheck` clean, `npm test` **269 passed /
+37 files**, `web:build` pass, `guard:hygiene` OK (272 files).
+
+The browser acceptance against the public URL covered all four features:
+
+- The customer's order list shows `LA-20261119-222A01E0` with the status «Требуется согласование
+  доплаты» and the proposal «Фактический вес 2600 г против расчётных 2000 г: перебор 600 г (30 %)».
+- Pressing «Согласовать доплату 540,00 ₽» returned the notice «Доплата согласована, обработка
+  продолжена»; the proposal flipped to «Согласовано» and the order sum moved from 1 800,00 ₽ to
+  2 340,00 ₽.
+- «Повторить заказ» switched to the «Новый заказ» tab with the weight prefilled as 2 000 г, the
+  wash service and the «Эконом» tier, and the quote was recalculated by the server: «Расчёт готов:
+  1 800,00 ₽».
+- The dispatcher desk shows the chronometry table (полный цикл 28.0 ч медиана и хвост, 25 заказов;
+  от оформления до забора 2.0 ч; от забора до приёмки 2.0 ч; осмотр 3.0 ч; обработка и КК 9.0 ч;
+  от готовности до доставки 12.0 ч) and the churn table (1 клиент в зоне риска: Олег, +79990000103,
+  2 неудачные доставки, «Получателя нет на месте»).
+
+The chronometry numbers come from the event log of the demo orders, whose milestones are backdated
+across 2/4/5/7/16/28 hours so the stages have a real spread. They describe the demo data, not
+production traffic.
+
