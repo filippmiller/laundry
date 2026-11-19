@@ -174,14 +174,22 @@ export async function verifyOtpChallenge(
       await tx.insert(users).values({ phone, displayName: phone }).onConflictDoNothing();
       [user] = await tx.select().from(users).where(eq(users.phone, phone)).limit(1);
     }
-    if (!user) throw errors.forbidden("user could not be resolved");
+    // Returned, not thrown: a throw rolls the whole transaction back, which would undo the
+    // consumption of the challenge and leave the code usable until it expires on its own.
+    if (!user) {
+      return { ok: false as const, error: errors.forbidden("user could not be resolved") };
+    }
 
     let [membership] = await tx.select().from(memberships).where(and(
       eq(memberships.organizationId, input.organizationId),
       eq(memberships.userId, user.id),
     )).limit(1);
     if (membership) {
-      if (membership.state !== "active") throw errors.forbidden("membership suspended");
+      // Same as above: the suspended membership is an outcome, not an exception. Throwing here
+      // would undo the consumption of the code and let the customer keep trying it.
+      if (membership.state !== "active") {
+        return { ok: false as const, error: errors.forbidden("membership suspended") };
+      }
     } else {
       [membership] = await tx.insert(memberships).values({
         organizationId: input.organizationId,

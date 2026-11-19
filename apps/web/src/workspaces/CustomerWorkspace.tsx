@@ -4,6 +4,7 @@ import {
   Banknote,
   Calendar,
   Check,
+  Copy,
   CreditCard,
   FileText,
   ListOrdered,
@@ -18,10 +19,12 @@ import {
 } from "lucide-react";
 import { api, ApiError, dt, money } from "../api";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
+import { findSubtype } from "@shared/garment-taxonomy";
 import { ModalDialog } from "../components/ModalDialog";
 import { QrCodeBadge } from "../components/QrCodeBadge";
 import { CustomerMoneyPanel } from "./analytics-panels";
 import {
+  ADJUSTMENT_STATE_LABELS,
   CLAIM_STATE_LABELS,
   ERROR_LABELS,
   EVENT_LABELS,
@@ -121,10 +124,21 @@ type OrderDetailDto = {
     deltaKopeks: number;
     state: string;
     createdAt: string;
+    weight?: { quotedGrams: number; receivedGrams: number; deltaGrams: number };
   }>;
   createdAt: string;
+  acceptedQuoteHash?: string;
   handoffCode?: string | null;
   qrPayload?: string | null;
+};
+
+type RepeatDto = {
+  sourceOrderId: string;
+  publicNumber: string;
+  buildingId: string | null;
+  lines: Array<{ serviceId: string; tier: "economy" | "protected"; quantity: number; unit: string }>;
+  declaredItems: Array<{ subtypeId: string; category: string; label: string; quantity: number }>;
+  note: string;
 };
 
 type FinanceDto = {
@@ -237,7 +251,19 @@ function isWindowClosed(window: WindowDto, now: number): boolean {
 
 export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
   const [activeTab, setActiveTab] = useState("new");
+  const [repeat, setRepeat] = useState<RepeatDto | null>(null);
   const uid = useId();
+
+  const handleRepeat = async (orderId: string) => {
+    try {
+      const payload = await api<RepeatDto>(`/orders/${orderId}/repeat`);
+      setRepeat(payload);
+      setActiveTab("new");
+      notify({ kind: "ok", text: `Состав заказа ${payload.publicNumber} перенесён в новый заказ. Проверьте цену до оформления.` });
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    }
+  };
 
   const tabs = [
     { id: "new", label: "Новый заказ", icon: ShoppingBag },
@@ -279,8 +305,8 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: 
           aria-labelledby={`${uid}-tab-${tab.id}`}
           hidden={activeTab !== tab.id}
         >
-          {tab.id === "new" && <NewOrderTab demo={demo} notify={notify} onOpenAddresses={() => setActiveTab("addresses")} />}
-          {tab.id === "my" && <MyOrdersTab demo={demo} notify={notify} />}
+          {tab.id === "new" && <NewOrderTab demo={demo} notify={notify} repeat={repeat} onOpenAddresses={() => setActiveTab("addresses")} />}
+          {tab.id === "my" && <MyOrdersTab demo={demo} notify={notify} onRepeat={(orderId) => void handleRepeat(orderId)} />}
           {tab.id === "spending" && <CustomerMoneyPanel notify={notify} />}
           {tab.id === "addresses" && <AddressesTab demo={demo} notify={notify} />}
           {tab.id === "support" && <SupportTab notify={notify} />}
@@ -293,10 +319,12 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: 
 function NewOrderTab({
   demo,
   notify,
+  repeat,
   onOpenAddresses,
 }: {
   demo: DemoConfig;
   notify: NotifyFn;
+  repeat: RepeatDto | null;
   onOpenAddresses: () => void;
 }) {
   const uid = useId();
@@ -328,6 +356,7 @@ function NewOrderTab({
 
   const [busy, setBusy] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [repeatPending, setRepeatPending] = useState(false);
 
   const selectedService = useMemo(
     () => catalog?.find((service) => service.id === serviceId) ?? null,
@@ -480,6 +509,40 @@ function NewOrderTab({
       setBusy(null);
     }
   };
+
+  // A repeated order fills the form in; the price is still calculated and shown
+  // before the customer commits to anything.
+  useEffect(() => {
+    if (!repeat) return;
+    const line = repeat.lines[0];
+    if (line) {
+      setServiceId(line.serviceId);
+      setTier(line.tier);
+      setQuantity(String(line.quantity));
+    }
+    if (repeat.buildingId) setBuildingId(repeat.buildingId);
+    setDeclared(repeat.declaredItems.map((item) => {
+      const subtype = findSubtype(item.subtypeId);
+      return {
+        subtypeId: item.subtypeId,
+        category: item.category,
+        label: item.label,
+        quantity: item.quantity,
+        icon: subtype?.icon ?? "tshirt",
+      };
+    }));
+    setQuote(null);
+    setRepeatPending(true);
+  }, [repeat]);
+
+  // The quote for a repeated order is requested as soon as the windows of the
+  // remembered building are known — one tap, no re-typing of the order.
+  useEffect(() => {
+    if (!repeatPending || !repeat) return;
+    if (!buildingId || !pickupWindowId || !deliveryWindowId || !serviceId) return;
+    setRepeatPending(false);
+    void handleQuote();
+  }, [repeatPending, repeat, buildingId, pickupWindowId, deliveryWindowId, serviceId]);
 
   const handleHold = async () => {
     if (!quote) {
@@ -923,7 +986,7 @@ function NewOrderTab({
   );
 }
 
-function MyOrdersTab({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
+function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: NotifyFn; onRepeat: (orderId: string) => void }) {
   const uid = useId();
 
   const [orders, setOrders] = useState<OrderListItemDto[] | null>(null);
@@ -1056,6 +1119,21 @@ function MyOrdersTab({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
         await Promise.all([loadOrders(), loadDetail(detail.id)]);
       },
       "Заказ отменён, слоты освобождены",
+    );
+  };
+
+  const handleAdjustmentDecision = async (adjustmentId: string, accept: boolean) => {
+    if (!detail?.acceptedQuoteHash) return;
+    await runAction(
+      `adjustment-${adjustmentId}`,
+      async () => {
+        await api(`/adjustments/${adjustmentId}/decision`, {
+          method: "POST",
+          body: { accept, quoteHash: detail.acceptedQuoteHash },
+        });
+        await Promise.all([loadOrders(), loadDetail(detail.id)]);
+      },
+      accept ? "Доплата согласована, обработка продолжена" : "Предложение отклонено",
     );
   };
 
@@ -1285,6 +1363,15 @@ function MyOrdersTab({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
               <button
                 type="button"
                 className="secondary"
+                disabled={isBusy || detail.lifecycleState === "cancelled"}
+                onClick={() => onRepeat(detail.id)}
+              >
+                <Copy size={16} aria-hidden="true" />
+                <span>Повторить заказ</span>
+              </button>
+              <button
+                type="button"
+                className="secondary"
                 disabled={isBusy || !canBookSlots}
                 onClick={() => {
                   setRescheduleOpen(true);
@@ -1379,12 +1466,41 @@ function MyOrdersTab({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
                   {detail.adjustments.map((adjustment) => (
                     <div className="data-row" key={adjustment.id}>
                       <span>
-                        {adjustment.reason} · {adjustment.state}
+                        {adjustment.reason} · {stateLabel(ADJUSTMENT_STATE_LABELS, adjustment.state)}
+                        {adjustment.weight && (
+                          <span className="muted">
+                            {" "}· Посчитано {adjustment.weight.quotedGrams} г, принято {adjustment.weight.receivedGrams} г
+                          </span>
+                        )}
                       </span>
                       <span className="mono">{money(adjustment.deltaKopeks)}</span>
                     </div>
                   ))}
                 </div>
+                {detail.adjustments.some(adjustment => adjustment.state === "proposed") && (
+                  <div className="button-row">
+                    {detail.adjustments.filter(adjustment => adjustment.state === "proposed").map(adjustment => (
+                      <div className="button-row" key={adjustment.id}>
+                        <button
+                          type="button"
+                          disabled={busy !== null || !detail.acceptedQuoteHash}
+                          onClick={() => void handleAdjustmentDecision(adjustment.id, true)}
+                        >
+                          <Check size={16} aria-hidden="true" />
+                          <span>Согласовать доплату {money(adjustment.deltaKopeks)}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="danger-btn"
+                          disabled={busy !== null}
+                          onClick={() => void handleAdjustmentDecision(adjustment.id, false)}
+                        >
+                          <span>Отказаться от доплаты</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </>
             )}
           </section>

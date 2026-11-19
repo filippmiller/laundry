@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets, garments,
@@ -111,11 +111,39 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
     }).returning();
 
     for (const bag of input.bags) {
-      const [container] = await tx.insert(containers).values({
-        organizationId: principal.organizationId, code: bag.containerCode,
-      }).returning();
+      // `containers.code` is unique: a bag that comes back into circulation would violate that
+      // constraint on a fresh insert and surface as a 500. The container is the physical bag and
+      // outlives the order, so an existing one is reused.
+      let [container] = await tx.select().from(containers)
+        .where(eq(containers.code, bag.containerCode)).limit(1);
+      if (container && container.organizationId !== principal.organizationId) {
+        throw new AppError("CUSTODY_CONFLICT", "CONTAINER_CODE_IN_USE", { code: bag.containerCode });
+      }
+      if (!container) {
+        [container] = await tx.insert(containers).values({
+          organizationId: principal.organizationId, code: bag.containerCode,
+        }).returning();
+      }
+      // A container may have at most one active assignment. A bag that is still out with another
+      // order is a custody conflict — the database would refuse the insert with a raw unique
+      // violation, which the API reports as an unexplained 500.
+      const [activeAssignment] = await tx.select({ id: containerAssignments.id })
+        .from(containerAssignments).where(and(
+          eq(containerAssignments.containerId, container.id),
+          isNull(containerAssignments.unassignedAt),
+        )).limit(1);
+      if (activeAssignment) {
+        throw new AppError("CUSTODY_CONFLICT", "CONTAINER_ALREADY_ASSIGNED", { code: bag.containerCode });
+      }
       const seal = sealBySerial.get(bag.sealSerial)!;
-      await tx.update(seals).set({ state: "assigned" }).where(eq(seals.id, seal.id));
+      // The seal is claimed conditionally: two couriers reading the same serial must not both
+      // end up owning it.
+      const claimed = await tx.update(seals).set({ state: "assigned" })
+        .where(and(eq(seals.id, seal.id), eq(seals.state, "available")))
+        .returning({ id: seals.id });
+      if (!claimed.length) {
+        throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_AVAILABLE", { serial: bag.sealSerial });
+      }
       await tx.insert(containerAssignments).values({
         organizationId: principal.organizationId,
         containerId: container.id, orderId: input.orderId, sealId: seal.id,
@@ -167,8 +195,13 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
     }
 
     const to = nextState(order.lifecycleState as "pickup_assigned", "accept_handoff", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ version: orders.version });
+    // The optimistic lock only protects anything when its result is checked. Ignored, a lost
+    // update writes the custody event and the manifest while the order keeps its old state —
+    // the goods have moved but the order says they have not.
+    if (!advanced) throw errors.version(order.version);
 
     const [event] = await tx.insert(custodyEvents).values({
       organizationId: principal.organizationId,

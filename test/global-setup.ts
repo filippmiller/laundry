@@ -20,11 +20,31 @@ async function reachable() {
   }
 }
 
+/**
+ * embedded-postgres rejects with `undefined` when the spawned cluster dies before it is ready
+ * (its own `start()` rejects without an argument). A thrown `undefined` reaches the console as
+ * the word "undefined", which hides the only clue about what went wrong.
+ */
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name;
+  if (typeof error === "string" && error) return error;
+  if (error === undefined) return "the cluster process ended without reporting an error";
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 function withTimeout<T>(work: Promise<T>, ms: number, label: string) {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(label)), ms);
-    timer.unref();
+    // The deadline must keep the event loop alive. An unref'd timer cannot: when the work never
+    // settles (a cluster that crash-loops on a blocked port never prints "ready to accept
+    // connections" and never exits), Node finds nothing left to wait for and exits with code 0.
+    // The test run then looks green while not a single test file was executed. Keeping the timer
+    // referenced makes the deadline fire, the setup fail, and `npm test` exit non-zero.
   });
   return Promise.race([work, deadline]).finally(() => {
     if (timer) clearTimeout(timer);
@@ -53,15 +73,34 @@ async function boot(dataDir: string, reset: boolean) {
       }
     },
   });
-  if (fresh) await server.initialise();
-  // A data directory left behind by a killed run can hang forever: fail fast, then rebuild it.
-  await withTimeout(server.start(), 45_000, "embedded postgres did not start within 45s");
-  try {
-    await server.createDatabase("laundry_test");
-  } catch (error) {
-    if (!String(error).includes("already exists")) throw error;
-  }
+  // The whole boot is bounded, not just `start()`: `initialise()` runs initdb and rehydrates the
+  // symlinks of a data directory that a killed run may have left in a broken state, and either of
+  // those steps can hang without ever settling. An unbounded hang empties the event loop, Node
+  // exits with code 0 and the suite reports success without having run a single test file.
+  await withTimeout((async () => {
+    if (fresh) await server!.initialise();
+    await server!.start();
+    try {
+      await server!.createDatabase("laundry_test");
+    } catch (error) {
+      if (!String(error).includes("already exists")) throw error;
+    }
+  })(), 60_000, "embedded postgres did not come up within 60s").catch((error: unknown) => {
+    throw new Error(`embedded postgres could not start on port 55433: ${describeError(error)}`);
+  });
 }
+
+/**
+ * A run that never finished its setup must not look successful.
+ *
+ * The setup runs in the vitest main process. If a step hangs in a way that leaves the event loop
+ * empty, Node exits quietly with code 0 and the suite prints nothing — a green CI run that
+ * tested nothing. This guard turns that silent exit into a failure no matter where the hang is.
+ */
+let setupFinished = false;
+process.once("exit", (code) => {
+  if (!setupFinished && code === 0) process.exitCode = 1;
+});
 
 export async function setup() {
   if (!(await reachable())) {
@@ -69,13 +108,20 @@ export async function setup() {
     try {
       await boot(dataDir, false);
     } catch (error) {
-      console.error("embedded postgres failed to start, retrying with a fresh data directory:", error);
+      console.error(`embedded postgres failed to start, retrying with a fresh data directory: ${describeError(error)}`);
       await server?.stop().catch(() => undefined);
-      await boot(dataDir, true);
+      try {
+        await boot(dataDir, true);
+      } catch (retryError) {
+        // Never let the suite continue on a database that never came up: the tests would report
+        // nothing and the run would look successful.
+        throw new Error(`embedded postgres is unavailable: ${describeError(retryError)}`);
+      }
     }
   }
   await runMigrations(url, "./drizzle");
   await resetTestData(url);
+  setupFinished = true;
 }
 
 /**

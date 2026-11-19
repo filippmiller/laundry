@@ -155,6 +155,19 @@ const DELIVERY_OUTCOME_OPTIONS: Array<{ value: DeliveryOutcome; label: string }>
 
 const TAP_STYLE = { minHeight: 44 } as const;
 
+/**
+ * The next code in a series: "BAG-001" becomes "BAG-002", "DEMO-SEAL-007" becomes
+ * "DEMO-SEAL-008". The demo seed provides twenty bags and twenty seals, so a shift can hand
+ * over one of each per customer without ever colliding with the unique constraints.
+ */
+function nextSequentialCode(current: string): string {
+  const trimmed = current.trim();
+  const match = /^(.*?)(\d+)$/.exec(trimmed);
+  if (!match) return `${trimmed}-${Date.now()}`;
+  const [, prefix, digits] = match;
+  return `${prefix}${String(Number(digits) + 1).padStart(digits.length, "0")}`;
+}
+
 function normalizeShift(raw: unknown): CourierShift | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
@@ -671,8 +684,17 @@ export function CourierWorkspace({
         string,
         unknown
       >;
+      const stopCounts = (rec?.stops && typeof rec.stops === "object" ? rec.stops : {}) as Record<
+        string,
+        unknown
+      >;
       setShiftReconciliation({
-        stops: Number(rec?.stops ?? 0),
+        // `stops` is a per-state breakdown, not a number: `Number({pending: 2})` is NaN and the
+        // card used to print "Точек маршрута: NaN".
+        stops: Object.values(stopCounts).reduce<number>(
+          (sum, value) => sum + (typeof value === "number" && Number.isFinite(value) ? value : 0),
+          0,
+        ),
         scans: {
           accepted: Number(scans?.accepted ?? 0),
           rejected: Number(scans?.rejected ?? 0),
@@ -881,6 +903,11 @@ export function CourierWorkspace({
       });
       setDualConfirmed(false);
       setHandoffCode("");
+      // Every handover needs its own bag and seal: the bag stays assigned to the order it was
+      // received with, and the seal moves to `assigned`. Reusing the same codes made the second
+      // customer of a shift fail with a custody conflict.
+      setContainerCode(nextSequentialCode(containerCode));
+      setSealSerial(nextSequentialCode(sealSerial));
       await loadRoute();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -904,13 +931,17 @@ export function CourierWorkspace({
         outcome: deliveryOutcome,
       };
       if (orderGarments.length > 0) {
-        payload.garmentIds = selectedGarmentIds;
+        // The server reads `deliveredGarmentIds`; `garmentIds` was silently dropped by the
+        // schema, so the courier's selection never reached the service.
+        payload.deliveredGarmentIds = selectedGarmentIds;
       }
       if (deliveryPin.trim()) {
-        payload.pin = deliveryPin.trim();
+        // The recipient's PIN is the proof of handover and is checked against the order's
+        // handoff code by the server.
+        payload.recipientProof = { pin: deliveryPin.trim() };
       }
       if (deliveryNote.trim()) {
-        payload.note = deliveryNote.trim();
+        payload.reason = deliveryNote.trim();
       }
 
       await api(`/courier/deliveries/${selectedStop.stopId}/attempts`, {

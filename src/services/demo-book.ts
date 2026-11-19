@@ -106,6 +106,8 @@ type Outcome =
   | "in_processing"
   | "scheduled"
   | "awaiting_intake"
+  | "awaiting_approval"
+  | "failed_delivery"
   | "claim_paid";
 
 type Scenario = {
@@ -178,6 +180,18 @@ const SCENARIOS: Scenario[] = [
       { subtypeId: "underwear_socks", quantity: 1 },
       { subtypeId: "trousers_classic", quantity: 1 },
     ],
+  },
+  {
+    // The scales at the factory disagreed with the quote by more than the tolerance, so the
+    // technologist's inspection raised a proposal and the order is waiting for the customer's
+    // answer. The customer sees the grams and decides — nothing is billed without consent.
+    id: "s16", customer: "anna", tier: "economy", weightGrams: 2_000, receivedWeightGrams: 2_600,
+    daysAgo: 3, outcome: "awaiting_approval",
+  },
+  {
+    // The courier stood at the door twice and nobody took the parcel. This is the churn signal
+    // the dispatcher sees: a customer who is already gone before they say so.
+    id: "s17", customer: "oleg", tier: "economy", weightGrams: 2_000, daysAgo: 4, outcome: "failed_delivery",
   },
 ];
 
@@ -421,6 +435,29 @@ async function backdateOrder(
       SELECT id FROM payment_intents WHERE order_id = ${orderId} AND organization_id = ${organizationId}
     )
   `);
+  // The event log carries the timestamps of the milestones, and the cycle-time report is
+  // computed from them. A demo book whose events all carry the seed time would report a
+  // zero-length cycle, so the milestones are spread over the hours a real order takes:
+  // the courier picks the parcel up in the evening, the factory works it through the night
+  // and the parcel comes back the next day.
+  await db.execute(sql`
+    UPDATE outbox_events
+    SET created_at = ${at}::timestamptz + CASE event_type
+          WHEN 'order.accept_handoff' THEN INTERVAL '2 hours'
+          WHEN 'order.partner_receive' THEN INTERVAL '4 hours'
+          WHEN 'order.inspect' THEN INTERVAL '5 hours'
+          WHEN 'order.propose_change' THEN INTERVAL '5 hours'
+          WHEN 'order.approve_change' THEN INTERVAL '6 hours'
+          WHEN 'order.decline_change' THEN INTERVAL '6 hours'
+          WHEN 'order.start_processing' THEN INTERVAL '7 hours'
+          WHEN 'order.qc_passed' THEN INTERVAL '16 hours'
+          WHEN 'order.qc_failed' THEN INTERVAL '16 hours'
+          WHEN 'order.dispatch' THEN INTERVAL '17 hours'
+          WHEN 'delivery.delivered' THEN INTERVAL '28 hours'
+          ELSE INTERVAL '0 hours'
+        END
+    WHERE aggregate_id = ${orderId} AND aggregate_type = 'order'
+  `);
 }
 
 export type DemoBookResult = {
@@ -562,6 +599,23 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
       continue;
     }
 
+    if (scenario.outcome === "awaiting_approval") {
+      // The scales at the factory disagree with the quote: the inspection raises a proposal and
+      // the order waits for the customer. Nothing is billed without their consent.
+      await assignOrderToPartner(db, context.principals.dispatcher, {
+        orderId: order.id, partnerId: context.partnerId, key: key("assign-partner"),
+      });
+      await receiveHandoff(db, context.principals.partner, {
+        orderId: order.id,
+        manifestId: intake.manifestId,
+        actual: [{ containerCode, sealSerial, actualWeightGrams: receivedGrams }],
+        key: key("receive"),
+      });
+      await startInspection(db, context.principals.partner, { orderId: order.id, key: key("inspection") });
+      await backdateOrder(db, context.organizationId, order.id, daysAgo(scenario.daysAgo));
+      continue;
+    }
+
     await assignOrderToPartner(db, context.principals.dispatcher, {
       orderId: order.id, partnerId: context.partnerId, key: key("assign-partner"),
     });
@@ -588,6 +642,34 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
       orderId: order.id, shiftId: context.shiftId, key: key("delivery"),
     });
     await arriveStop(db, context.principals.courier, { stopId: delivery.stopId, key: key("arrive") });
+
+    if (scenario.outcome === "failed_delivery") {
+      // Nobody was home, twice. The order comes back to "ready" after each miss, so the
+      // courier is sent again — and the second miss is what makes it a churn signal.
+      await recordDeliveryAttempt(db, context.principals.courier, {
+        stopId: delivery.stopId,
+        outcome: "recipient_unavailable",
+        deliveredGarmentIds: [],
+        recipientProof: { method: "demo_confirm" },
+        reason: "Получателя нет на месте",
+        key: key("attempt-1"),
+      });
+      const second = await assignDelivery(db, context.principals.dispatcher, {
+        orderId: order.id, shiftId: context.shiftId, key: key("delivery-2"),
+      });
+      await arriveStop(db, context.principals.courier, { stopId: second.stopId, key: key("arrive-2") });
+      await recordDeliveryAttempt(db, context.principals.courier, {
+        stopId: second.stopId,
+        outcome: "recipient_unavailable",
+        deliveredGarmentIds: [],
+        recipientProof: { method: "demo_confirm" },
+        reason: "Получателя нет на месте",
+        key: key("attempt-2"),
+      });
+      await backdateOrder(db, context.organizationId, order.id, daysAgo(scenario.daysAgo));
+      continue;
+    }
+
     await recordDeliveryAttempt(db, context.principals.courier, {
       stopId: delivery.stopId,
       outcome: "delivered",

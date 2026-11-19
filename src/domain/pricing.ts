@@ -44,7 +44,35 @@ export type QuoteLine = {
   amountKopeks: number;
   source: "tariff" | "exception";
   tariffVersionId: string;
+  /**
+   * The price basis the line was priced with. It rides inside the immutable quote
+   * snapshot so that a later recalculation — a weight variance, for instance — can be
+   * priced by the very same formula instead of by today's tariff.
+   */
+  unitPriceKopeks?: number;
+  roundingRule?: "exact" | "gram_up_to_100";
+  minQuantity?: number;
 };
+
+/**
+ * The one pricing formula of the platform: a piece is priced per piece, a gram-priced
+ * line is priced in tariff steps (a kilogram, or a hundred grams when the rule says so).
+ * Every amount that ever reaches a customer is produced here, so a recalculation of an
+ * existing quote is guaranteed to agree with the original one.
+ */
+export function priceServiceAmount(input: {
+  quantity: number;
+  unit: "piece" | "gram";
+  unitPriceKopeks: number;
+  minQuantity?: number;
+  roundingRule?: "exact" | "gram_up_to_100";
+}): number {
+  const quantity = Math.max(input.quantity, input.minQuantity ?? 1);
+  const units = input.unit === "gram"
+    ? (input.roundingRule === "gram_up_to_100" ? Math.ceil(quantity / 100) : Math.ceil(quantity / 1000))
+    : quantity;
+  return assertKopeks(Math.ceil(units * input.unitPriceKopeks));
+}
 
 export type QuoteResult = {
   lines: QuoteLine[];
@@ -59,23 +87,19 @@ export function calculateQuote(input: QuoteInput): QuoteResult {
   const lines: QuoteLine[] = input.lines.map(line => {
     if (!Number.isFinite(line.quantity) || line.quantity <= 0) throw new Error("INVALID_QUANTITY");
     assertKopeks(line.unitPriceKopeks, "unit_price");
-    const quantity = Math.max(line.quantity, line.minQuantity ?? 1);
-    let units = quantity;
-    if (line.unit === "gram") {
-      units = line.roundingRule === "gram_up_to_100"
-        ? Math.ceil(quantity / 100)
-        : Math.ceil(quantity / 1000);
-    }
     return {
       kind: "service",
       serviceId: line.serviceId,
       tier: line.tier,
       description: `${line.tier}:${line.serviceId}`,
-      quantity,
+      quantity: Math.max(line.quantity, line.minQuantity ?? 1),
       unit: line.unit,
-      amountKopeks: assertKopeks(Math.ceil(units * line.unitPriceKopeks)),
+      amountKopeks: priceServiceAmount(line),
       source: "tariff",
       tariffVersionId: input.tariffVersionId,
+      unitPriceKopeks: line.unitPriceKopeks,
+      roundingRule: line.roundingRule,
+      minQuantity: line.minQuantity,
     };
   });
 

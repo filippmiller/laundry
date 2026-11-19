@@ -4,14 +4,16 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
+  Clock,
   Loader2,
   RefreshCw,
   Scale,
   Shirt,
+  UserRoundX,
   Wallet,
 } from "lucide-react";
 import { api, dt, money } from "../api";
-import { formatError, GARMENT_STATUS_LABELS, TIER_LABELS } from "../labels";
+import { DELIVERY_OUTCOME_LABELS, formatError, GARMENT_STATUS_LABELS, TIER_LABELS } from "../labels";
 
 /**
  * Panels for the three money/volume questions the product could not answer before:
@@ -777,6 +779,227 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
             </table>
           </div>
         </>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+// Chronometry: where the time of an order goes
+// ---------------------------------------------------------------------------------------
+
+type ChronometryDto = {
+  windowDays: number;
+  ordersAnalyzed: number;
+  stages: Array<{ key: string; label: string; p50Hours: number; p90Hours: number; samples: number }>;
+  cycle: { p50Hours: number; p90Hours: number; samples: number };
+  note: string;
+};
+
+/** A duration in hours. An empty stage shows a dash, not a zero: nothing was measured. */
+const HOURS = (value: number, samples: number) => (samples === 0 ? "—" : `${value.toFixed(1)} ч`);
+
+export function ChronometryPanel({ notify }: { notify: NotifyFn }) {
+  const [days, setDays] = useState(90);
+  const [data, setData] = useState<ChronometryDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setData(await api<ChronometryDto>(`/ops/chronometry?days=${days}`));
+    } catch (err) {
+      setError(formatError(err));
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, [days, notify]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!data && !error) return <Loading error={null} />;
+  if (!data) return <Loading error={error} />;
+
+  return (
+    <section className="panel" aria-labelledby="chronometry-heading">
+      <div className="panel-head">
+        <h3 id="chronometry-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <Clock size={18} aria-hidden="true" />
+          <span>Сколько идёт заказ</span>
+        </h3>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <label className="muted" htmlFor="chronometry-window">Период</label>
+          <select
+            id="chronometry-window"
+            value={days}
+            onChange={event => setDays(Number(event.target.value))}
+            style={{ minBlockSize: 44 }}
+          >
+            <option value={30}>30 дней</option>
+            <option value={90}>90 дней</option>
+            <option value={180}>180 дней</option>
+            <option value={365}>365 дней</option>
+          </select>
+          <ReloadButton onClick={() => void load()} busy={busy} />
+        </div>
+      </div>
+
+      <div className="alert-banner" role="status" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
+        <span>{data.note}</span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBlockStart: 14 }}>
+        <Metric label="Полный цикл, медиана" value={HOURS(data.cycle.p50Hours, data.cycle.samples)} />
+        <Metric
+          label="Полный цикл, хвост"
+          value={HOURS(data.cycle.p90Hours, data.cycle.samples)}
+          tone={data.cycle.p90Hours > data.cycle.p50Hours * 2 ? "warn" : "default"}
+          hint="Самые долгие заказы периода"
+        />
+        <Metric label="Заказов в выборке" value={String(data.ordersAnalyzed)} />
+      </div>
+
+      <h4 className="section-title" style={{ marginBlockStart: 18 }}>Этапы: медиана и хвост</h4>
+      <div className="table-wrap">
+        <table className="clean-table">
+          <thead>
+            <tr>
+              <th>Этап</th>
+              <th>Медиана</th>
+              <th>Хвост (p90)</th>
+              <th>Заказов</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.stages.map(stage => (
+              <tr key={stage.key}>
+                <td>{stage.label}</td>
+                <td className="mono">{HOURS(stage.p50Hours, stage.samples)}</td>
+                <td className="mono">{HOURS(stage.p90Hours, stage.samples)}</td>
+                <td className="mono">{stage.samples}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+// Churn: customers whose deliveries keep failing
+// ---------------------------------------------------------------------------------------
+
+type ChurnDto = {
+  windowDays: number;
+  threshold: number;
+  atRisk: Array<{
+    customerId: string;
+    displayName: string;
+    phone: string | null;
+    failedAttempts: number;
+    lastOutcome: string;
+    lastAttemptAt: string;
+    orderCount: number;
+  }>;
+  note: string;
+};
+
+export function ChurnPanel({ notify }: { notify: NotifyFn }) {
+  const [days, setDays] = useState(90);
+  const [data, setData] = useState<ChurnDto | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setData(await api<ChurnDto>(`/ops/churn?days=${days}`));
+    } catch (err) {
+      setError(formatError(err));
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusy(false);
+    }
+  }, [days, notify]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!data && !error) return <Loading error={null} />;
+  if (!data) return <Loading error={error} />;
+
+  return (
+    <section className="panel" aria-labelledby="churn-heading">
+      <div className="panel-head">
+        <h3 id="churn-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <UserRoundX size={18} aria-hidden="true" />
+          <span>Кто скоро уйдёт</span>
+        </h3>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <label className="muted" htmlFor="churn-window">Период</label>
+          <select
+            id="churn-window"
+            value={days}
+            onChange={event => setDays(Number(event.target.value))}
+            style={{ minBlockSize: 44 }}
+          >
+            <option value={30}>30 дней</option>
+            <option value={90}>90 дней</option>
+            <option value={180}>180 дней</option>
+            <option value={365}>365 дней</option>
+          </select>
+          <ReloadButton onClick={() => void load()} busy={busy} />
+        </div>
+      </div>
+
+      <div className="alert-banner" role="status" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
+        <span>{data.note}</span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBlockStart: 14 }}>
+        <Metric label="Клиентов в зоне риска" value={String(data.atRisk.length)} tone={data.atRisk.length > 0 ? "warn" : "default"} />
+        <Metric label="Порог неудачных доставок" value={String(data.threshold)} />
+      </div>
+
+      {data.atRisk.length === 0 ? (
+        <p className="muted" style={{ marginBlockStart: 14 }}>
+          За период ни у кого доставка не сорвалась дважды.
+        </p>
+      ) : (
+        <div className="table-wrap" style={{ marginBlockStart: 14 }}>
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>Клиент</th>
+                <th>Телефон</th>
+                <th>Неудачных доставок</th>
+                <th>Последняя причина</th>
+                <th>Когда</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.atRisk.map(row => (
+                <tr key={row.customerId}>
+                  <td>{row.displayName || "—"}</td>
+                  <td className="mono">{row.phone ?? "—"}</td>
+                  <td className="mono">{row.failedAttempts}</td>
+                  <td>{DELIVERY_OUTCOME_LABELS[row.lastOutcome] ?? row.lastOutcome}</td>
+                  <td className="mono">{dt(row.lastAttemptAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

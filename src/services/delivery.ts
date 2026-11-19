@@ -44,8 +44,12 @@ export async function assignPickup(
       assignedCourierId: shift.courierId,
     }).returning();
     const to = nextState(order.lifecycleState as "scheduled", "assign_pickup", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ version: orders.version });
+    // The optimistic lock only protects anything when its result is checked. Ignored, a lost
+    // update leaves the order in its old state while the route and the stop are committed.
+    if (!advanced) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: "order.assign_pickup", payload: { stopId: stop.id, courierId: shift.courierId },
@@ -140,8 +144,10 @@ export async function assignDelivery(
       windowEnd: input.windowEnd,
     }).returning();
     const to = nextState("ready", "dispatch", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ version: orders.version });
+    if (!advanced) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: "order.dispatch", payload: { stopId: stop.id, routeId: route.id },
@@ -205,8 +211,15 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
     const allGarments = await tx.select().from(garments).where(and(
       eq(garments.organizationId, principal.organizationId), eq(garments.orderId, order.id),
     ));
+    // Garments handed over in an earlier attempt are not outstanding any more. A recovery stop
+    // must deliver what is still pending; comparing against the whole historical set would make
+    // the exact-set check below impossible to satisfy, and a partially delivered order could
+    // then never be closed.
+    const pendingGarments = allGarments.filter(garment => garment.status !== "delivered");
+    const pendingIds = new Set(pendingGarments.map(garment => garment.id));
     const deliveredIds = input.deliveredGarmentIds ?? [];
     const uniqueDelivered = new Set(deliveredIds);
+    const outstandingDelivered = deliveredIds.filter(id => pendingIds.has(id));
     if (uniqueDelivered.size !== deliveredIds.length) {
       throw new AppError("CUSTODY_CONFLICT", "DUPLICATE_GARMENT_ID", { deliveredIds });
     }
@@ -219,24 +232,23 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
       if (owned.length !== uniqueDelivered.size) throw errors.notFound("garment");
     }
     // Handover requires the exact complete item set; duplicates or omissions must use `partial`.
-    if (input.outcome === "delivered" && allGarments.length > 0) {
-      const missing = allGarments.filter(garment => garment.status === "missing_reported");
+    if (input.outcome === "delivered" && pendingGarments.length > 0) {
+      const missing = pendingGarments.filter(garment => garment.status === "missing_reported");
       if (missing.length > 0) {
         throw new AppError("CUSTODY_CONFLICT", "MISSING_GARMENTS_CANNOT_BE_DELIVERED", {
           missingGarmentIds: missing.map(garment => garment.id),
         });
       }
-      const unprocessed = allGarments.filter(garment => garment.status === "returned_unprocessed");
+      const unprocessed = pendingGarments.filter(garment => garment.status === "returned_unprocessed");
       if (unprocessed.length > 0 && !order.returnReason) {
         throw new AppError("CUSTODY_CONFLICT", "RETURN_REASON_REQUIRED", {
           garmentIds: unprocessed.map(garment => garment.id),
         });
       }
-      const exactSet = deliveredIds.length === allGarments.length
-        && allGarments.every(garment => uniqueDelivered.has(garment.id));
+      const exactSet = pendingGarments.every(garment => uniqueDelivered.has(garment.id));
       if (!exactSet) {
         throw new AppError("CUSTODY_CONFLICT", "DELIVERY_SET_MISMATCH", {
-          required: allGarments.length, delivered: uniqueDelivered.size,
+          required: pendingGarments.length, delivered: outstandingDelivered.length,
         });
       }
     }
@@ -271,8 +283,10 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
     let recoveryStopId: string | null = null;
     if (input.outcome === "delivered" && (allGarments.length === 0 || uniqueDelivered.size === allGarments.length)) {
       state = nextState(order.lifecycleState as "out_for_delivery", "handover", principal);
-      await tx.update(orders).set({ lifecycleState: state, version: order.version + 1 })
-        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      const [handedOver] = await tx.update(orders).set({ lifecycleState: state, version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+        .returning({ version: orders.version });
+      if (!handedOver) throw errors.version(order.version);
       await tx.insert(custodyEvents).values({
         organizationId: principal.organizationId,
         orderId: order.id,
@@ -318,8 +332,10 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
       // The order deliberately stays out_for_delivery: partial delivery cannot close it.
     } else {
       state = nextState(order.lifecycleState as "out_for_delivery", "failed_attempt", principal);
-      await tx.update(orders).set({ lifecycleState: state, version: order.version + 1 })
-        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      const [failed] = await tx.update(orders).set({ lifecycleState: state, version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+        .returning({ version: orders.version });
+      if (!failed) throw errors.version(order.version);
       await tx.update(routeStops).set({ state: "failed", version: stop.version + 1 })
         .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
     }

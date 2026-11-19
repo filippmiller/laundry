@@ -43,6 +43,11 @@ function sorted(value: unknown): unknown {
  * sha256(JSON.stringify([clientEventId, deviceId, scannedType, scannedId, capturedAt, sortedContext]))
  */
 export async function scanHash(scan: Omit<QueuedScan, "payloadHash">): Promise<string> {
+  if (!globalThis.crypto?.subtle) {
+    // The server recomputes this hash with SHA-256 and rejects a mismatch as a tampered
+    // payload, so without SubtleCrypto the scan cannot be authenticated at all.
+    throw new Error("SECURE_CONTEXT_REQUIRED");
+  }
   const canonical = JSON.stringify([
     scan.clientEventId, scan.deviceId, scan.scannedType, scan.scannedId, scan.capturedAt, sorted(scan.context),
   ]);
@@ -53,7 +58,12 @@ export async function scanHash(scan: Omit<QueuedScan, "payloadHash">): Promise<s
 export function localDeviceId(): string {
   const existing = localStorage.getItem(DEVICE_KEY);
   if (existing) return existing;
-  const created = crypto.randomUUID();
+  // `crypto.randomUUID` only exists in a secure context. Without a fallback the whole courier
+  // workspace failed to mount outside one, so this mirrors the guard in `api.ts`.
+  const created =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   localStorage.setItem(DEVICE_KEY, created);
   return created;
 }

@@ -45,14 +45,19 @@ export async function openThread(
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
     const support = isSupport(principal);
-    if (!support) {
-      // A customer thread must be anchored to their own order so it can be scoped later.
-      if (!input.orderId) throw new AppError("VALIDATION_ERROR", "ORDER_REQUIRED_FOR_CUSTOMER_THREAD");
+    if (!support && !input.orderId) {
+      throw new AppError("VALIDATION_ERROR", "ORDER_REQUIRED_FOR_CUSTOMER_THREAD");
+    }
+    if (input.orderId) {
+      // Whoever opens the thread, the order has to belong to this tenant: the body chooses the
+      // anchor and a thread pointing at a foreign order is invisible to everyone afterwards.
       const [order] = await tx.select({ id: orders.id, customerId: orders.customerId }).from(orders).where(and(
         eq(orders.id, input.orderId),
         eq(orders.organizationId, principal.organizationId),
       )).limit(1);
-      if (!order || order.customerId !== principal.userId) throw errors.notFound("order");
+      if (!order) throw errors.notFound("order");
+      // A customer thread must be anchored to their own order so it can be scoped later.
+      if (!support && order.customerId !== principal.userId) throw errors.notFound("order");
     }
     const [thread] = await tx.insert(supportThreads).values({
       organizationId: principal.organizationId,

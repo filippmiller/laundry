@@ -114,6 +114,12 @@ export const CLAIM_STATE_LABELS: Record<string, string> = {
   reopened: "Переоткрыта",
 };
 
+export const ADJUSTMENT_STATE_LABELS: Record<string, string> = {
+  proposed: "Ожидает вашего решения",
+  accepted: "Согласовано",
+  declined: "Отклонено",
+};
+
 export const PAYMENT_STATE_LABELS: Record<string, string> = {
   pending: "Ожидает оплаты",
   authorized: "Авторизован",
@@ -134,6 +140,15 @@ export const GARMENT_STATUS_LABELS: Record<string, string> = {
   delivered: "Выдана клиенту",
   returned_unprocessed: "Возвращена без обработки",
   lost: "Утрачена",
+};
+
+export const DELIVERY_OUTCOME_LABELS: Record<string, string> = {
+  delivered: "Вручено",
+  partial: "Вручено частично",
+  recipient_unavailable: "Получателя нет на месте",
+  wrong_recipient: "Не тот получатель",
+  refused: "Отказались принять",
+  damaged: "Повреждено при доставке",
 };
 
 export const TIER_LABELS: Record<string, string> = {

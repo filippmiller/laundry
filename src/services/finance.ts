@@ -478,12 +478,27 @@ export async function createPartnerInvoice(  db: Db,
     organizationId: principal.organizationId, scope: "finance:partner_invoice", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, periodStart: input.periodStart.toISOString(), periodEnd: input.periodEnd.toISOString() }),
   }, async tx => {
-    const accruals = await tx.execute(sql`
-      SELECT id, amount_kopeks FROM partner_service_accruals
-      WHERE organization_id = ${principal.organizationId} AND partner_id = ${input.partnerId}
-        AND status = 'estimated' AND created_at BETWEEN ${input.periodStart} AND ${input.periodEnd}
+    // The partner must belong to the caller's tenant: the body chooses which partner record the
+    // invoice points at, and identity comes from the session, never from the request.
+    const [partner] = await tx.select({ id: partners.id }).from(partners).where(and(
+      eq(partners.id, input.partnerId), eq(partners.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!partner) throw errors.notFound("partner");
+    // Claim the accruals with one conditional UPDATE. Two invoices built for the same period
+    // must never bill the same work twice: the second transaction waits on the locked rows and
+    // then re-evaluates the predicate, so it finds nothing left to claim. A contested accrual is
+    // held out of the payable total until the dispute is resolved.
+    const claimed = await tx.execute(sql`
+      UPDATE partner_service_accruals
+         SET status = 'accrued'
+       WHERE organization_id = ${principal.organizationId}
+         AND partner_id = ${input.partnerId}
+         AND status = 'estimated'
+         AND disputed = FALSE
+         AND created_at BETWEEN ${input.periodStart} AND ${input.periodEnd}
+      RETURNING id, amount_kopeks
     `);
-    const rows = accruals.rows as Array<{ id: string; amount_kopeks: number }>;
+    const rows = claimed.rows as Array<{ id: string; amount_kopeks: number }>;
     const total = rows.reduce((sum, row) => sum + Number(row.amount_kopeks), 0);
     const [invoice] = await tx.insert(partnerInvoices).values({
       organizationId: principal.organizationId,
@@ -497,7 +512,6 @@ export async function createPartnerInvoice(  db: Db,
       await tx.insert(partnerInvoiceLines).values({
         invoiceId: invoice.id, accrualId: row.id, amountKopeks: Number(row.amount_kopeks),
       });
-      await tx.update(partnerServiceAccruals).set({ status: "accrued" }).where(eq(partnerServiceAccruals.id, row.id));
     }
     await appendEvent(tx, {
       principal, aggregateType: "partner_invoice", aggregateId: invoice.id,
@@ -534,6 +548,10 @@ export async function disputePartnerLine(
       reason: input.reason,
     }).returning();
     await tx.update(partnerInvoiceLines).set({ state: "disputed" }).where(eq(partnerInvoiceLines.id, line.id));
+    // The accrual carries the flag the payable analytics reads. Without it the contested amount
+    // stays inside the payable total and a disputed line is still money the platform owes.
+    await tx.update(partnerServiceAccruals).set({ disputed: true })
+      .where(eq(partnerServiceAccruals.id, line.accrualId));
     await appendEvent(tx, {
       principal, aggregateType: "partner_invoice", aggregateId: invoice.id,
       eventType: "partner_invoice.disputed", payload: { disputeId: dispute.id, lineId: line.id }, reason: input.reason,

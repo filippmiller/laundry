@@ -5,7 +5,7 @@ import {
   Package,
   AlertTriangle
 } from 'lucide-react';
-import { ItemMixPanel } from './analytics-panels';
+import { ChronometryPanel, ChurnPanel, ItemMixPanel } from './analytics-panels';
 
 type Shift = { id: string; courierId: string; courierName: string; vehiclePlate: string; capacityWeightGrams: number; state: string; startsAt: string; endsAt: string };
 type Partner = { id: string; name: string; status: string };
@@ -53,6 +53,12 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
 
       {/* 2. Объём: что приняли и сколько весит */}
       <ItemMixPanel notify={notify} />
+
+      {/* 3. Сколько идёт заказ: где теряется время */}
+      <ChronometryPanel notify={notify} />
+
+      {/* 4. Клиенты, у которых доставка не состоялась */}
+      <ChurnPanel notify={notify} />
 
       {/* 3. Назначение курьера на забор и фабрики-прачечной */}
       <section className="panel">

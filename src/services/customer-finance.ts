@@ -106,6 +106,9 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
       FROM orders o
       LEFT JOIN customer_invoices i
         ON i.order_id = o.id AND i.organization_id = o.organization_id
+          -- A voided invoice is not a debt. Counting it would tell the customer they owe the
+          -- full amount of an order that was returned unprocessed and never charged.
+          AND i.state IS DISTINCT FROM 'cancelled'
       LEFT JOIN quotes q ON q.id = o.quote_id
       LEFT JOIN tariff_versions tv ON tv.id = q.tariff_version_id
       LEFT JOIN LATERAL (

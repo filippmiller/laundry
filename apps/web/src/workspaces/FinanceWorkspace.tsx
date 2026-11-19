@@ -280,14 +280,23 @@ export function FinanceWorkspace({
       notify({ kind: "error", text: "Укажите даты начала и окончания периода" });
       return;
     }
+    // The date inputs carry "YYYY-MM-DD", which is not an ISO datetime: the route rejects it
+    // with 400. The bounds are sent as full instants, and the end of the period covers the whole
+    // last day so the accruals of that day are not left out.
+    const startInstant = new Date(`${periodStart}T00:00:00.000Z`);
+    const endInstant = new Date(`${periodEnd}T23:59:59.999Z`);
+    if (Number.isNaN(startInstant.getTime()) || Number.isNaN(endInstant.getTime())) {
+      notify({ kind: "error", text: "Укажите корректные даты периода" });
+      return;
+    }
     setBusyAction("partner-invoice");
     try {
       await api("/finance/partner-invoices", {
         method: "POST",
         body: {
           partnerId: trimmedPartner,
-          periodStart,
-          periodEnd,
+          periodStart: startInstant.toISOString(),
+          periodEnd: endInstant.toISOString(),
         },
       });
       notify({ kind: "ok", text: "Акт партнёру сформирован" });

@@ -10,7 +10,17 @@ export type HoldRequest = {
   principal: Principal;
   windowId: string;
   key: string;
-  expiresAt: Date;
+  /**
+   * Absolute expiry, for a caller that names a fixed instant — the demo book uses the window's
+   * own end, which is the same on every re-run.
+   */
+  expiresAt?: Date;
+  /**
+   * Lifetime in minutes, for a caller that asks for "the next ten minutes". The HTTP surface
+   * uses this: an absolute instant computed from the wall clock differs on every retry of the
+   * same request, which turned the replay of a hold into a payload conflict.
+   */
+  ttlMinutes?: number;
   orderId?: string | null;
   quoteId?: string | null;
   capacityUnits?: number;
@@ -26,12 +36,19 @@ export type HoldResult = {
 };
 
 function fingerprint(input: HoldRequest) {
+  // The fingerprint has to cover a value the caller controls. A lifetime in minutes is stable
+  // for a client that asks for ten minutes; an absolute instant is stable for a caller that
+  // names a fixed moment. Hashing a wall-clock derived quantity made every retry of the same
+  // request look like a changed body.
+  const lifetime = input.ttlMinutes !== undefined
+    ? { ttlMinutes: input.ttlMinutes }
+    : { expiresAt: input.expiresAt!.toISOString() };
   return hashRequest({
     organizationId: input.principal.organizationId,
     principalId: input.principal.userId,
     windowId: input.windowId,
     key: input.key,
-    expiresAt: input.expiresAt.toISOString(),
+    ...lifetime,
     orderId: input.orderId ?? null,
     quoteId: input.quoteId ?? null,
     capacityUnits: input.capacityUnits ?? 1,
@@ -46,10 +63,13 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
   const now = input.now ?? new Date();
   const units = input.capacityUnits ?? 1;
   if (!Number.isInteger(units) || units < 1) throw new AppError("VALIDATION_ERROR", "INVALID_CAPACITY_UNITS");
-  if (!(input.expiresAt instanceof Date) || !Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= now) {
+  const expiresAt = input.ttlMinutes !== undefined
+    ? new Date(now.getTime() + input.ttlMinutes * 60_000)
+    : input.expiresAt;
+  if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime()) || expiresAt <= now) {
     throw new AppError("INVALID_EXPIRY");
   }
-  const requestHash = fingerprint({ ...input, capacityUnits: units });
+  const requestHash = fingerprint({ ...input, expiresAt, capacityUnits: units });
 
   const result = await withIdempotency(db, {
     organizationId: input.principal.organizationId,
@@ -76,7 +96,7 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
       quoteId: input.quoteId ?? null,
       principalId: input.principal.userId,
       capacityUnits: units,
-      expiresAt: input.expiresAt,
+      expiresAt,
       idempotencyKey: input.key,
       requestHash,
       state: "held",
@@ -97,13 +117,13 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
       aggregateType: "slot_reservation",
       aggregateId: inserted[0].id,
       eventType: "slot.held",
-      payload: { windowId: input.windowId, capacityUnits: units, expiresAt: input.expiresAt.toISOString(), feeKopeks: window.feeKopeks },
+      payload: { windowId: input.windowId, capacityUnits: units, expiresAt: expiresAt.toISOString(), feeKopeks: window.feeKopeks },
     });
     return {
       reservationId: inserted[0].id,
       windowId: input.windowId,
       state: "held" as const,
-      expiresAt: input.expiresAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
     };
   });
   return { ...result.value, replayed: result.replayed };

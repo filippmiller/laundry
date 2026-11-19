@@ -88,6 +88,8 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
     const serviceIds = input.lines.map(line => line.serviceId);
     const serviceRows = await tx.select().from(services).where(and(
       eq(services.organizationId, principal.organizationId),
+      // A service withdrawn from the catalogue must not stay purchasable.
+      eq(services.active, true),
       inArray(services.id, serviceIds),
     ));
     const ruleRows = await tx.select().from(priceRules).where(eq(priceRules.tariffVersionId, tariff.id));
@@ -95,8 +97,20 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       const service = serviceRows.find(row => row.id === line.serviceId);
       const rule = ruleRows.find(row => row.serviceId === line.serviceId && row.tier === line.tier && row.active);
       if (!service || !rule) throw new AppError("VALIDATION_ERROR", "SERVICE_NOT_AVAILABLE", { serviceId: line.serviceId });
-      if (line.unit === "gram" && service.unit !== "gram") {
-        throw new AppError("VALIDATION_ERROR", "UNIT_MISMATCH", { serviceId: line.serviceId });
+      // The unit has to match the catalogue in both directions. Checking only "gram against a
+      // piece service" let a client price three pieces of a gram-priced wash as three grams.
+      if (line.unit !== service.unit) {
+        throw new AppError("VALIDATION_ERROR", "UNIT_MISMATCH", {
+          serviceId: line.serviceId, requested: line.unit, expected: service.unit,
+        });
+      }
+      // `price_rules.rounding_rule` is free text without a database constraint. An unknown value
+      // would fall through to the per-kilogram branch and quietly price the line ten times too
+      // low, so it is rejected instead of reinterpreted.
+      if (rule.roundingRule !== "exact" && rule.roundingRule !== "gram_up_to_100") {
+        throw new AppError("VALIDATION_ERROR", "UNKNOWN_ROUNDING_RULE", {
+          serviceId: line.serviceId, roundingRule: rule.roundingRule,
+        });
       }
       return {
         serviceId: line.serviceId,
@@ -105,7 +119,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
         unit: service.unit as "piece" | "gram",
         unitPriceKopeks: rule.unitPriceKopeks,
         minQuantity: rule.minQuantity,
-        roundingRule: rule.roundingRule as "exact" | "gram_up_to_100",
+        roundingRule: rule.roundingRule,
       };
     });
 

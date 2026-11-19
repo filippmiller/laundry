@@ -292,10 +292,17 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
 
   const handleReceiveBatch = async () => {
     if (!selectedOrder) return;
+    const manifestId = selectedOrder.manifestId;
+    if (!manifestId) {
+      notify({ kind: "error", text: "У заказа нет манифеста приёмки — партию принять нельзя" });
+      return;
+    }
     const actual = actualContainers.map((row) => ({
       containerCode: row.containerCode.trim(),
-      sealSerial: row.sealSerial.trim() || null,
-      weightGrams: Number(row.weightGrams) || 0,
+      sealSerial: row.sealSerial.trim(),
+      // The server reads `actualWeightGrams`. The old `weightGrams` key was dropped by the
+      // schema, so every receipt was rejected with 400 before it reached the service.
+      actualWeightGrams: Number(row.weightGrams) || 0,
     }));
     await runAction(
       "receive",
@@ -304,7 +311,7 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
           method: "POST",
           body: {
             orderId: selectedOrder.orderId,
-            manifestId: selectedOrder.manifestId,
+            manifestId,
             actual,
           },
         }),
@@ -347,15 +354,27 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
   // Stage 2 handlers
   const handleStartInspection = async () => {
     if (!selectedOrder) return;
-    await runAction(
-      "inspection",
-      () =>
-        api(`/partner/orders/${selectedOrder.orderId}/inspection`, {
-          method: "POST",
-          body: {},
-        }),
-      `Начат входной осмотр заказа ${selectedOrder.publicNumber}`,
-    );
+    setBusyAction("inspection");
+    notify(null);
+    try {
+      const result = await api<{ state: string; adjustment: { deltaKopeks: number } | null }>(
+        `/partner/orders/${selectedOrder.orderId}/inspection`,
+        { method: "POST", body: {} },
+      );
+      // The scales may disagree with the quote: in that case the customer gets a
+      // proposal, and the order waits for their answer instead of being billed.
+      notify({
+        kind: "ok",
+        text: result.adjustment
+          ? `Вес не совпал с котировкой. Клиенту отправлено предложение о доплате ${money(result.adjustment.deltaKopeks)}.`
+          : `Начат входной осмотр заказа ${selectedOrder.publicNumber}`,
+      });
+      await loadData();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const handleProposeAdjustment = async (e: React.FormEvent) => {

@@ -22,11 +22,17 @@ export function Router({
     <>
       {roles.includes("customer") && demo && <CustomerWorkspace demo={demo} notify={setNotice} />}
       {roles.includes("courier") && <CourierWorkspace demo={demo} notify={setNotice} />}
-      {roles.includes("laundry_operator") && <PartnerWorkspace notify={setNotice} />}
+      {(roles.includes("laundry_operator")
+        || roles.includes("laundry_supervisor")
+        || roles.includes("partner_finance")) && <PartnerWorkspace notify={setNotice} />}
       {roles.includes("dispatcher") && <DispatcherWorkspace notify={setNotice} />}
       {roles.includes("platform_admin") && <AdminWorkspace notify={setNotice} />}
       {roles.includes("platform_finance") && <FinanceWorkspace demo={demo} notify={setNotice} />}
-      {roles.includes("customer_support") && <SupportClaimsWorkspace notify={setNotice} />}
+      {(roles.includes("customer_support")
+        || roles.includes("claims_approver")
+        || roles.includes("claims_investigator")) && (
+        <SupportClaimsWorkspace notify={setNotice} roles={roles} />
+      )}
       {/* Add others as needed */}
     </>
   );

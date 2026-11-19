@@ -18,7 +18,7 @@ export type IdempotentInput = {
 
 export type IdempotentResult<T> = { value: T; replayed: boolean };
 
-function isUniqueViolation(error: unknown): boolean {
+export function isUniqueViolation(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 5 && current && typeof current === "object"; depth++) {
     const record = current as { code?: unknown; cause?: unknown };
@@ -94,6 +94,10 @@ export async function withIdempotencyFlat<T>(
 export function hashRequest(value: unknown) {
   // Deterministic ordering: object keys are sorted recursively.
   const stable = (node: unknown): unknown => {
+    // A Date has no own enumerable keys, so treating it as a plain record would turn every
+    // timestamp into `{}` and two bodies that differ only in a date would hash identically —
+    // the idempotency spine could then no longer tell a retry from a changed body.
+    if (node instanceof Date) return node.toISOString();
     if (Array.isArray(node)) return node.map(stable);
     if (node && typeof node === "object") {
       return Object.fromEntries(Object.keys(node as object).sort().map(key => [key, stable((node as Record<string, unknown>)[key])]));

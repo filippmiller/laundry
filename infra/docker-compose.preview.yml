@@ -105,6 +105,9 @@ services:
       PREVIEW_ACCESS_KEY: ${PREVIEW_ACCESS_KEY:-}
       VROOM_URL: ${VROOM_URL:-}
       LOG_LEVEL: warn
+      # The host's reverse proxy is the only hop in front of the API: without this the rate
+      # limiter sees the proxy's address and every client shares one budget.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
     # The host's Traefik reaches the api through the shared `coolify` network by the
     # alias below. The api keeps the stack's own network to reach the database.
     # Every entry uses the long form: compose v5 rejects a list that mixes the short

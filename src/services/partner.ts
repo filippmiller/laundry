@@ -2,7 +2,7 @@ import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
-  customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifests,
+  customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifestLines, intakeManifests,
   orderAdjustments, orderLines, orders, partnerContracts, partners, partnerReceiptLines,
   partnerReceipts, partnerServiceAccruals, paymentIntents, processingOperations, qualityChecks, seals,
   serviceWindows, slotReservations,
@@ -12,6 +12,7 @@ import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idempotency.js";
 import { nextState, type OrderState } from "../domain/order-state.js";
+import { describeWeightVariance, measureOrderWeightVariance } from "./weight-variance.js";
 
 export type ActualBag = { containerCode: string; sealSerial: string; actualWeightGrams: number };
 
@@ -146,6 +147,18 @@ export async function receiveHandoff(
       return { status: "discrepancy" as const, incidentId, receiptId: receipt.id };
     }
 
+    const manifestBagWeights = await tx.select({
+      description: intakeManifestLines.description,
+      weightGrams: intakeManifestLines.weightGrams,
+    }).from(intakeManifestLines).where(eq(intakeManifestLines.manifestId, manifest.id));
+    // Every bag has its own weight in the manifest; the manifest total is only the sum
+    // of them, so a receipt line must never claim the whole order's weight.
+    const expectedWeightByCode = new Map(
+      manifestBagWeights
+        .filter(line => line.description.startsWith("bag:"))
+        .map(line => [line.description.slice(4), line.weightGrams]),
+    );
+
     for (const bag of input.actual) {
       const expectedBag = expected.find(row => row.containerCode === bag.containerCode);
       const [container] = await tx.select().from(containers).where(eq(containers.code, bag.containerCode)).limit(1);
@@ -158,7 +171,7 @@ export async function receiveHandoff(
         containerId: container.id,
         expectedSealId: seal?.id ?? null,
         actualSealId: seal?.id ?? null,
-        expectedWeightGrams: manifest.weightGrams,
+        expectedWeightGrams: expectedWeightByCode.get(bag.containerCode) ?? manifest.weightGrams,
         actualWeightGrams: bag.actualWeightGrams,
         status: "matched",
       });
@@ -254,6 +267,75 @@ export async function reportSealBroken(
   });
 }
 
+/**
+ * Records what was really received on the order lines and, when the weighing disagrees
+ * with the quote by enough to matter, proposes the difference to the customer.
+ *
+ * The proposal is never applied on the spot: a weight difference is money, and money is
+ * only taken from a customer with their consent. The partner only says what the scales
+ * said; the customer decides what to pay.
+ */
+async function proposeWeightAdjustment(
+  tx: Db,
+  principal: Principal,
+  order: { id: string; customerId: string; organizationId: string },
+) {
+  const measurement = await measureOrderWeightVariance(tx, order.id, principal.organizationId);
+  if (!measurement) return null;
+  const { variance } = measurement;
+
+  for (const line of variance.lines) {
+    await tx.update(orderLines).set({
+      actualQuantity: line.actualGrams,
+      finalAmountKopeks: line.quotedAmountKopeks,
+      status: "measured",
+    }).where(eq(orderLines.id, line.lineId));
+  }
+
+  if (!variance.exceedsThreshold) return null;
+
+  const reason = describeWeightVariance(variance);
+  const [adjustment] = await tx.insert(orderAdjustments).values({
+    organizationId: principal.organizationId,
+    orderId: order.id,
+    proposedBy: principal.userId,
+    reason,
+    deltaKopeks: variance.deltaKopeks,
+    detailsJson: {
+      kind: "weight_variance",
+      quotedGrams: variance.quotedGrams,
+      receivedGrams: variance.receivedGrams,
+      deltaGrams: variance.deltaGrams,
+      lines: variance.lines.map(line => ({
+        lineId: line.lineId,
+        actualGrams: line.actualGrams,
+        deltaGrams: line.deltaGrams,
+        deltaKopeks: line.deltaKopeks,
+      })),
+    },
+  }).returning();
+  return { adjustmentId: adjustment.id, deltaKopeks: variance.deltaKopeks, reason };
+}
+
+/**
+ * Writes the customer's decision into the order lines: on acceptance the line is worth
+ * what the weighing showed, on a refusal it stays worth the quote the customer accepted.
+ */
+async function applyWeightDecision(tx: Db, adjustment: { detailsJson: unknown }, accept: boolean) {
+  const details = (adjustment.detailsJson ?? {}) as {
+    kind?: string;
+    lines?: Array<{ lineId: string; deltaKopeks: number }>;
+  };
+  if (details.kind !== "weight_variance" || !details.lines?.length) return;
+  for (const line of details.lines) {
+    const [row] = await tx.select().from(orderLines).where(eq(orderLines.id, line.lineId)).limit(1);
+    if (!row) continue;
+    await tx.update(orderLines).set({
+      finalAmountKopeks: accept ? row.quotedAmountKopeks + line.deltaKopeks : row.quotedAmountKopeks,
+    }).where(eq(orderLines.id, row.id));
+  }
+}
+
 export async function startInspection(db: Db, principal: Principal, input: { orderId: string; key: string }) {
   assertRole(principal, ...ROLE_GROUPS.partner);
   return withIdempotencyFlat(db, {
@@ -269,7 +351,20 @@ export async function startInspection(db: Db, principal: Principal, input: { ord
     await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
     await appendEvent(tx, { principal, aggregateType: "order", aggregateId: order.id, eventType: "order.inspect" });
-    return { orderId: order.id, state: to };
+
+    // The partner's own scales may disagree with the quote. When they do, the customer
+    // gets a proposal instead of a surprise on the invoice.
+    const proposal = await proposeWeightAdjustment(tx as Db, principal, order);
+    if (!proposal) return { orderId: order.id, state: to, adjustment: null };
+
+    const awaiting = nextState("inspection", "propose_change", principal);
+    await tx.update(orders).set({ lifecycleState: awaiting, version: order.version + 2 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
+    await appendEvent(tx, {
+      principal, aggregateType: "order", aggregateId: order.id, eventType: "order.propose_change",
+      payload: { adjustmentId: proposal.adjustmentId, deltaKopeks: proposal.deltaKopeks, source: "weight_variance" },
+    });
+    return { orderId: order.id, state: awaiting, adjustment: proposal };
   });
 }
 
@@ -344,6 +439,7 @@ export async function decideAdjustment(
     }).returning();
 
     if (input.accept) {
+      await applyWeightDecision(tx as Db, adjustment, true);
       const to = nextState(order.lifecycleState as "awaiting_approval", "approve_change", principal);
       await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
@@ -378,6 +474,7 @@ export async function decideAdjustment(
     }
 
     const inspected = nextState(order.lifecycleState as "awaiting_approval", "decline_change", principal);
+    await applyWeightDecision(tx as Db, adjustment, false);
     if (input.returnUnprocessed === true) {
       const hubState = nextState(inspected, "return_unprocessed");
       const readyState = nextState(hubState, "ready_for_return");

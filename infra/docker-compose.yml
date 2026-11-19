@@ -46,6 +46,9 @@ services:
       PREVIEW_ACCESS_KEY: ${PREVIEW_ACCESS_KEY:-}
       VROOM_URL: ${VROOM_URL:-}
       LOG_LEVEL: warn
+      # Caddy (infra/Caddyfile) is the only hop in front of the API: without this the rate
+      # limiter sees the proxy's address and every client shares one budget.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
     depends_on:
       db:
         condition: service_healthy

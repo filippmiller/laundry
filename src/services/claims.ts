@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, garments, orders,
@@ -79,6 +79,9 @@ export async function openClaim(
       await tx.insert(claimItems).values({ claimId: claim.id, garmentId, issue: input.claimType });
     }
     for (const asset of evidence) {
+      // The `evidence_legal_holds_sync` trigger already keeps the counter and the status in step
+      // with the hold rows. Counting it here as well made every hold count twice, so the counter
+      // could never come back down.
       await tx.insert(evidenceLegalHolds).values({
         organizationId: principal.organizationId,
         assetId: asset.id,
@@ -86,11 +89,6 @@ export async function openClaim(
         reason: `claim:${claim.id}`,
         placedBy: principal.userId,
       });
-      await tx.update(evidenceAssets).set({
-        status: "legal_hold",
-        legalHoldCount: sql`${evidenceAssets.legalHoldCount} + 1`,
-      })
-        .where(eq(evidenceAssets.id, asset.id));
     }
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.opened",

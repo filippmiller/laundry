@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { errors } from "../core/errors.js";
 
 /**
  * "What did we actually receive?" — the volume side of the business.
@@ -97,6 +98,10 @@ export async function itemMix(
 
   // A partner is limited to their own book of orders.
   const partnerScoped = hasRole(principal, ...ROLE_GROUPS.partner) && !hasRole(principal, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  // Every partner filter below is dropped when the id is null. A partner principal without a
+  // partner binding would therefore fall through to the tenant-wide query and see the whole
+  // book's categories, weights and variance — so refuse, exactly like `partnerAccruals` does.
+  if (partnerScoped && !principal.partnerId) throw errors.forbidden("partner scope required");
   const partnerId = partnerScoped ? principal.partnerId ?? null : null;
 
   const [categoryResult, statusResult, weightResult, dailyItemResult, dailyWeightResult, varianceResult, tierResult] =

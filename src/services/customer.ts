@@ -1,6 +1,6 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { buildings, cities, customerAddresses, entrances, notifications, orders } from "../db/schema.js";
+import { buildings, cities, customerAddresses, entrances, notifications, orders, outboxEvents } from "../db/schema.js";
 import { assertRole, type Principal } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -72,6 +72,13 @@ export async function removeAddress(db: Db, principal: Principal, addressId: str
     organizationId: principal.organizationId, scope: "addresses:remove", key: addressId, actorId: principal.userId,
     requestHash: hashRequest({ addressId, actorId: principal.userId }),
   }, async tx => {
+    // An order still points at the address. The foreign key would refuse the delete and the
+    // client would see an unexplained 500 instead of a conflict it can act on.
+    const [referencing] = await tx.select({ id: orders.id }).from(orders)
+      .where(eq(orders.addressId, addressId)).limit(1);
+    if (referencing) {
+      throw new AppError("CONFLICT_VERSION", "ADDRESS_IN_USE", { orderId: referencing.id });
+    }
     const deleted = await tx.delete(customerAddresses).where(and(
       eq(customerAddresses.id, addressId),
       eq(customerAddresses.organizationId, principal.organizationId),
@@ -153,9 +160,17 @@ export async function trackOrder(
   if (!(matches.rows as unknown[]).length) {
     throw new AppError("NOT_FOUND", "NOT_FOUND", { resource: "order" });
   }
+  // "Last update" is the last state change, not the moment the order was created: every
+  // transition of the order writes an event, so the newest one is the honest answer. Reporting
+  // `createdAt` showed a stale timestamp for every order that had ever moved.
+  const [lastEvent] = await db.select({ at: outboxEvents.createdAt })
+    .from(outboxEvents).where(and(
+      eq(outboxEvents.aggregateType, "order"),
+      eq(outboxEvents.aggregateId, order.id),
+    )).orderBy(desc(outboxEvents.createdAt)).limit(1);
   return {
     publicNumber: order.publicNumber,
     state: order.lifecycleState,
-    updatedAt: order.createdAt,
+    updatedAt: lastEvent?.at ?? order.createdAt,
   };
 }

@@ -10,12 +10,12 @@ import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { assertRole, hasRole, type Principal, type Role, ROLE_GROUPS } from "../core/context.js";
 import { AppError } from "../core/errors.js";
-import { hashRequest } from "../core/idempotency.js";
+import { hashRequest, isUniqueViolation } from "../core/idempotency.js";
 import { demoLogin, logout, previewDemoLogin, principalFromToken } from "../services/auth.js";
 import { isPreviewProfileEnabled } from "../core/preview.js";
 import { listServices, listWindows, resolveAddress } from "../services/catalog.js";
 import { createQuote, getQuote } from "../services/quotes.js";
-import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, rescheduleOrder, scheduleOrder } from "../services/orders.js";
+import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, repeatOrder, rescheduleOrder, scheduleOrder } from "../services/orders.js";
 import { recordIntake, registerCourierDevice, syncScanEvents } from "../services/intake.js";
 import {
   assignOrderToPartner, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
@@ -50,6 +50,8 @@ import { apiFinanceOverview } from "../services/api-overview.js";
 import { financeAnalytics } from "../services/finance-analytics.js";
 import { customerFinance } from "../services/customer-finance.js";
 import { itemMix } from "../services/item-mix.js";
+import { chronometry } from "../services/chronometry.js";
+import { churnSignal } from "../services/churn.js";
 import { renderDocument, type DocumentKind } from "../services/documents.js";
 import { requestOtpChallenge, unlockPreviewAccess, verifyOtpChallenge } from "../services/otp.js";
 import { and, eq, sql } from "drizzle-orm";
@@ -113,9 +115,18 @@ function idempotencyKey(ctx: Ctx) {
 }
 
 export function buildApp(db: Db) {
+  // Behind the project's own Caddy/Traefik the socket address is the proxy, so a limiter that
+  // keys on the socket address counts every internet client as one and the per-client budgets
+  // become a single shared bucket. The number of trusted hops is an operator decision, because a
+  // trusted hop that does not exist is a header any client can forge: the default trusts nothing
+  // and the deployments that really run behind the proxy say so (infra/docker-compose*.yml).
+  const trustedProxyHops = Number(process.env.TRUSTED_PROXY_HOPS ?? 0);
+  const trustProxy = Number.isFinite(trustedProxyHops) && trustedProxyHops > 0
+    ? (_address: string, hop: number) => hop < trustedProxyHops
+    : false;
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? "warn" },
-    trustProxy: false,
+    trustProxy,
     bodyLimit: 1_048_576,
   });
   const openapiPaths: Record<string, Record<string, unknown>> = {};
@@ -198,6 +209,26 @@ export function buildApp(db: Db) {
       });
       return;
     }
+    // A unique violation is a conflict with a row that already exists, not an unavailable
+    // dependency: the client can correct it. Reporting it as a 500 hides the cause.
+    if (isUniqueViolation(error)) {
+      reply.status(409).send({
+        error: { code: "CONFLICT", message: "CONFLICT", request_id: _request.id },
+      });
+      return;
+    }
+    // Any other client error keeps its own status. A body that is too large or a media type we
+    // do not accept is a mistake on the caller's side, not an outage of ours.
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      app.log.info(error);
+      reply.status(status).send({
+        error: {
+          code: status === 413 ? "PAYLOAD_TOO_LARGE" : status === 415 ? "UNSUPPORTED_MEDIA_TYPE" : "REQUEST_REJECTED",
+          message: "REQUEST_REJECTED", request_id: _request.id,
+        },
+      });
+      return;
+    }
     app.log.error(error);
     reply.status(500).send({
       error: { code: "DEPENDENCY_UNAVAILABLE", message: "INTERNAL_ERROR", request_id: _request.id },
@@ -252,6 +283,8 @@ export function buildApp(db: Db) {
         403: { description: "FORBIDDEN" },
         404: { description: "NOT_FOUND" },
         409: { description: "CONFLICT" },
+        429: { description: "RATE_LIMITED" },
+        500: { description: "INTERNAL_ERROR" },
       },
     };
     const bodySchema = jsonSchema(def.body);
@@ -260,8 +293,16 @@ export function buildApp(db: Db) {
     for (const [source, schema] of [["path", def.params], ["query", def.query]] as const) {
       const converted = jsonSchema(schema);
       if (converted && "properties" in converted) {
-        for (const [name, property] of Object.entries((converted as { properties: Record<string, unknown> }).properties)) {
-          parameters.push({ name, in: source, required: true, schema: property });
+        const jsonSchemaObject = converted as { properties: Record<string, unknown>; required?: string[] };
+        // The `required` flag has to come from the schema itself. Marking every parameter
+        // required made generated clients force callers to send optional query parameters.
+        const requiredNames = new Set(jsonSchemaObject.required ?? []);
+        for (const [name, property] of Object.entries(jsonSchemaObject.properties)) {
+          parameters.push({
+            name, in: source,
+            required: source === "path" ? true : requiredNames.has(name),
+            schema: property,
+          });
         }
       }
     }
@@ -287,12 +328,16 @@ export function buildApp(db: Db) {
   });
   add({
     method: "GET", path: "/health/ready", summary: "Readiness", tags: ["System"], public: true,
-    handler: async () => {
+    handler: async ctx => {
       try {
         await db.execute(sql`SELECT 1`);
         return { status: "ok", service: "laundry" };
-      } catch (e) {
-        return { status: "error", service: "laundry", error: e };
+      } catch {
+        // The orchestrator reads the status code: answering 200 while the database is down would
+        // keep the instance in rotation even though every request fails. The driver error is
+        // logged, never returned — it carries schema and table internals.
+        ctx.reply.status(503);
+        return { status: "error", service: "laundry" };
       }
     },
   });
@@ -484,7 +529,9 @@ export function buildApp(db: Db) {
       principal: ctx.principal,
       windowId: ctx.body.windowId,
       key: idempotencyKey(ctx),
-      expiresAt: new Date(Date.now() + ctx.body.ttlMinutes * 60_000),
+      // The lifetime, not an absolute instant: an instant derived from the wall clock differs on
+      // every retry of the same request, so the hold could never be replayed.
+      ttlMinutes: ctx.body.ttlMinutes,
     }),
   });
   add({
@@ -722,7 +769,10 @@ export function buildApp(db: Db) {
         declaredValueKopeks: z.number().int().nonnegative().optional(),
         condition: z.record(z.string(), z.unknown()).optional(),
         evidenceAssetIds: z.array(z.uuid()).optional(),
-      })).optional(),
+      })).max(MAX_DECLARED_ROWS).optional(),
+      // The customer's hand-over PIN: the service compares it with the order's handoff code.
+      // Without this key the schema stripped it and the PIN check never ran.
+      handoffCode: z.string().min(1).max(64).optional(),
       customerConfirmation: z.literal(true), courierConfirmation: z.literal(true), key: z.string().optional(),
     }),
     handler: async ctx => {
@@ -1118,6 +1168,30 @@ export function buildApp(db: Db) {
     roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.partner],
     query: z.object({ days: z.coerce.number().int().min(1).max(365).optional() }),
     handler: ctx => itemMix(db, ctx.principal, { days: ctx.query.days as number | undefined }),
+  });
+  add({
+    method: "GET", path: "/ops/chronometry", summary: "How long an order takes at every stage: median and tail", tags: ["Dispatch"],
+    roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.support],
+    query: z.object({ days: z.coerce.number().int().min(1).max(365).optional() }),
+    handler: ctx => chronometry(db, ctx.principal, { days: ctx.query.days as number | undefined }),
+  });
+  add({
+    method: "GET", path: "/ops/churn", summary: "Customers whose deliveries keep failing", tags: ["Dispatch", "Support"],
+    roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.support],
+    query: z.object({
+      days: z.coerce.number().int().min(1).max(365).optional(),
+      threshold: z.coerce.number().int().min(1).max(20).optional(),
+    }),
+    handler: ctx => churnSignal(db, ctx.principal, {
+      days: ctx.query.days as number | undefined,
+      threshold: ctx.query.threshold as number | undefined,
+    }),
+  });
+  add({
+    method: "GET", path: "/orders/:id/repeat", summary: "Service lines of a past order, to order the same thing again", tags: ["Customer"],
+    params: idSchema,
+    roles: ["customer", ...ROLE_GROUPS.dispatcher],
+    handler: ctx => repeatOrder(db, ctx.principal, ctx.params.id),
   });
 
   add({

@@ -303,6 +303,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
       deltaKopeks: orderAdjustments.deltaKopeks,
       state: orderAdjustments.state,
       version: orderAdjustments.version,
+      detailsJson: orderAdjustments.detailsJson,
       createdAt: orderAdjustments.createdAt,
     }).from(orderAdjustments).where(and(
       eq(orderAdjustments.organizationId, principal.organizationId),
@@ -382,6 +383,35 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
   const canSeeHandoff = isOwnerCustomer
     || hasRole(principal, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
 
+  // A weight proposal carries its own arithmetic, so the customer can see why the
+  // difference is what it is instead of taking the number on faith.
+  const adjustments = adjustmentRows.map(adj => {
+    const details = (adj.detailsJson ?? {}) as {
+      kind?: string;
+      quotedGrams?: number;
+      receivedGrams?: number;
+      deltaGrams?: number;
+    };
+    return {
+      id: adj.id,
+      proposedBy: adj.proposedBy,
+      reason: adj.reason,
+      deltaKopeks: adj.deltaKopeks,
+      state: adj.state,
+      version: adj.version,
+      createdAt: adj.createdAt,
+      ...(details.kind === "weight_variance"
+        ? {
+          weight: {
+            quotedGrams: details.quotedGrams ?? 0,
+            receivedGrams: details.receivedGrams ?? 0,
+            deltaGrams: details.deltaGrams ?? 0,
+          },
+        }
+        : {}),
+    };
+  });
+
   return {
     id: order.id,
     publicNumber: order.publicNumber,
@@ -395,14 +425,62 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     garments: garmentRows,
     declaredItems,
     containers: containersView,
-    adjustments: adjustmentRows,
+    adjustments,
     createdAt: order.createdAt,
+    ...(isOwnerCustomer ? { acceptedQuoteHash: order.acceptedQuoteHash } : {}),
     ...(canSeeHandoff
       ? {
         handoffCode: order.handoffCode ?? null,
         qrPayload: order.handoffCode ? `LND1:ORD:${order.id}:${order.handoffCode}` : null,
       }
       : {}),
+  };
+}
+
+/**
+ * "The same order again."
+ *
+ * A customer who ordered a wash of five kilograms last week usually wants the same
+ * thing next week. This service hands the customer back the service lines of a past
+ * order so that a new quote can be requested in one tap. It creates nothing: the price
+ * is recalculated, the slots are booked anew and the customer confirms again — a repeat
+ * order is a new order, never a silent copy.
+ */
+export async function repeatOrder(db: Db, principal: Principal, orderId: string) {
+  const order = await loadOrder(db, principal, orderId);
+  if (!hasRole(principal, "customer", ...ROLE_GROUPS.dispatcher)) throw errors.forbidden("repeat is a customer action");
+  if (order.customerId !== principal.userId && !hasRole(principal, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.admin)) {
+    throw errors.notFound("order");
+  }
+
+  const [quote] = await db.select({ snapshotJson: quotes.snapshotJson }).from(quotes).where(and(
+    eq(quotes.id, order.quoteId),
+    eq(quotes.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!quote) throw errors.notFound("quote");
+
+  const snapshot = (quote.snapshotJson ?? {}) as QuoteSnapshot;
+  const lines = (snapshot.lines ?? [])
+    .filter(line => line.kind === "service")
+    .map(line => ({
+      serviceId: line.serviceId ?? "",
+      tier: line.tier ?? "economy",
+      quantity: line.quantity,
+      unit: line.unit,
+    }));
+
+  const [address] = await db.select({ buildingId: customerAddresses.buildingId }).from(customerAddresses).where(and(
+    eq(customerAddresses.id, order.addressId),
+    eq(customerAddresses.organizationId, principal.organizationId),
+  )).limit(1);
+
+  return {
+    sourceOrderId: order.id,
+    publicNumber: order.publicNumber,
+    buildingId: address?.buildingId ?? null,
+    lines,
+    declaredItems: snapshot.declaredItems ?? [],
+    note: "Повтор заказа — это новая котировка с новой ценой и новыми слотами. Старый заказ не меняется.",
   };
 }
 

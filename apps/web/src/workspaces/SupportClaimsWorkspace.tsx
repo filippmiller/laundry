@@ -196,7 +196,7 @@ const THREAD_STATUS_LABELS: Record<string, string> = {
   closed: "Закрыто",
 };
 
-export function SupportClaimsWorkspace({ notify }: { notify: NotifyFn }) {
+export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; roles: string[] }) {
   const searchInputId = useId();
   const ticketChannelId = useId();
   const ticketSubjectId = useId();
@@ -207,6 +207,7 @@ export function SupportClaimsWorkspace({ notify }: { notify: NotifyFn }) {
   const decisionRationaleId = useId();
   const reopenReasonId = useId();
   const hideReviewReasonId = useId();
+  const closeReasonId = useId();
 
   // 1. Order search & quick ticket modal
   const [orderQuery, setOrderQuery] = useState("");
@@ -229,6 +230,7 @@ export function SupportClaimsWorkspace({ notify }: { notify: NotifyFn }) {
   const [replyText, setReplyText] = useState("");
   const [sendingReply, setSendingReply] = useState(false);
   const [closingThread, setClosingThread] = useState(false);
+  const [closeReason, setCloseReason] = useState("");
 
   // 3. Claims & legal hold evidence
   const [claims, setClaims] = useState<ClaimSummary[]>([]);
@@ -448,13 +450,21 @@ export function SupportClaimsWorkspace({ notify }: { notify: NotifyFn }) {
 
   async function handleCloseThread() {
     if (!selectedThreadId) return;
+    // The route requires a reason of at least three characters: an empty body was rejected with
+    // 400, so the "Закрыть обращение" button never worked.
+    const reason = closeReason.trim();
+    if (reason.length < 3) {
+      notify({ kind: "error", text: "Укажите причину закрытия обращения" });
+      return;
+    }
     setClosingThread(true);
     try {
       await api(`/support/threads/${selectedThreadId}/close`, {
         method: "POST",
-        body: {},
+        body: { reason },
       });
       notify({ kind: "ok", text: "Обращение закрыто" });
+      setCloseReason("");
       await Promise.all([loadThreadDetail(selectedThreadId), loadThreads()]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -579,6 +589,9 @@ export function SupportClaimsWorkspace({ notify }: { notify: NotifyFn }) {
   const activeClaimStatus = claimDetail ? getClaimStatus(claimDetail.claim) : "";
   const canReopenClaim =
     activeClaimStatus === "resolved" || activeClaimStatus === "denied_with_reason";
+  // Deciding a claim is reserved for the approver role. Offering the button to a plain support
+  // agent only produced a 403 from the service.
+  const canDecideClaims = roles.includes("claims_approver") || roles.includes("platform_admin");
   const compPreviewKopeks = Math.round(Number(compRub.replace(",", ".")) * 100);
 
   return (
@@ -750,16 +763,27 @@ export function SupportClaimsWorkspace({ notify }: { notify: NotifyFn }) {
                     </div>
                   </div>
                   {threadDetail.thread.status !== "closed" && (
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => void handleCloseThread()}
-                      disabled={closingThread}
-                      style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-                    >
-                      <CheckCircle2 size={16} aria-hidden="true" />
-                      <span>{closingThread ? "Закрытие..." : "Закрыть обращение"}</span>
-                    </button>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <input
+                        id={closeReasonId}
+                        className="input"
+                        value={closeReason}
+                        onChange={event => setCloseReason(event.target.value)}
+                        placeholder="Причина закрытия"
+                        aria-label="Причина закрытия обращения"
+                        style={{ minWidth: "14rem" }}
+                      />
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => void handleCloseThread()}
+                        disabled={closingThread}
+                        style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
+                      >
+                        <CheckCircle2 size={16} aria-hidden="true" />
+                        <span>{closingThread ? "Закрытие..." : "Закрыть обращение"}</span>
+                      </button>
+                    </div>
                   )}
                 </div>
 
@@ -941,19 +965,21 @@ export function SupportClaimsWorkspace({ notify }: { notify: NotifyFn }) {
                     <span>Предложить компенсацию</span>
                   </button>
 
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={() => {
-                      setDecisionOutcome("resolved");
-                      setDecisionRationale("");
-                      setDecisionModalOpen(true);
-                    }}
-                    style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-                  >
-                    <Scale size={16} aria-hidden="true" />
-                    <span>Вынести решение</span>
-                  </button>
+                  {canDecideClaims && (
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => {
+                        setDecisionOutcome("resolved");
+                        setDecisionRationale("");
+                        setDecisionModalOpen(true);
+                      }}
+                      style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
+                    >
+                      <Scale size={16} aria-hidden="true" />
+                      <span>Вынести решение</span>
+                    </button>
+                  )}
 
                   {canReopenClaim && (
                     <button
