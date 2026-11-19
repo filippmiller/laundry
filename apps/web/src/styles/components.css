@@ -1462,7 +1462,7 @@
     color: var(--ink-inverse);
   }
 
-  @media (pointer: coarse) {
+  @media (pointer: coarse), (max-width: 900px) {
     button.btn--sm,
     .segmented__item {
       min-block-size: var(--tap-target);

@@ -406,6 +406,12 @@ export const COMPENSATION_STATE_LABELS: Record<string, string> = {
   paid: "Выплачена",
 };
 
+export const SHIFT_STATE_LABELS: Record<string, string> = {
+  planned: "Запланирована",
+  active: "Активна",
+  completed: "Завершена",
+};
+
 export const PARTNER_INVOICE_STATE_LABELS: Record<string, string> = {
   draft: "Черновик",
   issued: "Выставлен",
@@ -561,6 +567,7 @@ export const ERROR_LABELS: Record<string, string> = {
   OTP_EXPIRED_OR_MISSING: "Код подтверждения истёк или не запрашивался",
   IDEMPOTENCY_OWNER_MISMATCH: "Ключ идемпотентности принадлежит другому пользователю",
   EVIDENCE_ON_LEGAL_HOLD: "Доказательство защищено юридическим удержанием по претензии",
+  ORDER_ALREADY_ASSIGNED: "Заказ уже закреплён за другой фабрикой-прачечной",
 };
 
 export function formatError(err: unknown): string {

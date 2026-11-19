@@ -1,24 +1,93 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  Building2,
   Package,
-  Truck
-} from 'lucide-react';
-import { api, dt } from '../api';
-import { stateLabel } from "../labels";
-import { ChronometryPanel, ChurnPanel, ItemMixPanel } from './analytics-panels';
+  RefreshCw,
+  Truck,
+} from "lucide-react";
+import { api, dt } from "../api";
+import {
+  formatError,
+  ORDER_STATE_LABELS,
+  orderStateTone,
+  SHIFT_STATE_LABELS,
+  stateLabel,
+} from "../labels";
+import { ChronometryPanel, ChurnPanel, ItemMixPanel } from "./analytics-panels";
+import { Badge, type BadgeTone } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { DataTable, type DataTableColumn } from "../components/ui/DataTable";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Select } from "../components/ui/Field";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Reveal, Stagger } from "../components/ui/Reveal";
 import { StatGrid, StatTile } from "../components/ui/StatTile";
 
-type Shift = { id: string; courierId: string; courierName: string; vehiclePlate: string; capacityWeightGrams: number; state: string; startsAt: string; endsAt: string };
+type Shift = {
+  id: string;
+  courierId: string;
+  courierName: string | null;
+  vehiclePlate: string | null;
+  capacityWeightGrams: number | null;
+  state: string;
+  startsAt: string;
+  endsAt: string;
+};
 type Partner = { id: string; name: string; status: string };
-type Order = { id: string; publicNumber: string; lifecycleState: string; assignedPartnerId: string | null; returnReason: string | null; buildingId: string; address: string; createdAt: string };
-type Discrepancy = { id: string; orderId: string; publicNumber: string; orderState: string; kind: string; detailsJson: string; openedAt: string };
-type Metric = { ordersByState: Record<string, number>; openClaims: number; openThreads: number; capturedKopeks: number; pendingOutbox: number; activeShifts: number };
+type QueueOrder = {
+  id: string;
+  publicNumber: string;
+  lifecycleState: string;
+  assignedPartnerId: string | null;
+  returnReason: string | null;
+  buildingId: string;
+  address: string;
+  createdAt: string;
+};
+type ScopedOrder = {
+  id: string;
+  publicNumber: string;
+  state: string;
+  version: number;
+  customerId: string;
+  assignedPartnerId: string | null;
+  createdAt: string;
+};
+type Discrepancy = {
+  id: string;
+  orderId: string;
+  publicNumber: string;
+  orderState: string;
+  kind: string;
+  detailsJson: string;
+  openedAt: string;
+};
+type Metric = {
+  ordersByState: Record<string, number>;
+  openClaims: number;
+  openThreads: number;
+  capturedKopeks: number;
+  pendingOutbox: number;
+  activeShifts: number;
+};
+type DispatchOverview = {
+  shifts: Shift[];
+  partners: Partner[];
+  pickupQueue: QueueOrder[];
+  deliveryQueue: QueueOrder[];
+  returnOrders: QueueOrder[];
+  openDiscrepancies: Discrepancy[];
+};
+
+const PARTNER_ASSIGNABLE_STATES = new Set([
+  "confirmed",
+  "scheduled",
+  "pickup_assigned",
+  "picked_up",
+  "at_hub",
+]);
 
 /** Latin codes of the intake incidents — the dispatcher reads them in Russian. */
 const DISCREPANCY_KIND_LABELS: Record<string, string> = {
@@ -27,37 +96,207 @@ const DISCREPANCY_KIND_LABELS: Record<string, string> = {
   weight_variance: "Расхождение по весу",
 };
 
+const SHIFT_STATE_TONES: Record<string, BadgeTone> = {
+  active: "ok",
+  planned: "info",
+  completed: "neutral",
+};
+
 const SHIFT_COLUMNS: DataTableColumn<Shift>[] = [
-  { key: "courier", header: "Курьер", render: (shift) => shift.courierName },
-  { key: "plate", header: "Автомобиль", render: (shift) => <span className="mono">{shift.vehiclePlate}</span> },
-  { key: "capacity", header: "Грузоподъёмность", render: (shift) => `${Math.round(shift.capacityWeightGrams / 1000)} кг`, numeric: true },
-  { key: "window", header: "Смена", render: (shift) => <span className="muted">{dt(shift.startsAt)} — {dt(shift.endsAt)}</span> },
+  { key: "courier", header: "Курьер", render: shift => shift.courierName ?? "—" },
+  {
+    key: "state",
+    header: "Статус",
+    render: shift => (
+      <Badge tone={SHIFT_STATE_TONES[shift.state] ?? "neutral"}>
+        {stateLabel(SHIFT_STATE_LABELS, shift.state)}
+      </Badge>
+    ),
+  },
+  {
+    key: "plate",
+    header: "Автомобиль",
+    render: shift => <span className="mono">{shift.vehiclePlate ?? "—"}</span>,
+  },
+  {
+    key: "capacity",
+    header: "Грузоподъёмность",
+    render: shift =>
+      shift.capacityWeightGrams ? `${Math.round(shift.capacityWeightGrams / 1000)} кг` : "—",
+    numeric: true,
+  },
+  {
+    key: "window",
+    header: "Смена",
+    render: shift => (
+      <span className="muted">
+        {dt(shift.startsAt)} — {dt(shift.endsAt)}
+      </span>
+    ),
+  },
 ];
 
 const DISCREPANCY_COLUMNS: DataTableColumn<Discrepancy>[] = [
-  { key: "number", header: "Номер", render: (item) => <span className="mono">{item.publicNumber}</span> },
-  { key: "kind", header: "Тип", render: (item) => stateLabel(DISCREPANCY_KIND_LABELS, item.kind) },
-  { key: "opened", header: "Дата", render: (item) => <span className="muted">{dt(item.openedAt)}</span> },
+  { key: "number", header: "Номер", render: item => <span className="mono">{item.publicNumber}</span> },
+  { key: "kind", header: "Тип", render: item => stateLabel(DISCREPANCY_KIND_LABELS, item.kind) },
+  { key: "opened", header: "Дата", render: item => <span className="muted">{dt(item.openedAt)}</span> },
 ];
 
-export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "error"; text: string } | null) => void }) {
-  const [data, setData] = useState<{ shifts: Shift[]; partners: Partner[]; pickupQueue: Order[]; deliveryQueue: Order[]; returnOrders: Order[]; openDiscrepancies: Discrepancy[] } | null>(null);
+export function DispatcherWorkspace({
+  notify,
+}: {
+  notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
+}) {
+  const [data, setData] = useState<DispatchOverview | null>(null);
   const [metrics, setMetrics] = useState<Metric | null>(null);
+  const [orders, setOrders] = useState<ScopedOrder[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [busyAction, setBusyAction] = useState<"pickup" | "partner" | "delivery" | null>(null);
 
-  const fetchData = async () => {
+  const [pickupOrderId, setPickupOrderId] = useState("");
+  const [pickupShiftId, setPickupShiftId] = useState("");
+  const [partnerOrderId, setPartnerOrderId] = useState("");
+  const [partnerId, setPartnerId] = useState("");
+  const [deliveryOrderId, setDeliveryOrderId] = useState("");
+  const [deliveryShiftId, setDeliveryShiftId] = useState("");
+
+  const fetchData = useCallback(async () => {
+    setRefreshing(true);
     try {
-      const [overview, metricsData] = await Promise.all([
-        api<{ shifts: Shift[]; partners: Partner[]; pickupQueue: Order[]; deliveryQueue: Order[]; returnOrders: Order[]; openDiscrepancies: Discrepancy[] }>('/dispatch/overview'),
-        api<Metric>('/ops/metrics')
+      const [overview, metricsData, orderRows] = await Promise.all([
+        api<DispatchOverview>("/dispatch/overview"),
+        api<Metric>("/ops/metrics"),
+        api<ScopedOrder[]>("/orders"),
       ]);
       setData(overview);
       setMetrics(metricsData);
-    } catch {
-      notify({ kind: 'error', text: 'Ошибка загрузки данных' });
+      setOrders(orderRows);
+    } catch (error) {
+      notify({ kind: "error", text: `Ошибка загрузки данных: ${formatError(error)}` });
+    } finally {
+      setRefreshing(false);
     }
-  };
+  }, [notify]);
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  const activeShifts = useMemo(
+    () => (data?.shifts ?? []).filter(shift => shift.state === "active"),
+    [data?.shifts],
+  );
+  const assignablePickupOrders = useMemo(
+    () => (data?.pickupQueue ?? []).filter(order => order.lifecycleState === "scheduled"),
+    [data?.pickupQueue],
+  );
+  const assignableDeliveryOrders = useMemo(
+    () => (data?.deliveryQueue ?? []).filter(order => order.lifecycleState === "ready"),
+    [data?.deliveryQueue],
+  );
+  const assignablePartnerOrders = useMemo(
+    () =>
+      orders.filter(
+        order => PARTNER_ASSIGNABLE_STATES.has(order.state) && !order.assignedPartnerId,
+      ),
+    [orders],
+  );
+  const partnerById = useMemo(
+    () => new Map((data?.partners ?? []).map(partner => [partner.id, partner.name])),
+    [data?.partners],
+  );
+
+  // Keep select defaults aligned with currently available options after refreshes.
+  useEffect(() => {
+    setPickupOrderId(current =>
+      assignablePickupOrders.some(order => order.id === current)
+        ? current
+        : (assignablePickupOrders[0]?.id ?? ""),
+    );
+  }, [assignablePickupOrders]);
+
+  useEffect(() => {
+    setPickupShiftId(current =>
+      activeShifts.some(shift => shift.id === current) ? current : (activeShifts[0]?.id ?? ""),
+    );
+    setDeliveryShiftId(current =>
+      activeShifts.some(shift => shift.id === current) ? current : (activeShifts[0]?.id ?? ""),
+    );
+  }, [activeShifts]);
+
+  useEffect(() => {
+    setPartnerOrderId(current =>
+      assignablePartnerOrders.some(order => order.id === current)
+        ? current
+        : (assignablePartnerOrders[0]?.id ?? ""),
+    );
+  }, [assignablePartnerOrders]);
+
+  useEffect(() => {
+    const partners = data?.partners ?? [];
+    setPartnerId(current =>
+      partners.some(partner => partner.id === current) ? current : (partners[0]?.id ?? ""),
+    );
+  }, [data?.partners]);
+
+  useEffect(() => {
+    setDeliveryOrderId(current =>
+      assignableDeliveryOrders.some(order => order.id === current)
+        ? current
+        : (assignableDeliveryOrders[0]?.id ?? ""),
+    );
+  }, [assignableDeliveryOrders]);
+
+  async function handleAssignPickup() {
+    if (!pickupOrderId || !pickupShiftId) return;
+    setBusyAction("pickup");
+    try {
+      await api("/dispatch/pickups/assign", {
+        method: "POST",
+        body: { orderId: pickupOrderId, shiftId: pickupShiftId },
+      });
+      notify({ kind: "ok", text: "Курьер назначен на забор" });
+      await fetchData();
+    } catch (error) {
+      notify({ kind: "error", text: formatError(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleAssignPartner() {
+    if (!partnerOrderId || !partnerId) return;
+    setBusyAction("partner");
+    try {
+      await api(`/dispatch/orders/${partnerOrderId}/partner`, {
+        method: "POST",
+        body: { partnerId },
+      });
+      notify({ kind: "ok", text: "Фабрика-прачечная назначена" });
+      await fetchData();
+    } catch (error) {
+      notify({ kind: "error", text: formatError(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleAssignDelivery() {
+    if (!deliveryOrderId || !deliveryShiftId) return;
+    setBusyAction("delivery");
+    try {
+      await api("/dispatch/deliveries", {
+        method: "POST",
+        body: { orderId: deliveryOrderId, shiftId: deliveryShiftId },
+      });
+      notify({ kind: "ok", text: "Курьер назначен на доставку" });
+      await fetchData();
+    } catch (error) {
+      notify({ kind: "error", text: formatError(error) });
+    } finally {
+      setBusyAction(null);
+    }
+  }
 
   if (!data || !metrics) {
     return (
@@ -73,6 +312,16 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
         eyebrow="Диспетчерская"
         title="Диспетчерский пульт"
         lede="Рейсы, слоты и расхождения"
+        actions={
+          <Button
+            variant="ghost"
+            leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+            disabled={refreshing}
+            onClick={() => void fetchData()}
+          >
+            {refreshing ? "Обновляем…" : "Обновить"}
+          </Button>
+        }
       />
 
       {/* 1. Операционная сводка и ёмкость */}
@@ -80,12 +329,36 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
         <CardHeader title="Операционная сводка и ёмкость" />
         <CardBody>
           <StatGrid>
-            <StatTile label="Активные смены" value={metrics.activeShifts} icon={<Truck size={16} aria-hidden="true" />} />
-            <StatTile label="Очередь забора" value={data.pickupQueue.length} icon={<Package size={16} aria-hidden="true" />} />
-            <StatTile label="Готовы к доставке" value={data.deliveryQueue.length} icon={<Truck size={16} aria-hidden="true" />} />
-            <StatTile label="Возвраты без обработки" value={data.returnOrders.length} icon={<AlertTriangle size={16} aria-hidden="true" />} />
-            <StatTile label="Инциденты приёмки" value={data.openDiscrepancies.length} icon={<AlertTriangle size={16} aria-hidden="true" />} />
-            <StatTile label="Открытые претензии" value={metrics.openClaims} icon={<AlertTriangle size={16} aria-hidden="true" />} />
+            <StatTile
+              label="Активные смены"
+              value={metrics.activeShifts}
+              icon={<Truck size={16} aria-hidden="true" />}
+            />
+            <StatTile
+              label="Очередь забора"
+              value={data.pickupQueue.length}
+              icon={<Package size={16} aria-hidden="true" />}
+            />
+            <StatTile
+              label="Готовы к доставке"
+              value={data.deliveryQueue.length}
+              icon={<Truck size={16} aria-hidden="true" />}
+            />
+            <StatTile
+              label="Возвраты без обработки"
+              value={data.returnOrders.length}
+              icon={<AlertTriangle size={16} aria-hidden="true" />}
+            />
+            <StatTile
+              label="Инциденты приёмки"
+              value={data.openDiscrepancies.length}
+              icon={<AlertTriangle size={16} aria-hidden="true" />}
+            />
+            <StatTile
+              label="Открытые претензии"
+              value={metrics.openClaims}
+              icon={<AlertTriangle size={16} aria-hidden="true" />}
+            />
           </StatGrid>
         </CardBody>
       </Card>
@@ -99,15 +372,155 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
       {/* 4. Клиенты, у которых доставка не состоялась */}
       <ChurnPanel notify={notify} />
 
-      {/* 5. Назначение курьера на забор и фабрики-прачечной */}
+      {/* 5. Назначение курьера на забор, фабрики-прачечной и доставки */}
       <Card>
-        <CardHeader title="Назначение курьера на забор и фабрики-прачечной" />
-        <CardBody>
+        <CardHeader
+          title="Назначение курьера и фабрики-прачечной"
+          subtitle="Назначения выполняются напрямую в очереди диспетчеризации."
+        />
+        <CardBody className="stack">
+          <div className="grid-three">
+            <div className="stack">
+              <h4 className="section-title">Назначить курьера на забор</h4>
+              <Select
+                label="Заказ со слотом"
+                value={pickupOrderId}
+                disabled={assignablePickupOrders.length === 0 || busyAction !== null}
+                onChange={event => setPickupOrderId(event.target.value)}
+              >
+                {assignablePickupOrders.length === 0 ? (
+                  <option value="">Нет заказов в ожидании забора</option>
+                ) : (
+                  assignablePickupOrders.map(order => (
+                    <option key={order.id} value={order.id}>
+                      {order.publicNumber} · {order.address}
+                    </option>
+                  ))
+                )}
+              </Select>
+              <Select
+                label="Активная смена"
+                value={pickupShiftId}
+                disabled={activeShifts.length === 0 || busyAction !== null}
+                onChange={event => setPickupShiftId(event.target.value)}
+              >
+                {activeShifts.length === 0 ? (
+                  <option value="">Нет активных смен</option>
+                ) : (
+                  activeShifts.map(shift => (
+                    <option key={shift.id} value={shift.id}>
+                      {shift.courierName ?? "Курьер"} · {shift.vehiclePlate ?? "—"}
+                    </option>
+                  ))
+                )}
+              </Select>
+              <Button
+                variant="primary"
+                block
+                leadingIcon={<Truck size={16} aria-hidden="true" />}
+                disabled={!pickupOrderId || !pickupShiftId || busyAction !== null}
+                onClick={() => void handleAssignPickup()}
+              >
+                {busyAction === "pickup" ? "Назначаем…" : "Назначить на забор"}
+              </Button>
+            </div>
+
+            <div className="stack">
+              <h4 className="section-title">Назначить фабрику-прачечную</h4>
+              <Select
+                label="Заказ без фабрики"
+                value={partnerOrderId}
+                disabled={assignablePartnerOrders.length === 0 || busyAction !== null}
+                onChange={event => setPartnerOrderId(event.target.value)}
+              >
+                {assignablePartnerOrders.length === 0 ? (
+                  <option value="">Нет заказов без фабрики</option>
+                ) : (
+                  assignablePartnerOrders.map(order => (
+                    <option key={order.id} value={order.id}>
+                      {order.publicNumber} · {stateLabel(ORDER_STATE_LABELS, order.state)}
+                    </option>
+                  ))
+                )}
+              </Select>
+              <Select
+                label="Фабрика-прачечная"
+                value={partnerId}
+                disabled={data.partners.length === 0 || busyAction !== null}
+                onChange={event => setPartnerId(event.target.value)}
+              >
+                {data.partners.length === 0 ? (
+                  <option value="">Фабрики не настроены</option>
+                ) : (
+                  data.partners.map(partner => (
+                    <option key={partner.id} value={partner.id}>
+                      {partner.name}
+                    </option>
+                  ))
+                )}
+              </Select>
+              <Button
+                variant="primary"
+                block
+                leadingIcon={<Building2 size={16} aria-hidden="true" />}
+                disabled={!partnerOrderId || !partnerId || busyAction !== null}
+                onClick={() => void handleAssignPartner()}
+              >
+                {busyAction === "partner" ? "Назначаем…" : "Назначить фабрику"}
+              </Button>
+            </div>
+
+            <div className="stack">
+              <h4 className="section-title">Назначить доставку клиенту</h4>
+              <Select
+                label="Готовый заказ"
+                value={deliveryOrderId}
+                disabled={assignableDeliveryOrders.length === 0 || busyAction !== null}
+                onChange={event => setDeliveryOrderId(event.target.value)}
+              >
+                {assignableDeliveryOrders.length === 0 ? (
+                  <option value="">Нет готовых заказов</option>
+                ) : (
+                  assignableDeliveryOrders.map(order => (
+                    <option key={order.id} value={order.id}>
+                      {order.publicNumber} · {order.address}
+                    </option>
+                  ))
+                )}
+              </Select>
+              <Select
+                label="Активная смена"
+                value={deliveryShiftId}
+                disabled={activeShifts.length === 0 || busyAction !== null}
+                onChange={event => setDeliveryShiftId(event.target.value)}
+              >
+                {activeShifts.length === 0 ? (
+                  <option value="">Нет активных смен</option>
+                ) : (
+                  activeShifts.map(shift => (
+                    <option key={shift.id} value={shift.id}>
+                      {shift.courierName ?? "Курьер"} · {shift.vehiclePlate ?? "—"}
+                    </option>
+                  ))
+                )}
+              </Select>
+              <Button
+                variant="primary"
+                block
+                leadingIcon={<Package size={16} aria-hidden="true" />}
+                disabled={!deliveryOrderId || !deliveryShiftId || busyAction !== null}
+                onClick={() => void handleAssignDelivery()}
+              >
+                {busyAction === "delivery" ? "Назначаем…" : "Назначить доставку"}
+              </Button>
+            </div>
+          </div>
+
           <DataTable
             columns={SHIFT_COLUMNS}
             rows={data.shifts}
-            rowKey={(shift) => shift.id}
-            caption="Активные смены курьеров"
+            rowKey={shift => shift.id}
+            caption="Активные и запланированные смены курьеров"
             empty={
               <EmptyState
                 icon={<Truck size={20} aria-hidden="true" />}
@@ -133,6 +546,14 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
                     <Reveal as="li" key={order.id} className="data-row">
                       <span className="mono">{order.publicNumber}</span>
                       <span className="muted">{order.address}</span>
+                      <Badge tone={orderStateTone(order.lifecycleState)}>
+                        {stateLabel(ORDER_STATE_LABELS, order.lifecycleState)}
+                      </Badge>
+                      {order.assignedPartnerId ? (
+                        <Badge tone="neutral">
+                          {partnerById.get(order.assignedPartnerId) ?? "Фабрика назначена"}
+                        </Badge>
+                      ) : null}
                     </Reveal>
                   ))}
                 </Stagger>
@@ -148,6 +569,9 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
                     <Reveal as="li" key={order.id} className="data-row">
                       <span className="mono">{order.publicNumber}</span>
                       <span className="muted">{order.address}</span>
+                      <Badge tone={orderStateTone(order.lifecycleState)}>
+                        {stateLabel(ORDER_STATE_LABELS, order.lifecycleState)}
+                      </Badge>
                     </Reveal>
                   ))}
                 </Stagger>
@@ -164,7 +588,7 @@ export function DispatcherWorkspace({ notify }: { notify: (n: { kind: "ok" | "er
           <DataTable
             columns={DISCREPANCY_COLUMNS}
             rows={data.openDiscrepancies}
-            rowKey={(item) => item.id}
+            rowKey={item => item.id}
             caption="Открытые расхождения при приёмке"
             empty={
               <EmptyState
