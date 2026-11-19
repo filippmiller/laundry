@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   buildings, cities, courierShifts, customerAddresses, documentVersions, membershipRoles, memberships,
@@ -94,6 +94,14 @@ async function ensureDemoEconomics(db: Db, organizationId: string): Promise<void
       set: { pricesJson: DEMO_WHOLESALE },
     });
   }
+
+  // Keep demo tenant service windows open with ample headroom so repeat demo visits and live smoke
+  // runs never exhaust the original 20-order window capacity. Do NOT mutate endsAt: demo-book
+  // idempotency keys fingerprint window.endsAt as the hold expiry.
+  await db.update(serviceWindows).set({
+    capacityOrders: sql`GREATEST(${serviceWindows.capacityOrders}, ${serviceWindows.reservedOrders} + ${serviceWindows.safetyBufferOrders} + 50, 200)`,
+    status: "open",
+  }).where(eq(serviceWindows.organizationId, organizationId));
 }
 
 export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }) {
@@ -122,20 +130,20 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
 
   const [pickup1] = await db.insert(serviceWindows).values({
     organizationId: org.id, buildingId: building1.id, kind: "pickup", isShared: true,
-    startsAt: pickupStartsAt, endsAt: pickupEndsAt, capacityOrders: 20, feeKopeks: 0, status: "open",
+    startsAt: pickupStartsAt, endsAt: pickupEndsAt, capacityOrders: 200, feeKopeks: 0, status: "open",
   }).returning();
   const [delivery1] = await db.insert(serviceWindows).values({
     organizationId: org.id, buildingId: building1.id, kind: "delivery", isShared: true,
-    startsAt: deliveryStartsAt, endsAt: deliveryEndsAt, capacityOrders: 20, feeKopeks: 0, status: "open",
+    startsAt: deliveryStartsAt, endsAt: deliveryEndsAt, capacityOrders: 200, feeKopeks: 0, status: "open",
   }).returning();
   await db.insert(serviceWindows).values([
     {
       organizationId: org.id, buildingId: building2.id, kind: "pickup", isShared: true,
-      startsAt: pickupStartsAt, endsAt: pickupEndsAt, capacityOrders: 20, feeKopeks: 0, status: "open",
+      startsAt: pickupStartsAt, endsAt: pickupEndsAt, capacityOrders: 200, feeKopeks: 0, status: "open",
     },
     {
       organizationId: org.id, buildingId: building2.id, kind: "delivery", isShared: true,
-      startsAt: deliveryStartsAt, endsAt: deliveryEndsAt, capacityOrders: 20, feeKopeks: 0, status: "open",
+      startsAt: deliveryStartsAt, endsAt: deliveryEndsAt, capacityOrders: 200, feeKopeks: 0, status: "open",
     },
   ]);
 
