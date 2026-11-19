@@ -1,5 +1,6 @@
 import EmbeddedPostgres from "embedded-postgres";
 import { Client } from "pg";
+import { execFileSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { runMigrations } from "../src/db/migrate.js";
@@ -51,11 +52,75 @@ function withTimeout<T>(work: Promise<T>, ms: number, label: string) {
   });
 }
 
+/**
+ * Reap the helper processes of a cluster whose postmaster is gone.
+ *
+ * A PostgreSQL postmaster passes its listening socket to every child it forks. When the
+ * postmaster dies - because the process that owned it was killed, or because the cluster
+ * crash-looped - the children keep the inherited socket alive. The port then stays in the
+ * "listening" state with an owner PID that no longer exists, nothing answers on it, and the
+ * next boot binds the same port anyway (Windows `SO_REUSEADDR`) and then fights the dead
+ * socket: the cluster starts, its checkpointer dies, it reinitialises, and it never prints
+ * "ready to accept connections". That is how a test run could leave behind a port that no
+ * later run could use.
+ *
+ * A helper without a postmaster is dead weight that holds a port hostage, so it is killed.
+ * Only helpers are touched: a live cluster keeps its postmaster and is left alone.
+ */
+function reapOrphanedHelpers(): number {
+  if (process.platform !== "win32") {
+    try {
+      const listing = execFileSync("ps", ["-eo", "pid=,ppid=,args="], { encoding: "utf8" });
+      const live = new Set<number>();
+      const rows = listing.split("\n").map(line => line.trim()).filter(Boolean);
+      for (const row of rows) {
+        const pid = Number(row.split(/\s+/)[0]);
+        if (Number.isInteger(pid)) live.add(pid);
+      }
+      let killed = 0;
+      for (const row of rows) {
+        const [pidText, ppidText, ...rest] = row.split(/\s+/);
+        if (!rest.join(" ").includes("--forkchild")) continue;
+        const pid = Number(pidText);
+        const parent = Number(ppidText);
+        if (!Number.isInteger(pid) || live.has(parent)) continue;
+        try {
+          process.kill(pid, "SIGKILL");
+          killed += 1;
+        } catch {
+          // Already gone.
+        }
+      }
+      return killed;
+    } catch {
+      return 0;
+    }
+  }
+  try {
+    const script = [
+      "$all = Get-CimInstance Win32_Process -Filter \"Name='postgres.exe'\"",
+      "$live = @{}",
+      "foreach ($p in $all) { $live[[int]$p.ProcessId] = $true }",
+      "$orphans = $all | Where-Object { $_.CommandLine -like '*--forkchild=*' -and -not $live.ContainsKey([int]$_.ParentProcessId) }",
+      "$orphans | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+      "$orphans.Count",
+    ].join("; ");
+    const output = execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8" });
+    return Number(output.trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function boot(dataDir: string, reset: boolean) {
   if (reset) rmSync(dataDir, { recursive: true, force: true });
   if (existsSync(dataDir) && !existsSync(resolve(dataDir, "PG_VERSION"))) {
     rmSync(dataDir, { recursive: true, force: true });
   }
+  // Free the port before the cluster binds it: a helper of a dead cluster may still hold the
+  // listening socket of that dead postmaster.
+  const reaped = reapOrphanedHelpers();
+  if (reaped) console.warn(`reaped ${reaped} orphaned postgres helper(s) before booting on 55433`);
   const fresh = !existsSync(resolve(dataDir, "PG_VERSION"));
   server = new EmbeddedPostgres({
     databaseDir: dataDir,
@@ -161,4 +226,9 @@ async function resetTestData(connectionString: string) {
 
 export async function teardown() {
   await server?.stop();
+  // `stop()` kills the wrapper but the helpers of the cluster can survive it, and a surviving
+  // helper keeps the dead postmaster's listening socket on 55433. The next run would then bind
+  // a port that is already held and crash-loop instead of starting.
+  const reaped = reapOrphanedHelpers();
+  if (reaped) console.warn(`reaped ${reaped} orphaned postgres helper(s) after the run`);
 }
