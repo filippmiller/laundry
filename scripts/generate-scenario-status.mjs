@@ -1,24 +1,40 @@
 /**
- * Generate the honest scenario status register from the audit's scenario catalog.
+ * Generate the honest scenario status register from the audit's scenario catalog
+ * and the repository's evidence map (`docs/coverage/SCENARIO_EVIDENCE_MAP.json`).
  *
- * The catalog is a *plan*: 217 described scenarios that have to be executed and evidenced.
- * This script writes one register entry per scenario with a truthful status and never
- * promotes a scenario to a passing state without an evidence pointer that exists on disk.
+ * The catalog is a *plan*: 217 described scenarios + 36 cross-role flows that have to be
+ * executed and evidenced. This script writes one register entry per scenario with a truthful
+ * status and NEVER promotes a scenario to a passing state without an evidence pointer that
+ * exists on disk.
  *
  *   node scripts/generate-scenario-status.mjs [--check]
  *
- * `--check` verifies that the committed register is still in sync with the catalog and
- * that no entry claims an executed status without real evidence. It is used by the test
- * suite, so a fabricated pass cannot be committed unnoticed.
+ * `--check` verifies that the committed register and execution CSV are in sync with the
+ * catalog and evidence map, and that no entry claims an executed status without real evidence
+ * on disk. It is used by the test suite, so a fabricated pass cannot be committed unnoticed.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CATALOG = "docs/audits/PR3_audit/laundry_PR3_audit_2026-11-17/02_SCENARIO_CATALOG.json";
+const EVIDENCE_MAP = "docs/coverage/SCENARIO_EVIDENCE_MAP.json";
 const REGISTER = "docs/coverage/PR3_SCENARIO_STATUS.json";
 const EXECUTION_CSV = "docs/coverage/PR3_SCENARIO_EXECUTION.csv";
 const PREVIOUS_CSV = "docs/coverage/PR3_SCENARIO_EXECUTION.csv";
+
+export const ALLOWED_STATUSES = new Set([
+  "SPEC",
+  "IMPLEMENTED_UNTESTED",
+  "UNIT_PASS",
+  "API_PASS",
+  "BROWSER_PASS",
+  "CROSS_ROLE_PASS",
+  "HARDWARE_PASS",
+  "BLOCKED",
+  "FAIL",
+  "N/A",
+]);
 
 /** Statuses that mean "this scenario was actually executed and proved". */
 export const EXECUTED_STATUSES = new Set([
@@ -36,9 +52,30 @@ export const EXECUTED_STATUSES = new Set([
  */
 const EXECUTED_PROOFS = [
   {
-    area: "Customer ordering journey",
-    proves: "A customer quotes, holds both windows, books an order, gets an invoice and pays with the fake provider; the price comes from the server.",
-    test: "scripts/smoke-e2e.mjs",
+    area: "Cross-role end-to-end journeys (F01..F35 across all 8 roles)",
+    proves: "Real PostgreSQL + Fastify integration tests covering economy/mixed pickup, partner receipt/discrepancy/QC/rewash, adjustments, return-unprocessed, partial delivery, claims with legal hold, compensations, partner accruals/credit notes, concurrent refunds, signed webhooks, admin role/session revocation, last-admin guard, cross-org phone isolation, and guest tracking anti-enumeration.",
+    test: "test/scenarios/cross-role-flows.integration.test.ts",
+    command: "npx vitest run test/scenarios/cross-role-flows.integration.test.ts",
+    kind: "CROSS_ROLE_PASS",
+  },
+  {
+    area: "Adversarial business & security edge cases",
+    proves: "Cross-customer container/seal reuse blocked (tenant-scoped uniqueness preserved), friendly-fraud delivery PIN + claim compensation + chargeback race, partner payout Separation of Duties (SoD), broken seal & 50% underweight custody discrepancies, 2x multi-tenant/multi-role negative matrix (AD-020/OP-011), safety_buffer_orders concurrency, optimistic lock race, and idempotency key payload mismatch.",
+    test: "test/scenarios/adversarial-business-edge-cases.integration.test.ts",
+    command: "npx vitest run test/scenarios/adversarial-business-edge-cases.integration.test.ts",
+    kind: "CROSS_ROLE_PASS",
+  },
+  {
+    area: "API contract & frontend route synchronization (OP-013, OP-014)",
+    proves: "Every frontend api(...) call in apps/web/src matches a mounted backend route & HTTP method in buildApp(), and OpenAPI 3.1.0 preserves optional query params and security metadata.",
+    test: "test/ops/api-contract-sync.test.ts",
+    command: "npx vitest run test/ops/api-contract-sync.test.ts",
+    kind: "API_PASS",
+  },
+  {
+    area: "Customer ordering journey & mobile/desktop UI",
+    proves: "A customer quotes, holds both windows, books an order, gets an invoice and pays with the fake provider; mobile/desktop Russian UI renders cleanly.",
+    test: "scripts/smoke-e2e.mjs, scripts/verify-mobile-ui.mjs",
     command: "npm run smoke",
     kind: "BROWSER_PASS",
   },
@@ -107,6 +144,34 @@ const EXECUTED_PROOFS = [
   },
 ];
 
+function readEvidenceMap() {
+  if (!fs.existsSync(EVIDENCE_MAP)) {
+    return { scenarios: {}, cross_role_flows: {} };
+  }
+  const parsed = JSON.parse(fs.readFileSync(EVIDENCE_MAP, "utf8"));
+  return {
+    scenarios: parsed.scenarios ?? {},
+    cross_role_flows: parsed.cross_role_flows ?? {},
+  };
+}
+
+function validateEvidenceEntry(id, entry) {
+  if (!ALLOWED_STATUSES.has(entry.status)) {
+    throw new Error(`${EVIDENCE_MAP}: ${id} has unknown status "${entry.status}"`);
+  }
+  const evidence = entry.evidence ?? null;
+  if (EXECUTED_STATUSES.has(entry.status)) {
+    if (!Array.isArray(evidence) || evidence.length === 0) {
+      throw new Error(`${EVIDENCE_MAP}: ${id} claims ${entry.status} without evidence files`);
+    }
+    for (const pointer of evidence) {
+      if (!fs.existsSync(pointer)) {
+        throw new Error(`${EVIDENCE_MAP}: ${id} references missing evidence file "${pointer}"`);
+      }
+    }
+  }
+}
+
 /**
  * The 12 original end-to-end journeys (E2E-001..012) were tracked by an earlier wave in
  * `docs/coverage/PR3_SCENARIO_EXECUTION.csv`, with statuses and a commit sha that are now
@@ -127,10 +192,11 @@ function readPreviousE2eRows() {
     rows.set(id, {
       title: column("title"),
       status: column("status"),
-      roles: column("role_paths_covered"),
-      evidence: column("api_service_evidence"),
+      roles: column("role_paths_covered") || column("roles"),
+      evidence: column("api_service_evidence") || column("evidence"),
       browser: column("browser_evidence"),
-      commit: column("commit"),
+      commit: column("commit") || column("previous_wave_commit"),
+      previousStatus: column("previous_wave_status") || column("status"),
       gap: column("remaining_gap"),
     });
   }
@@ -157,37 +223,43 @@ function buildExecutionCsv(catalog, register) {
       row.evidence,
       row.browser,
       register.as_of,
-      row.status,
+      row.previousStatus,
       row.commit,
       row.gap,
     ]);
   }
 
-  for (const flow of catalog.cross_role_flows ?? []) {
+  for (const flow of register.cross_role_flows) {
+    const evList = flow.evidence ?? [];
+    const browserEv = evList.filter(p => p.includes("smoke-e2e") || p.includes("verify-mobile-ui")).join("; ");
+    const apiEv = evList.filter(p => !p.includes("smoke-e2e") && !p.includes("verify-mobile-ui")).join("; ");
     rows.push([
       flow.id,
       flow.flow,
       "cross_role_flow",
-      "SPEC",
+      flow.status,
       (flow.roles ?? []).join("+"),
-      "",
-      "",
+      apiEv,
+      browserEv,
       register.as_of,
-      flow.status ?? "",
+      flow.previous_status ?? "NOT_RUN_CURRENT_HEAD",
       "",
-      "Cross-role journey described in the audit catalogue; not executed as a named journey test.",
+      flow.note,
     ]);
   }
 
   for (const scenario of register.scenarios) {
+    const evList = scenario.evidence ?? [];
+    const browserEv = evList.filter(p => p.includes("smoke-e2e") || p.includes("verify-mobile-ui")).join("; ");
+    const apiEv = evList.filter(p => !p.includes("smoke-e2e") && !p.includes("verify-mobile-ui")).join("; ");
     rows.push([
       scenario.id,
       scenario.scenario,
       "scenario",
       scenario.status,
       scenario.role_area,
-      "",
-      "",
+      apiEv,
+      browserEv,
       register.as_of,
       "NOT_RUN_CURRENT_HEAD",
       "",
@@ -198,32 +270,80 @@ function buildExecutionCsv(catalog, register) {
   return `${rows.map(row => row.map(csvCell).join(",")).join("\n")}\n`;
 }
 
+function countByStatus(items) {
+  return items.reduce((acc, item) => {
+    acc[item.status] = (acc[item.status] ?? 0) + 1;
+    return acc;
+  }, {});
+}
+
 function build() {
   const catalog = JSON.parse(fs.readFileSync(CATALOG, "utf8"));
-  const scenarios = catalog.scenarios.map(scenario => ({
-    id: scenario.id,
-    role_area: scenario.role_area,
-    priority: scenario.priority,
-    scenario: scenario.scenario,
-    required_acceptance: scenario.required_acceptance,
-    // The catalog itself says NOT_RUN_CURRENT_HEAD for every scenario; nothing in this
-    // repository executes a scenario *by its id*, so the register keeps that truth and
-    // records the executed proofs separately.
-    status: "SPEC",
-    evidence: null,
-    note: "Described in the audit catalog. Not executed as a named scenario test in this wave — see executed_proofs for the areas that do have real coverage.",
-  }));
+  const evidenceMap = readEvidenceMap();
+
+  const scenarios = catalog.scenarios.map(scenario => {
+    const mapped = evidenceMap.scenarios[scenario.id];
+    if (mapped) {
+      validateEvidenceEntry(scenario.id, mapped);
+      return {
+        id: scenario.id,
+        role_area: scenario.role_area,
+        priority: scenario.priority,
+        scenario: scenario.scenario,
+        required_acceptance: scenario.required_acceptance,
+        status: mapped.status,
+        evidence: mapped.evidence ?? null,
+        note: mapped.note,
+      };
+    }
+    return {
+      id: scenario.id,
+      role_area: scenario.role_area,
+      priority: scenario.priority,
+      scenario: scenario.scenario,
+      required_acceptance: scenario.required_acceptance,
+      status: "SPEC",
+      evidence: null,
+      note: "Described in the audit catalog; not yet implemented or executed as an automated test.",
+    };
+  });
+
+  const crossRoleFlows = (catalog.cross_role_flows ?? []).map(flow => {
+    const mapped = evidenceMap.cross_role_flows[flow.id];
+    if (mapped) {
+      validateEvidenceEntry(flow.id, mapped);
+      return {
+        id: flow.id,
+        flow: flow.flow,
+        roles: flow.roles ?? [],
+        status: mapped.status,
+        evidence: mapped.evidence ?? null,
+        note: mapped.note,
+        previous_status: flow.status ?? "NOT_RUN_CURRENT_HEAD",
+      };
+    }
+    return {
+      id: flow.id,
+      flow: flow.flow,
+      roles: flow.roles ?? [],
+      status: "SPEC",
+      evidence: null,
+      note: "Cross-role journey described in the audit catalog; not yet executed as a named journey test.",
+      previous_status: flow.status ?? "NOT_RUN_CURRENT_HEAD",
+    };
+  });
 
   return {
     as_of: new Date().toISOString().slice(0, 10),
     source_catalog: CATALOG,
+    source_evidence_map: EVIDENCE_MAP,
     catalog_baseline_sha: catalog.baseline_sha,
     total: scenarios.length,
-    counts: scenarios.reduce((acc, scenario) => {
-      acc[scenario.status] = (acc[scenario.status] ?? 0) + 1;
-      return acc;
-    }, {}),
+    counts: countByStatus(scenarios),
+    cross_role_total: crossRoleFlows.length,
+    cross_role_counts: countByStatus(crossRoleFlows),
     executed_proofs: EXECUTED_PROOFS,
+    cross_role_flows: crossRoleFlows,
     scenarios,
   };
 }
@@ -243,21 +363,47 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
       console.error(`${REGISTER} does not cover the catalog — run: node scripts/generate-scenario-status.mjs`);
       process.exit(1);
     }
-    const allowed = new Set([
-      "SPEC", "IMPLEMENTED_UNTESTED", "UNIT_PASS", "API_PASS", "BROWSER_PASS",
-      "CROSS_ROLE_PASS", "HARDWARE_PASS", "BLOCKED", "FAIL", "N/A",
-    ]);
     for (const scenario of committed.scenarios) {
-      if (!allowed.has(scenario.status)) {
+      if (!ALLOWED_STATUSES.has(scenario.status)) {
         console.error(`${REGISTER}: ${scenario.id} has an unknown status "${scenario.status}"`);
         process.exit(1);
       }
-      if (EXECUTED_STATUSES.has(scenario.status) && !(scenario.evidence ?? []).length) {
-        console.error(`${REGISTER}: ${scenario.id} claims ${scenario.status} without evidence`);
-        process.exit(1);
+      if (EXECUTED_STATUSES.has(scenario.status)) {
+        if (!(scenario.evidence ?? []).length) {
+          console.error(`${REGISTER}: ${scenario.id} claims ${scenario.status} without evidence`);
+          process.exit(1);
+        }
+        for (const pointer of scenario.evidence) {
+          if (!fs.existsSync(pointer)) {
+            console.error(`${REGISTER}: ${scenario.id} references missing evidence "${pointer}"`);
+            process.exit(1);
+          }
+        }
       }
     }
-    console.log(`${REGISTER}: ${committed.scenarios.length} scenarios, counts ${JSON.stringify(committed.counts)}`);
+    for (const flow of committed.cross_role_flows ?? []) {
+      if (!ALLOWED_STATUSES.has(flow.status)) {
+        console.error(`${REGISTER}: ${flow.id} has an unknown status "${flow.status}"`);
+        process.exit(1);
+      }
+      if (EXECUTED_STATUSES.has(flow.status)) {
+        if (!(flow.evidence ?? []).length) {
+          console.error(`${REGISTER}: ${flow.id} claims ${flow.status} without evidence`);
+          process.exit(1);
+        }
+        for (const pointer of flow.evidence) {
+          if (!fs.existsSync(pointer)) {
+            console.error(`${REGISTER}: ${flow.id} references missing evidence "${pointer}"`);
+            process.exit(1);
+          }
+        }
+      }
+    }
+    if (JSON.stringify(committed.counts) !== JSON.stringify(register.counts)) {
+      console.error(`${REGISTER} counts are out of sync with ${EVIDENCE_MAP} — run: node scripts/generate-scenario-status.mjs`);
+      process.exit(1);
+    }
+    console.log(`${REGISTER}: ${committed.scenarios.length} scenarios, counts ${JSON.stringify(committed.counts)}, cross_role_counts ${JSON.stringify(committed.cross_role_counts ?? {})}`);
     if (!fs.existsSync(EXECUTION_CSV)) {
       console.error(`${EXECUTION_CSV} is missing — run: node scripts/generate-scenario-status.mjs`);
       process.exit(1);
@@ -277,7 +423,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
     const catalog = JSON.parse(fs.readFileSync(CATALOG, "utf8"));
     fs.mkdirSync(path.dirname(REGISTER), { recursive: true });
     fs.writeFileSync(REGISTER, `${JSON.stringify(register, null, 2)}\n`, "utf8");
-    console.log(`wrote ${REGISTER}: ${register.total} scenarios, counts ${JSON.stringify(register.counts)}`);
+    console.log(`wrote ${REGISTER}: ${register.total} scenarios, counts ${JSON.stringify(register.counts)}, cross_role_counts ${JSON.stringify(register.cross_role_counts)}`);
     // The execution CSV is written last so that the previous wave's E2E rows can still be read.
     fs.writeFileSync(EXECUTION_CSV, buildExecutionCsv(catalog, register), "utf8");
     const rows = fs.readFileSync(EXECUTION_CSV, "utf8").split(/\r?\n/).filter(line => line.trim()).length - 1;
