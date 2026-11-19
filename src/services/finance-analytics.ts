@@ -14,7 +14,7 @@ import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
  *
  * - an invoice is **receivable** until it is collected in full; a refund creates a **credit**
  *   (we owe the customer back) rather than reducing the receivable below zero;
- * - a partner accrual is **payable** until a payout is scheduled for it;
+ * - a partner accrual is **payable** until a payout is approved or paid for it;
  * - a disputed accrual is **not** payable — it is held out of the payable total and reported
  *   separately, because a disputed line may never become a debt at all;
  * - the margin reported here is a contribution **before courier cost**, because the platform has
@@ -223,6 +223,7 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
         SELECT partner_id, COALESCE(SUM(amount_kopeks), 0) AS total_kopeks
         FROM partner_payouts
         WHERE organization_id = ${organizationId}
+          AND state IN ('approved', 'paid')
         GROUP BY partner_id
       `),
       db.execute(sql`

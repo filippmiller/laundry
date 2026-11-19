@@ -169,6 +169,13 @@
       "when": 1795127982371,
       "tag": "0023_fix_legal_hold_sync_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795130951140,
+      "tag": "0024_backfill_legal_holds_and_paid_invoices",
+      "breakpoints": true
     }
   ]
 }

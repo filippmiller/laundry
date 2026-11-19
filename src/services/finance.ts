@@ -3,9 +3,9 @@ import type { Db, Tx } from "../db/client.js";
 import {
   claims, compensations, customerApprovals, customerInvoiceLines, customerInvoices, fiscalReceipts,
   garments, intakeManifestLines, intakeManifests, ledgerAccounts, ledgerEntries, ledgerJournals,
-  orderAdjustments, orderLines, orders, organizations, partnerCreditNotes, partnerDisputes, partnerInvoiceLines,
-  partnerInvoices, partnerPayouts, partners, partnerServiceAccruals, paymentEvents, paymentIntents, quotes,
-  refunds, services, users,
+  orderAdjustments, orderLines, orders, organizations, outboxEvents, partnerCreditNotes, partnerDisputes,
+  partnerInvoiceLines, partnerInvoices, partnerPayouts, partners, partnerServiceAccruals, paymentEvents,
+  paymentIntents, quotes, refunds, services, users,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -137,6 +137,22 @@ export async function createCustomerInvoice(db: Db, principal: Principal, input:
     await tx.execute(sql`
       SELECT id FROM orders WHERE id = ${order.id} AND organization_id = ${principal.organizationId} FOR UPDATE
     `);
+    const [returnedGarment] = await tx.select({ id: garments.id }).from(garments).where(and(
+      eq(garments.organizationId, principal.organizationId),
+      eq(garments.orderId, order.id),
+      eq(garments.status, "returned_unprocessed"),
+    )).limit(1);
+    const [returnEvent] = returnedGarment
+      ? [returnedGarment]
+      : await tx.select({ id: outboxEvents.id }).from(outboxEvents).where(and(
+        eq(outboxEvents.organizationId, principal.organizationId),
+        eq(outboxEvents.aggregateType, "order"),
+        eq(outboxEvents.aggregateId, order.id),
+        eq(outboxEvents.eventType, "order.return_unprocessed"),
+      )).limit(1);
+    if (returnEvent) {
+      throw new AppError("FINANCIAL_HOLD", "ORDER_RETURNED_UNPROCESSED", { orderId: order.id });
+    }
     const [existing] = await tx.select().from(customerInvoices).where(and(
       eq(customerInvoices.organizationId, principal.organizationId),
       eq(customerInvoices.orderId, order.id),
@@ -537,6 +553,27 @@ export async function createPartnerInvoice(  db: Db,
       await tx.insert(partnerInvoiceLines).values({
         invoiceId: invoice.id, accrualId: row.id, amountKopeks: Number(row.amount_kopeks),
       });
+    }
+    if (total !== 0) {
+      const existing = await findExistingJournal(tx, principal.organizationId, "partner_invoice", invoice.id);
+      if (!existing) {
+        const amount = Math.abs(total);
+        await postJournal(tx, {
+          organizationId: principal.organizationId,
+          sourceType: "partner_invoice",
+          sourceId: invoice.id,
+          description: `Счёт партнёра ${invoice.number}`,
+          lines: total > 0
+            ? [
+              { accountCode: "processing_expense", debitKopeks: amount },
+              { accountCode: "partner_payable", creditKopeks: amount },
+            ]
+            : [
+              { accountCode: "partner_payable", debitKopeks: amount },
+              { accountCode: "processing_expense", creditKopeks: amount },
+            ],
+        });
+      }
     }
     await appendEvent(tx, {
       principal, aggregateType: "partner_invoice", aggregateId: invoice.id,
@@ -1049,7 +1086,7 @@ export async function approvePartnerPayout(
     if (payout.state !== "scheduled") {
       throw new AppError("CONFLICT_VERSION", "PAYOUT_NOT_APPROVABLE", { state: payout.state });
     }
-    if (payout.createdBy && payout.createdBy === principal.userId) {
+    if (!payout.createdBy || payout.createdBy === principal.userId) {
       throw new AppError("FORBIDDEN", "DUAL_CONTROL_REQUIRED", { payoutId: payout.id });
     }
     const approvedAt = new Date();

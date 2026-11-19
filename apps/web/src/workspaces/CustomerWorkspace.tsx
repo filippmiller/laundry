@@ -250,7 +250,7 @@ function isWindowClosed(window: WindowDto, now: number): boolean {
   return new Date(window.endsAt).getTime() <= now;
 }
 
-export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
+export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; notify: NotifyFn }) {
   const tabsId = useId();
   const [activeTab, setActiveTab] = useState("new");
   const [repeat, setRepeat] = useState<RepeatDto | null>(null);
@@ -317,7 +317,7 @@ function NewOrderTab({
   repeat,
   onOpenAddresses,
 }: {
-  demo: DemoConfig;
+  demo: DemoConfig | null;
   notify: NotifyFn;
   repeat: RepeatDto | null;
   onOpenAddresses: () => void;
@@ -328,8 +328,18 @@ function NewOrderTab({
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [addresses, setAddresses] = useState<AddressDto[]>([]);
 
-  const buildings = useMemo(() => demo.buildings ?? [], [demo.buildings]);
-  const [buildingId, setBuildingId] = useState<string>(demo.buildings?.[0]?.id ?? "");
+  const buildings = useMemo(() => {
+    if (demo?.buildings && demo.buildings.length > 0) return demo.buildings;
+    const seen = new Set<string>();
+    const fromAddresses: Array<{ id: string; address: string }> = [];
+    for (const address of addresses) {
+      if (seen.has(address.buildingId)) continue;
+      seen.add(address.buildingId);
+      fromAddresses.push({ id: address.buildingId, address: address.buildingAddress });
+    }
+    return fromAddresses;
+  }, [demo?.buildings, addresses]);
+  const [buildingId, setBuildingId] = useState<string>(demo?.buildings?.[0]?.id ?? "");
 
   const [pickupWindows, setPickupWindows] = useState<WindowDto[]>([]);
   const [deliveryWindows, setDeliveryWindows] = useState<WindowDto[]>([]);
@@ -338,7 +348,7 @@ function NewOrderTab({
   const [pickupWindowId, setPickupWindowId] = useState("");
   const [deliveryWindowId, setDeliveryWindowId] = useState("");
 
-  const [serviceId, setServiceId] = useState<string>(demo.services?.[0]?.id ?? "");
+  const [serviceId, setServiceId] = useState<string>(demo?.services?.[0]?.id ?? "");
   const [tier, setTier] = useState<"economy" | "protected">("economy");
   const [quantity, setQuantity] = useState("1000");
   const [declared, setDeclared] = useState<PickedGarment[]>([]);
@@ -363,7 +373,7 @@ function NewOrderTab({
   const quoteExpired = quote ? new Date(quote.expiresAt).getTime() <= now : false;
   const holdExpired = [pickupHold, deliveryHold].some((hold) => hold && new Date(hold.expiresAt).getTime() <= now);
   const invoice = finance?.invoice ?? null;
-  const captured = (finance?.payments ?? []).some((payment) => payment.state === "captured");
+  const hasPayableInvoice = Boolean(invoice && invoice.state === "open" && invoice.totalKopeks > 0);
 
   // A single ticker keeps the quote/hold expiry honest without polling the server.
   useEffect(() => {
@@ -398,6 +408,10 @@ function NewOrderTab({
   // The server refuses a quote for a building the customer has no address in, so prefer the
   // building the customer actually uses once the address book is known.
   useEffect(() => {
+    if (!buildingId && buildings[0]?.id) {
+      setBuildingId(buildings[0].id);
+      return;
+    }
     if (addresses.length === 0 || hasAddressInBuilding) return;
     const match = addresses.find((address) => buildings.some((item) => item.id === address.buildingId));
     if (match && match.buildingId !== buildingId) setBuildingId(match.buildingId);
@@ -481,7 +495,7 @@ function NewOrderTab({
         method: "POST",
         body: {
           buildingId,
-          ...(demo.tariffVersionId ? { tariffVersionId: demo.tariffVersionId } : {}),
+          ...(demo?.tariffVersionId ? { tariffVersionId: demo.tariffVersionId } : {}),
           pickupWindowId,
           deliveryWindowId,
           lines: [{ serviceId, tier, quantity: parsedQuantity, unit }],
@@ -592,7 +606,7 @@ function NewOrderTab({
         body: {
           quoteId: quote.id,
           acceptedQuoteHash: quote.quoteHash,
-          termsVersion: demo.termsVersion,
+          termsVersion: demo?.termsVersion ?? "v1",
         },
       });
       // The order exists from this moment on: keep it on screen even if attaching slots fails.
@@ -644,6 +658,10 @@ function NewOrderTab({
   const handlePay = async () => {
     if (!order || !invoice) {
       notify({ kind: "error", text: "Сначала сформируйте счёт" });
+      return;
+    }
+    if (!hasPayableInvoice) {
+      notify({ kind: "error", text: "Нет открытого счёта к оплате" });
       return;
     }
     setBusy("pay");
@@ -943,7 +961,7 @@ function NewOrderTab({
             <button
               type="button"
               className="primary"
-              disabled={isBusy || !invoice || captured}
+              disabled={isBusy || !hasPayableInvoice}
               onClick={() => void handlePay()}
             >
               <CreditCard size={16} aria-hidden="true" />
@@ -1005,7 +1023,7 @@ function NewOrderTab({
   );
 }
 
-function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: NotifyFn; onRepeat: (orderId: string) => void }) {
+function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; notify: NotifyFn; onRepeat: (orderId: string) => void }) {
   const uid = useId();
 
   const [orders, setOrders] = useState<OrderListItemDto[] | null>(null);
@@ -1036,7 +1054,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
   const [rescheduleDeliveryId, setRescheduleDeliveryId] = useState("");
 
   const invoice = finance?.invoice ?? null;
-  const captured = (finance?.payments ?? []).some((payment) => payment.state === "captured");
+  const hasPayableInvoice = Boolean(invoice && invoice.state === "open" && invoice.totalKopeks > 0);
   const orderClaims = useMemo(
     () => claims.filter((claim) => claim.orderId === selectedId),
     [claims, selectedId],
@@ -1251,6 +1269,10 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
       notify({ kind: "error", text: "Сначала сформируйте счёт" });
       return;
     }
+    if (!hasPayableInvoice) {
+      notify({ kind: "error", text: "Нет открытого счёта к оплате" });
+      return;
+    }
     await runAction(
       "pay",
       async () => {
@@ -1388,7 +1410,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                 <FileText size={16} aria-hidden="true" />
                 <span>Сформировать счёт</span>
               </button>
-              <button type="button" className="primary" disabled={isBusy || !invoice || captured} onClick={() => void handlePay()}>
+              <button type="button" className="primary" disabled={isBusy || !hasPayableInvoice} onClick={() => void handlePay()}>
                 <CreditCard size={16} aria-hidden="true" />
                 <span>Оплатить (тестовый платёж)</span>
               </button>
@@ -1407,7 +1429,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
                 disabled={isBusy || !canBookSlots}
                 onClick={() => {
                   setRescheduleOpen(true);
-                  const fallbackBuilding = addresses[0]?.buildingId ?? demo.buildings?.[0]?.id ?? "";
+                  const fallbackBuilding = addresses[0]?.buildingId ?? demo?.buildings?.[0]?.id ?? "";
                   setRescheduleBuildingId(fallbackBuilding);
                   void loadRescheduleWindows(fallbackBuilding);
                 }}
@@ -1768,17 +1790,23 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig; notify: Not
   );
 }
 
-function AddressesTab({ demo, notify }: { demo: DemoConfig; notify: NotifyFn }) {
+function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: NotifyFn }) {
   const uid = useId();
   const [addresses, setAddresses] = useState<AddressDto[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [buildingId, setBuildingId] = useState(demo.buildings?.[0]?.id ?? "");
+  const [buildingId, setBuildingId] = useState(demo?.buildings?.[0]?.id ?? "");
   const [apartment, setApartment] = useState("");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const buildings = useMemo(() => demo.buildings ?? [], [demo.buildings]);
+  const buildings = useMemo(() => demo?.buildings ?? [], [demo?.buildings]);
+
+  useEffect(() => {
+    if (!buildingId && buildings[0]?.id) {
+      setBuildingId(buildings[0].id);
+    }
+  }, [buildingId, buildings]);
 
   const loadAddresses = useCallback(async () => {
     setLoading(true);

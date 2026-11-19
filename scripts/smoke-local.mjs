@@ -11,9 +11,10 @@ import { rmSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 const PORT = 55434;
+const API_PORT = process.env.SMOKE_API_PORT ?? "3000";
 const DATA_DIR = ".pgdata-smoke";
 const DB_URL = `postgres://postgres:postgres_test_only@127.0.0.1:${PORT}/laundry_smoke`;
-const API_URL = "http://127.0.0.1:3000";
+const API_URL = `http://127.0.0.1:${API_PORT}`;
 
 rmSync(DATA_DIR, { recursive: true, force: true });
 
@@ -53,7 +54,7 @@ try {
   api = spawn("npm", ["run", "start:api"], {
     stdio: "inherit",
     shell: process.platform === "win32",
-    env: { ...process.env, DATABASE_URL: DB_URL, PORT: "3000" },
+    env: { ...process.env, DATABASE_URL: DB_URL, PORT: API_PORT },
   });
   let healthy = false;
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -73,5 +74,7 @@ try {
 } finally {
   if (api) api.kill();
   await pg.stop().catch(() => undefined);
-  rmSync(DATA_DIR, { recursive: true, force: true });
+  try {
+    rmSync(DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch { /* Windows may briefly hold the directory handle */ }
 }

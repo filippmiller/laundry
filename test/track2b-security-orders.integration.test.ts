@@ -621,6 +621,6 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Track 2B: Orders, Intake, Capac
     expect(deleted.json()).toMatchObject({ evidenceId: ev1.evidenceId, deleted: true });
 
     const [asset] = await db.select().from(evidenceAssets).where(eq(evidenceAssets.id, ev1.evidenceId));
-    expect(asset.status).toBe("expired");
+    expect(asset.deletedAt).not.toBeNull();
   });
 });

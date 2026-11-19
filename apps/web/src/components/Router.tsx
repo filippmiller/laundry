@@ -60,7 +60,7 @@ export function Router({
   function workspaceFor(key: WorkspaceKey) {
     switch (key) {
       case "customer":
-        return demo ? <CustomerWorkspace demo={demo} notify={setNotice} /> : null;
+        return <CustomerWorkspace demo={demo} notify={setNotice} />;
       case "courier":
         return <CourierWorkspace demo={demo} notify={setNotice} />;
       case "partner":

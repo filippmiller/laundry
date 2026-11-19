@@ -5,6 +5,7 @@ import { notifications, orders, outboxEvents } from "../db/schema.js";
 export const OUTBOX_MAX_ATTEMPTS = 5;
 export const OUTBOX_BACKOFF_BASE_MS = 5_000;
 export const OUTBOX_BACKOFF_CAP_MS = 3_600_000; // 1 hour
+export const OUTBOX_LEASE_MS = 5 * 60 * 1000; // 5 minutes
 
 export type OutboxDeliveryRequest = {
   eventId: string;
@@ -92,6 +93,7 @@ export async function processOutbox(
     maxAttempts?: number;
     backoffBaseMs?: number;
     backoffCapMs?: number;
+    leaseTimeoutMs?: number;
     paused?: boolean;
     deliver?: OutboxDeliverFn;
   } = {},
@@ -104,17 +106,27 @@ export async function processOutbox(
   const maxAttempts = input.maxAttempts ?? OUTBOX_MAX_ATTEMPTS;
   const backoffBaseMs = input.backoffBaseMs ?? OUTBOX_BACKOFF_BASE_MS;
   const backoffCapMs = input.backoffCapMs ?? OUTBOX_BACKOFF_CAP_MS;
+  const leaseTimeoutMs = input.leaseTimeoutMs ?? OUTBOX_LEASE_MS;
+  const staleBefore = new Date(now.getTime() - leaseTimeoutMs);
   const deliver = input.deliver ?? defaultDeliver;
   const orgFilter = input.organizationId ? sql`AND organization_id = ${input.organizationId}` : sql``;
 
   const rows = await db.transaction(async tx => {
     const claimed = await tx.execute(sql`
-      UPDATE outbox_events SET state = 'processing', attempts = attempts + 1
+      UPDATE outbox_events
+         SET state = 'processing',
+             attempts = attempts + 1,
+             available_at = ${now}
       WHERE id IN (
         SELECT id FROM outbox_events
-        WHERE state = 'pending'
-          AND available_at <= ${now}
-          AND attempts < ${maxAttempts}
+        WHERE attempts < ${maxAttempts}
+          AND (
+            (state = 'pending' AND available_at <= ${now})
+            OR (
+              state = 'processing'
+              AND available_at <= ${staleBefore}
+            )
+          )
           ${orgFilter}
         ORDER BY available_at ASC
         LIMIT ${limit}

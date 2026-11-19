@@ -456,6 +456,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
       .where(and(
         eq(garmentEvidence.organizationId, principal.organizationId),
         inArray(garmentEvidence.garmentId, garmentIds),
+        isNull(evidenceAssets.deletedAt),
         ne(evidenceAssets.status, "expired"),
       ));
     for (const link of linkedEvidence) {

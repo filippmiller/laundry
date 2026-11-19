@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   buildings, claims, courierShifts, custodyDiscrepancies, custodyEvents, customerAddresses,
@@ -33,7 +33,7 @@ export async function assignPickup(
       ? "pickup_assigned"
       : nextState(order.lifecycleState as "scheduled", "assign_pickup", principal);
     // Supersede any active pickup stop so a reassigned courier immediately loses access.
-    await tx.update(routeStops).set({ state: "rescheduled" }).where(and(
+    await tx.update(routeStops).set({ state: "rescheduled", version: sql`${routeStops.version} + 1` }).where(and(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.orderId, order.id),
       eq(routeStops.kind, "pickup"),
@@ -139,7 +139,7 @@ export async function assignDelivery(
     if (!shift || shift.state !== "active") throw errors.notFound("shift");
 
     // Supersede any active delivery stop so a reassigned courier immediately loses access.
-    await tx.update(routeStops).set({ state: "rescheduled" }).where(and(
+    await tx.update(routeStops).set({ state: "rescheduled", version: sql`${routeStops.version} + 1` }).where(and(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.orderId, order.id),
       eq(routeStops.kind, "delivery"),
@@ -303,7 +303,7 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
 
     let state: OrderState = order.lifecycleState;
     let recoveryStopId: string | null = null;
-    if (input.outcome === "delivered" && (allGarments.length === 0 || uniqueDelivered.size === allGarments.length)) {
+    if (input.outcome === "delivered" && (allGarments.length === 0 || outstandingDelivered.length === pendingGarments.length)) {
       state = nextState(order.lifecycleState as "out_for_delivery", "handover", principal);
       const [handedOver] = await tx.update(orders).set({ lifecycleState: state, version: order.version + 1 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
@@ -329,14 +329,26 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
         payloadJson: { attemptId: attempt.id },
         dedupeKey: `delivery:${order.id}:${attempt.id}`,
       }).onConflictDoNothing();
-      await tx.update(routeStops).set({ state: "completed", version: stop.version + 1 })
-        .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
+      const [completedStop] = await tx.update(routeStops).set({ state: "completed", version: stop.version + 1 })
+        .where(and(
+          eq(routeStops.id, stop.id),
+          eq(routeStops.version, stop.version),
+          inArray(routeStops.state, ["pending", "en_route", "arrived"]),
+        ))
+        .returning({ id: routeStops.id });
+      if (!completedStop) throw errors.version(stop.version);
     } else if (input.outcome === "partial") {
       for (const id of deliveredIds) {
         await tx.update(garments).set({ status: "delivered" }).where(eq(garments.id, id));
       }
-      await tx.update(routeStops).set({ state: "completed", version: stop.version + 1 })
-        .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
+      const [completedStop] = await tx.update(routeStops).set({ state: "completed", version: stop.version + 1 })
+        .where(and(
+          eq(routeStops.id, stop.id),
+          eq(routeStops.version, stop.version),
+          inArray(routeStops.state, ["pending", "en_route", "arrived"]),
+        ))
+        .returning({ id: routeStops.id });
+      if (!completedStop) throw errors.version(stop.version);
       // A partial delivery leaves the order open and creates an actionable reattempt stop.
       const [recovery] = await tx.insert(routeStops).values({
         organizationId: principal.organizationId,
@@ -358,8 +370,14 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
         .returning({ version: orders.version });
       if (!failed) throw errors.version(order.version);
-      await tx.update(routeStops).set({ state: "failed", version: stop.version + 1 })
-        .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
+      const [failedStop] = await tx.update(routeStops).set({ state: "failed", version: stop.version + 1 })
+        .where(and(
+          eq(routeStops.id, stop.id),
+          eq(routeStops.version, stop.version),
+          inArray(routeStops.state, ["pending", "en_route", "arrived"]),
+        ))
+        .returning({ id: routeStops.id });
+      if (!failedStop) throw errors.version(stop.version);
     }
 
     await appendEvent(tx, {

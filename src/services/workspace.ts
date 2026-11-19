@@ -482,6 +482,12 @@ export async function deleteEvidence(
 
     await authorizeEvidenceOwner(tx, principal, asset);
 
+    // Customers may only delete evidence they themselves uploaded; staff/partner-captured
+    // custody/QC/inspection evidence can only be deleted by support/claims/admin staff.
+    if (!hasRole(principal, ...SUPPORT_ROLES) && asset.createdBy !== principal.userId) {
+      throw errors.forbidden("only the uploader or support staff may delete this evidence");
+    }
+
     if (asset.legalHoldCount > 0 || asset.status === "legal_hold") {
       throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id });
     }
@@ -500,9 +506,26 @@ export async function deleteEvidence(
       return { evidenceId: asset.id, deleted: true as const, alreadyDeleted: true as const };
     }
     const deletedAt = new Date();
-    await tx.update(evidenceAssets).set({
+    const [tombstoned] = await tx.update(evidenceAssets).set({
       deletedAt,
-    }).where(eq(evidenceAssets.id, asset.id));
+    }).where(and(
+      eq(evidenceAssets.id, asset.id),
+      eq(evidenceAssets.legalHoldCount, 0),
+      isNull(evidenceAssets.deletedAt),
+      sql`NOT EXISTS (
+        SELECT 1 FROM evidence_legal_holds h
+        WHERE h.asset_id = ${evidenceAssets.id} AND h.released_at IS NULL
+      )`,
+    )).returning({ id: evidenceAssets.id });
+    if (!tombstoned) {
+      const [current] = await tx.select({
+        deletedAt: evidenceAssets.deletedAt,
+      }).from(evidenceAssets).where(eq(evidenceAssets.id, asset.id)).limit(1);
+      if (current?.deletedAt !== null) {
+        return { evidenceId: asset.id, deleted: true as const, alreadyDeleted: true as const };
+      }
+      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id });
+    }
     await appendEvent(tx, {
       principal,
       aggregateType: "evidence",

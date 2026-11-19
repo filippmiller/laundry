@@ -8,6 +8,7 @@ import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 import { postCaptureJournalTx, postRefundJournalTx } from "./finance.js";
 
 const MAX_ATTEMPTS = 5;
+export const PAYMENT_INBOX_LEASE_MS = 5 * 60 * 1000;
 
 type ClaimedEvent = {
   id: string;
@@ -19,25 +20,41 @@ type ClaimedEvent = {
 
 /**
  * Leased inbox processing: rows are claimed with FOR UPDATE SKIP LOCKED in a short claim
- * transaction, then each claimed event runs in its OWN independent transaction so a failure
- * mid-event rolls back ALL of that event's writes (`payment_intents`, `ledger_entries`, etc.),
- * records the error cleanly in `payment_events`, and never aborts or corrupts sibling events.
+ * transaction (including stale `processing` rows whose worker lease has expired), then each
+ * claimed event runs in its OWN independent transaction with a `FOR UPDATE` lock on the target
+ * `payment_intents` row so a failure mid-event rolls back ALL of that event's writes cleanly
+ * and concurrent workers never race on intent state.
  */
 export async function processPaymentInbox(
   db: Db,
   input: {
     limit?: number;
+    now?: Date;
+    leaseTimeoutMs?: number;
     /** Optional hook invoked inside the per-event transaction after `applyEvent` (used for failpoint tests). */
     afterApply?: (event: ClaimedEvent, tx: Tx) => Promise<void> | void;
   } = {},
 ) {
   const limit = Math.min(input.limit ?? 50, 200);
+  const now = input.now ?? new Date();
+  const leaseTimeoutMs = input.leaseTimeoutMs ?? PAYMENT_INBOX_LEASE_MS;
+  const staleBefore = new Date(now.getTime() - leaseTimeoutMs);
   const rows = await db.transaction(async tx => {
     const claimed = await tx.execute(sql`
-      UPDATE payment_events SET state = 'processing', attempts = attempts + 1
+      UPDATE payment_events
+         SET state = 'processing',
+             attempts = attempts + 1,
+             processed_at = ${now}
       WHERE id IN (
         SELECT id FROM payment_events
-        WHERE state = 'received' AND attempts < ${MAX_ATTEMPTS}
+        WHERE attempts < ${MAX_ATTEMPTS}
+          AND (
+            state = 'received'
+            OR (
+              state = 'processing'
+              AND COALESCE(processed_at, received_at) <= ${staleBefore}
+            )
+          )
         ORDER BY received_at ASC
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
@@ -55,6 +72,12 @@ export async function processPaymentInbox(
     try {
       await db.transaction(async tx => {
         if (!row.paymentIntentId) throw new Error("INTENT_MISSING");
+        const locked = await tx.execute(sql`
+          SELECT id FROM payment_intents
+          WHERE id = ${row.paymentIntentId} AND organization_id = ${row.organizationId}
+          FOR UPDATE
+        `);
+        if (!(locked.rows as unknown[]).length) throw new Error("INTENT_NOT_FOUND");
         const [intent] = await tx.select().from(paymentIntents).where(and(
           eq(paymentIntents.id, row.paymentIntentId),
           eq(paymentIntents.organizationId, row.organizationId),
@@ -113,7 +136,7 @@ async function applyEvent(tx: Tx, eventType: string, intent: Intent) {
         });
       }
       const state = refunded >= intent.amountKopeks ? "refunded" : "partially_refunded";
-      if (state !== intent.state) {
+      if (state !== intent.state && !["disputed", "chargeback_lost"].includes(intent.state)) {
         await tx.update(paymentIntents).set({ state }).where(eq(paymentIntents.id, intent.id));
       }
       return;

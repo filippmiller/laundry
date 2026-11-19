@@ -1,11 +1,11 @@
-import { and, desc, eq, gte, inArray, isNull, lte, ne, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
   customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifestLines, intakeManifests,
   orderAdjustments, orderLines, orders, partnerContracts, partnerCreditNotes, partnerInvoiceLines,
   partnerPriceVersions, partners, partnerReceiptLines, partnerReceipts, partnerServiceAccruals,
-  paymentIntents, processingOperations, qualityChecks, seals, slotReservations,
+  paymentIntents, processingOperations, qualityChecks, routeStops, seals, slotReservations,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -125,25 +125,28 @@ async function reconcilePartnerAccrualsForOrder(tx: Tx, organizationId: string, 
 
     const hasInvoiced = accruals.some(row => row.status === "accrued");
     if (!hasInvoiced) {
-      await tx.update(partnerServiceAccruals).set({
+      const updated = await tx.update(partnerServiceAccruals).set({
         quantity: line.actualQuantity,
         amountKopeks: targetAmountKopeks,
-      }).where(eq(partnerServiceAccruals.id, primary.id));
-    } else {
-      const deltaAmountKopeks = targetAmountKopeks - currentTotalAmount;
-      const deltaQuantity = line.actualQuantity - currentTotalQty;
-      if (deltaAmountKopeks !== 0) {
-        await tx.insert(partnerServiceAccruals).values({
-          organizationId,
-          partnerId: primary.partnerId,
-          orderLineId: line.id,
-          contractId: primary.contractId,
-          contractPriceVersionId: primary.contractPriceVersionId,
-          quantity: deltaQuantity,
-          amountKopeks: deltaAmountKopeks,
-          status: "estimated",
-        });
-      }
+      }).where(and(
+        eq(partnerServiceAccruals.id, primary.id),
+        eq(partnerServiceAccruals.status, "estimated"),
+      )).returning({ id: partnerServiceAccruals.id });
+      if (updated.length) continue;
+    }
+    const deltaAmountKopeks = targetAmountKopeks - currentTotalAmount;
+    const deltaQuantity = line.actualQuantity - currentTotalQty;
+    if (deltaAmountKopeks !== 0) {
+      await tx.insert(partnerServiceAccruals).values({
+        organizationId,
+        partnerId: primary.partnerId,
+        orderLineId: line.id,
+        contractId: primary.contractId,
+        contractPriceVersionId: primary.contractPriceVersionId,
+        quantity: deltaQuantity,
+        amountKopeks: deltaAmountKopeks,
+        status: "estimated",
+      });
     }
   }
 }
@@ -174,15 +177,22 @@ async function voidPartnerAccrualsForOrder(
   let creditedAccruals = 0;
   for (const accrual of accruals) {
     if (accrual.status === "estimated") {
-      await tx.update(partnerServiceAccruals).set({
+      const voided = await tx.update(partnerServiceAccruals).set({
         status: "voided",
         amountKopeks: 0,
-      }).where(eq(partnerServiceAccruals.id, accrual.id));
-      voidedAccruals += 1;
-    } else if (accrual.status === "accrued" && accrual.amountKopeks > 0) {
+      }).where(and(
+        eq(partnerServiceAccruals.id, accrual.id),
+        eq(partnerServiceAccruals.status, "estimated"),
+      )).returning({ id: partnerServiceAccruals.id });
+      if (voided.length) {
+        voidedAccruals += 1;
+        continue;
+      }
+    }
+    if (accrual.amountKopeks !== 0) {
       const [invoiceLine] = await tx.select().from(partnerInvoiceLines)
         .where(eq(partnerInvoiceLines.accrualId, accrual.id)).limit(1);
-      if (invoiceLine) {
+      if (invoiceLine && accrual.amountKopeks > 0) {
         await tx.insert(partnerCreditNotes).values({
           organizationId,
           invoiceId: invoiceLine.invoiceId,
@@ -267,6 +277,9 @@ export async function receiveHandoff(
       actorId: principal.userId,
       requestHash: hashRequest({ ...input, actorId: principal.userId }),
     }, async tx => {
+      await tx.execute(sql`
+        SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+      `);
       const [order] = await tx.select().from(orders).where(and(
         eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
       )).limit(1);
@@ -423,8 +436,22 @@ export async function receiveHandoff(
       });
 
       const to = nextState(order.lifecycleState as "picked_up" | "at_hub", "partner_receive", principal);
-      await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+        .returning({ version: orders.version });
+      if (!advanced) throw errors.version(order.version);
+
+      // Complete the pickup courier's active pickup stop once custody transfers to the partner,
+      // revoking post-handoff ABAC read/scan access on this order.
+      await tx.update(routeStops).set({
+        state: "completed",
+        version: sql`${routeStops.version} + 1`,
+      }).where(and(
+        eq(routeStops.organizationId, principal.organizationId),
+        eq(routeStops.orderId, order.id),
+        eq(routeStops.kind, "pickup"),
+        inArray(routeStops.state, ["pending", "en_route", "arrived"]),
+      ));
 
       const lines = await tx.select().from(orderLines).where(eq(orderLines.orderId, input.orderId));
       const resolvedContract = await resolveActivePartnerContract(tx, principal.partnerId!);
@@ -665,6 +692,15 @@ export async function decideAdjustment(
     organizationId: principal.organizationId, scope: "adjustment:decision", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
+    const [adjRef] = await tx.select({ orderId: orderAdjustments.orderId }).from(orderAdjustments).where(and(
+      eq(orderAdjustments.id, input.adjustmentId),
+      eq(orderAdjustments.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!adjRef) throw errors.notFound("adjustment");
+    // Serialize adjustment decisions with concurrent captures, cancellations, and sibling decisions.
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${adjRef.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [adjustment] = await tx.select().from(orderAdjustments).where(and(
       eq(orderAdjustments.id, input.adjustmentId),
       eq(orderAdjustments.organizationId, principal.organizationId),
@@ -680,8 +716,10 @@ export async function decideAdjustment(
     if (adjustment.state !== "proposed") throw new AppError("CONFLICT_VERSION", "ADJUSTMENT_NOT_OPEN");
     if (order.acceptedQuoteHash !== input.quoteHash) throw new AppError("CONFLICT_VERSION", "QUOTE_HASH_MISMATCH");
 
-    await tx.update(orderAdjustments).set({ state: input.accept ? "accepted" : "declined" })
-      .where(eq(orderAdjustments.id, adjustment.id));
+    const [decided] = await tx.update(orderAdjustments).set({ state: input.accept ? "accepted" : "declined" })
+      .where(and(eq(orderAdjustments.id, adjustment.id), eq(orderAdjustments.state, "proposed")))
+      .returning({ id: orderAdjustments.id });
+    if (!decided) throw new AppError("CONFLICT_VERSION", "ADJUSTMENT_NOT_OPEN");
     const [approval] = await tx.insert(customerApprovals).values({
       organizationId: principal.organizationId,
       orderId: order.id,
@@ -695,8 +733,10 @@ export async function decideAdjustment(
       await applyWeightDecision(tx as Db, adjustment, true);
       await reconcilePartnerAccrualsForOrder(tx, principal.organizationId, order.id);
       const to = nextState(order.lifecycleState as "awaiting_approval", "approve_change", principal);
-      await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+        .returning({ version: orders.version });
+      if (!advanced) throw errors.version(order.version);
       const existingInvoices = await tx.select().from(customerInvoices).where(and(
         eq(customerInvoices.organizationId, principal.organizationId),
         eq(customerInvoices.orderId, order.id),
@@ -711,24 +751,32 @@ export async function decideAdjustment(
       )).limit(1);
 
       let supplementalInvoiceId: string | null = null;
+      let updatedOpenInvoice = false;
       if (openInvoice && !captured.length) {
-        await tx.insert(customerInvoiceLines).values({
-          invoiceId: openInvoice.id,
-          kind: "adjustment",
-          description: adjustment.reason,
-          quantity: 1,
-          amountKopeks: adjustment.deltaKopeks,
-          tariffVersionId: null,
-          taxMode: "none",
-          source: "adjustment",
-          consentId: approval.id,
-          actorId: principal.userId,
-        });
-        await tx.update(customerInvoices).set({
+        const [updatedInv] = await tx.update(customerInvoices).set({
           totalKopeks: openInvoice.totalKopeks + adjustment.deltaKopeks,
-        }).where(eq(customerInvoices.id, openInvoice.id));
-      } else if ((hasPaidInvoice || (openInvoice && captured.length > 0)) && adjustment.deltaKopeks > 0) {
-        // The original invoice is already settled: never mutate its total in place.
+        }).where(and(
+          eq(customerInvoices.id, openInvoice.id),
+          eq(customerInvoices.state, "open"),
+        )).returning({ id: customerInvoices.id });
+        if (updatedInv) {
+          updatedOpenInvoice = true;
+          await tx.insert(customerInvoiceLines).values({
+            invoiceId: openInvoice.id,
+            kind: "adjustment",
+            description: adjustment.reason,
+            quantity: 1,
+            amountKopeks: adjustment.deltaKopeks,
+            tariffVersionId: null,
+            taxMode: "none",
+            source: "adjustment",
+            consentId: approval.id,
+            actorId: principal.userId,
+          });
+        }
+      }
+      if (!updatedOpenInvoice && (hasPaidInvoice || openInvoice) && adjustment.deltaKopeks > 0) {
+        // The original invoice is already settled (or was concurrently paid): never mutate its total in place.
         // Issue a separate open supplemental invoice so the delta can be collected cleanly.
         const [supplemental] = await tx.insert(customerInvoices).values({
           organizationId: principal.organizationId,
@@ -772,6 +820,25 @@ export async function decideAdjustment(
     const inspected = nextState(order.lifecycleState as "awaiting_approval", "decline_change", principal);
     await applyWeightDecision(tx as Db, adjustment, false);
     if (input.returnUnprocessed === true) {
+      const captured = await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(and(
+        eq(paymentIntents.organizationId, principal.organizationId),
+        eq(paymentIntents.orderId, order.id),
+        inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
+      )).limit(1);
+      if (captured.length) {
+        throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CHARGED", { orderId: order.id });
+      }
+      const openInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
+        eq(customerInvoices.organizationId, principal.organizationId),
+        eq(customerInvoices.orderId, order.id),
+        eq(customerInvoices.state, "open"),
+      ));
+      for (const invoice of openInvoices) {
+        await tx.update(customerInvoices).set({ state: "cancelled" }).where(and(
+          eq(customerInvoices.id, invoice.id),
+          eq(customerInvoices.state, "open"),
+        ));
+      }
       const hubState = nextStateAsSystem(inspected, "return_unprocessed", {
         systemActor: "decideAdjustment",
         reason: "customer declined adjustment and requested unprocessed return",
@@ -781,12 +848,34 @@ export async function decideAdjustment(
         reason: "customer declined adjustment and requested unprocessed return",
       });
       const reason = "Отказ клиента: возврат без обработки";
-      await voidPartnerAccrualsForOrder(tx, principal.organizationId, order.id, reason);
-      await tx.update(orders).set({
+      const { voidedAccruals, creditedAccruals } = await voidPartnerAccrualsForOrder(
+        tx,
+        principal.organizationId,
+        order.id,
+        reason,
+      );
+      const liveReservations = await tx.select({ id: slotReservations.id }).from(slotReservations).where(and(
+        eq(slotReservations.organizationId, principal.organizationId),
+        eq(slotReservations.orderId, order.id),
+        inArray(slotReservations.state, ["held", "confirmed"]),
+      ));
+      let releasedReservations = 0;
+      for (const reservation of liveReservations) {
+        const released = await releaseSlot(tx as Db, {
+          principal,
+          reservationId: reservation.id,
+          reason,
+          key: `return-adj-${input.key}-${reservation.id}`,
+        });
+        if (released.changed) releasedReservations += 1;
+      }
+      const [advanced] = await tx.update(orders).set({
         lifecycleState: readyState,
         returnReason: reason,
         version: order.version + 1,
-      }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+        .returning({ version: orders.version });
+      if (!advanced) throw errors.version(order.version);
       await tx.update(garments).set({ status: "returned_unprocessed" }).where(and(
         eq(garments.organizationId, principal.organizationId),
         eq(garments.orderId, order.id),
@@ -801,17 +890,27 @@ export async function decideAdjustment(
         principal, aggregateType: "order", aggregateId: order.id,
         eventType: "order.return_unprocessed",
         reason,
-        payload: { adjustmentId: adjustment.id, from: inspected, to: readyState },
+        payload: {
+          adjustmentId: adjustment.id,
+          from: inspected,
+          to: readyState,
+          releasedReservations,
+          voidedInvoices: openInvoices.length,
+          voidedAccruals,
+          creditedAccruals,
+        },
       });
-      return { orderId: order.id, adjustmentId: adjustment.id, state: readyState };
+      return { orderId: order.id, adjustmentId: adjustment.id, state: readyState, releasedReservations };
     }
 
     const declineReason = "Отказ клиента от доплаты";
-    await tx.update(orders).set({
+    const [advanced] = await tx.update(orders).set({
       lifecycleState: inspected,
       returnReason: declineReason,
       version: order.version + 1,
-    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ version: orders.version });
+    if (!advanced) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: "order.decline_change",

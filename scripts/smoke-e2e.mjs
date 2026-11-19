@@ -61,13 +61,14 @@ await page.getByText(/Счёт /).first().waitFor();
 check("invoice is created from the quote snapshot", await page.getByText(/Счёт /).first().isVisible());
 
 await page.getByRole("button", { name: "Оплатить (тестовый платёж)" }).click();
-await page.locator(".notice.ok").first().waitFor({ timeout: 15_000 });
-check("payment recorded with fiscal state visible", await page.locator(".notice.ok").first().isVisible());
+const paymentToast = page.locator('[role="status"] .toast.toast--ok', { hasText: /платёж/i }).first();
+await paymentToast.waitFor({ timeout: 15_000 });
+check("payment recorded with fiscal state visible", await paymentToast.isVisible());
 
-const fiscalText = await page.locator(".line-item.total, .muted").allInnerTexts();
+const fiscalText = await page.locator(".line-item.total, .data-row, .muted").allInnerTexts();
 check(
   "payment state is shown from the server",
-  fiscalText.some(text => /оплачен|paid|captured|ожидает|pending/i.test(text)),
+  fiscalText.some(text => /оплачен|paid|captured|ждёт|ожидает|pending/i.test(text)),
 );
 
 check("no uncaught browser errors", browserErrors.length === 0);

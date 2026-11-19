@@ -55,7 +55,7 @@ import { chronometry } from "../services/chronometry.js";
 import { churnSignal } from "../services/churn.js";
 import { renderDocument, type DocumentKind } from "../services/documents.js";
 import { requestOtpChallenge, unlockPreviewAccess, verifyOtpChallenge } from "../services/otp.js";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
 
 const SESSION_COOKIE = "laundry_session";
@@ -1300,7 +1300,7 @@ export function buildApp(db: Db) {
         customerId: orders.customerId,
         assignedPartnerId: orders.assignedPartnerId,
         createdAt: orders.createdAt,
-      }).from(orders).where(where).limit(100);
+      }).from(orders).where(where).orderBy(desc(orders.createdAt)).limit(100);
     },
   });
 

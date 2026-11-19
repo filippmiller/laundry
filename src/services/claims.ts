@@ -183,12 +183,58 @@ export async function reopenClaim(db: Db, principal: Principal, input: { claimId
     )).limit(1);
     if (!claim) throw errors.notFound("claim");
     if (!["resolved", "denied_with_reason"].includes(claim.state)) throw errors.transition(claim.state, "reopen");
-    await tx.update(claims).set({ state: "reopened", version: claim.version + 1 })
-      .where(and(eq(claims.id, claim.id), eq(claims.version, claim.version)));
+    const [updated] = await tx.update(claims).set({ state: "reopened", version: claim.version + 1 })
+      .where(and(eq(claims.id, claim.id), eq(claims.version, claim.version)))
+      .returning({ id: claims.id });
+    if (!updated) throw errors.version(claim.version);
+
+    // Re-place active legal holds on the claim's previously held evidence (or current order
+    // evidence if none were held) so reopened claims remain protected against deletion/expiry.
+    const priorHolds = await tx.select({
+      assetId: evidenceLegalHolds.assetId,
+      releasedAt: evidenceLegalHolds.releasedAt,
+    }).from(evidenceLegalHolds).where(and(
+      eq(evidenceLegalHolds.organizationId, principal.organizationId),
+      eq(evidenceLegalHolds.claimId, claim.id),
+    ));
+    const alreadyActiveAssetIds = new Set(
+      priorHolds.filter(h => h.releasedAt === null).map(h => h.assetId),
+    );
+    const priorAssetIds = [...new Set(priorHolds.map(h => h.assetId))];
+
+    const candidateAssets = priorAssetIds.length > 0
+      ? await tx.select({ id: evidenceAssets.id }).from(evidenceAssets).where(and(
+        eq(evidenceAssets.organizationId, principal.organizationId),
+        inArray(evidenceAssets.id, priorAssetIds),
+        isNull(evidenceAssets.deletedAt),
+        inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
+      ))
+      : await tx.select({ id: evidenceAssets.id }).from(evidenceAssets).where(and(
+        eq(evidenceAssets.organizationId, principal.organizationId),
+        eq(evidenceAssets.ownerType, "order"),
+        eq(evidenceAssets.ownerId, claim.orderId),
+        isNull(evidenceAssets.deletedAt),
+        inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
+        inArray(evidenceAssets.purpose, [...CLAIM_EVIDENCE_PURPOSES]),
+      ));
+
+    let reheldCount = 0;
+    for (const asset of candidateAssets) {
+      if (alreadyActiveAssetIds.has(asset.id)) continue;
+      await tx.insert(evidenceLegalHolds).values({
+        organizationId: principal.organizationId,
+        assetId: asset.id,
+        claimId: claim.id,
+        reason: `claim:${claim.id}:reopen`,
+        placedBy: principal.userId,
+      });
+      reheldCount += 1;
+    }
+
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.reopened",
-      payload: { previousState: claim.state }, reason: input.reason,
+      payload: { previousState: claim.state, reheldCount }, reason: input.reason,
     });
-    return { claimId: claim.id, state: "reopened" as const, version: claim.version + 1 };
+    return { claimId: claim.id, state: "reopened" as const, version: claim.version + 1, reheldCount };
   });
 }

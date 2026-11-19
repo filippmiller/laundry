@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets,
+  claims, containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets,
   garmentEvidence, garments, intakeManifestLines, intakeManifests, notifications, orders, quotes,
   routeStops, scanEvents, seals,
 } from "../db/schema.js";
@@ -203,12 +203,42 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
         status: "accepted",
       }).returning();
       for (const evidenceId of item.evidenceAssetIds ?? []) {
-        const [asset] = await tx.select({ id: evidenceAssets.id }).from(evidenceAssets).where(and(
+        const [asset] = await tx.select({
+          id: evidenceAssets.id,
+          ownerType: evidenceAssets.ownerType,
+          ownerId: evidenceAssets.ownerId,
+        }).from(evidenceAssets).where(and(
           eq(evidenceAssets.id, evidenceId),
           eq(evidenceAssets.organizationId, principal.organizationId),
           eq(evidenceAssets.status, "verified"),
+          isNull(evidenceAssets.deletedAt),
         )).limit(1);
         if (!asset) throw errors.notFound("evidence asset");
+        let belongsToOrder = (asset.ownerType === "order" || asset.ownerType === "garment")
+          && asset.ownerId === input.orderId;
+        if (!belongsToOrder && asset.ownerType === "garment") {
+          const [ownedGarment] = await tx.select({ id: garments.id }).from(garments).where(and(
+            eq(garments.id, asset.ownerId),
+            eq(garments.organizationId, principal.organizationId),
+            eq(garments.orderId, input.orderId),
+          )).limit(1);
+          belongsToOrder = Boolean(ownedGarment);
+        } else if (!belongsToOrder && asset.ownerType === "custody_event") {
+          const [ce] = await tx.select({ id: custodyEvents.id }).from(custodyEvents).where(and(
+            eq(custodyEvents.id, asset.ownerId),
+            eq(custodyEvents.organizationId, principal.organizationId),
+            eq(custodyEvents.orderId, input.orderId),
+          )).limit(1);
+          belongsToOrder = Boolean(ce);
+        } else if (!belongsToOrder && asset.ownerType === "claim") {
+          const [cl] = await tx.select({ id: claims.id }).from(claims).where(and(
+            eq(claims.id, asset.ownerId),
+            eq(claims.organizationId, principal.organizationId),
+            eq(claims.orderId, input.orderId),
+          )).limit(1);
+          belongsToOrder = Boolean(cl);
+        }
+        if (!belongsToOrder) throw errors.notFound("evidence asset");
         await tx.insert(garmentEvidence).values({
           organizationId: principal.organizationId,
           garmentId: garment.id,
