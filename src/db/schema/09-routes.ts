@@ -1,7 +1,9 @@
+import { sql } from "drizzle-orm";
 import { pgTable, uuid, text, integer, timestamp, jsonb, boolean, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { organizations, users } from "./01-identity.js";
 import { buildings } from "./02-geography.js";
 import { orders } from "./04-orders.js";
+import { scanEvents } from "./07-evidence.js";
 import { shiftState, routeStopState, attemptOutcome } from "./enums.js";
 
 export const vehicles = pgTable("vehicles", {
@@ -21,8 +23,28 @@ export const courierShifts = pgTable("courier_shifts", {
   state: shiftState("state").notNull().default("planned"),
   startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
   endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, t => [index("shifts_courier_idx").on(t.organizationId, t.courierId, t.state)]);
+}, t => [
+  index("shifts_courier_idx").on(t.organizationId, t.courierId, t.state),
+  uniqueIndex("courier_shifts_org_courier_active_unique")
+    .on(t.organizationId, t.courierId)
+    .where(sql`${t.state} = 'active'`),
+]);
+
+export const shiftReconciliationAdjustments = pgTable("shift_reconciliation_adjustments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id),
+  shiftId: uuid("shift_id").notNull().references(() => courierShifts.id),
+  scanEventId: uuid("scan_event_id").notNull().references(() => scanEvents.id),
+  deltaAccepted: integer("delta_accepted").notNull().default(0),
+  deltaRejected: integer("delta_rejected").notNull().default(0),
+  reason: text("reason").notNull(),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [
+  uniqueIndex("shift_recon_adj_scan_unique").on(t.scanEventId),
+  index("shift_recon_adj_shift_idx").on(t.organizationId, t.shiftId, t.recordedAt),
+]);
 
 export const routes = pgTable("routes", {
   id: uuid("id").primaryKey().defaultRandom(),

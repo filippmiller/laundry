@@ -1,17 +1,18 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import type { Db, Tx } from "../db/client.js";
 import {
-  claims, containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets,
+  claims, containerAssignments, containers, courierDevices, custodyEvents, evidenceAssets,
   garmentEvidence, garments, intakeManifestLines, intakeManifests, notifications, orders, quotes,
-  routes, routeStops, scanEvents, seals,
+  scanEvents, seals, shiftReconciliationAdjustments,
 } from "../db/schema.js";
-import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
 import { canonicalScanHash } from "../core/scan-hash.js";
 import { nextState } from "../domain/order-state.js";
 import { findSubtype } from "../../shared/garment-taxonomy.js";
+import { assertCourierOrderIntakeEntitlement, resolveVerifiedScanShift } from "./courier-entitlement.js";
 
 export type BagInput = { containerCode: string; sealSerial: string; weightGrams: number };
 export type GarmentInput = {
@@ -69,30 +70,10 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
       eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    // Lock order: courier_shifts (FOR SHARE) via canonical entitlement BEFORE any order/manifest/custody mutation.
+    await assertCourierOrderIntakeEntitlement(tx, principal, input.orderId);
     if (order.lifecycleState !== "pickup_assigned") {
       throw new AppError("INVALID_TRANSITION", "ORDER_NOT_READY_FOR_INTAKE", { state: order.lifecycleState });
-    }
-    const isDispatcher = hasRole(principal, ...ROLE_GROUPS.dispatcher);
-    const [stop] = await tx.select().from(routeStops).where(and(
-      eq(routeStops.organizationId, principal.organizationId),
-      eq(routeStops.orderId, input.orderId),
-      eq(routeStops.assignedCourierId, principal.userId),
-      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
-    )).limit(1);
-    if (!stop && !isDispatcher) throw errors.forbidden("courier is not assigned to this stop");
-    if (!isDispatcher) {
-      const [shiftRow] = await tx.select({ state: courierShifts.state })
-        .from(routes)
-        .innerJoin(courierShifts, eq(courierShifts.id, routes.shiftId))
-        .where(and(
-          eq(routes.id, stop!.routeId),
-          eq(routes.organizationId, principal.organizationId),
-          eq(courierShifts.organizationId, principal.organizationId),
-        ))
-        .limit(1);
-      if (!shiftRow || shiftRow.state !== "active") {
-        throw new AppError("FORBIDDEN", "SHIFT_NOT_ACTIVE");
-      }
     }
 
     const [quote] = await tx.select({ snapshotJson: quotes.snapshotJson }).from(quotes).where(and(
@@ -355,74 +336,91 @@ export async function registerCourierDevice(
   return { deviceId: input.deviceId, state: "active" as const };
 }
 
-async function scanRejection(
+export async function checkCourierDeviceOwnership(
   db: Db,
   principal: Principal,
+  deviceId: string,
+) {
+  assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
+  const [existing] = await db.select({
+    id: courierDevices.id,
+    courierId: courierDevices.courierId,
+    state: courierDevices.state,
+  }).from(courierDevices).where(and(
+    eq(courierDevices.id, deviceId),
+    eq(courierDevices.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!existing || existing.courierId !== principal.userId || existing.state !== "active") {
+    return { owned: false as const, deviceId };
+  }
+  return { owned: true as const, deviceId: existing.id, state: existing.state };
+}
+
+type ScanEvaluation =
+  | { ok: true; shiftId: string; isLateCompletedShift: boolean }
+  | { ok: false; reason: string };
+
+async function evaluateScanEvent(
+  tx: Tx,
+  principal: Principal,
   event: ScanEventInput,
-): Promise<string | undefined> {
-  const [device] = await db.select({ id: courierDevices.id }).from(courierDevices).where(and(
+): Promise<ScanEvaluation> {
+  const [device] = await tx.select({ id: courierDevices.id }).from(courierDevices).where(and(
     eq(courierDevices.id, event.deviceId),
     eq(courierDevices.organizationId, principal.organizationId),
     eq(courierDevices.courierId, principal.userId),
     eq(courierDevices.state, "active"),
   )).limit(1);
-  if (!device) return "DEVICE_NOT_OWNED";
-  if (canonicalScanHash(event) !== event.payloadHash) return "PAYLOAD_HASH_MISMATCH";
-  if (hasRole(principal, "courier") && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
-    const [shift] = await db.select({ id: courierShifts.id }).from(courierShifts).where(and(
-      eq(courierShifts.organizationId, principal.organizationId),
-      eq(courierShifts.courierId, principal.userId),
-      eq(courierShifts.state, "active"),
-    )).limit(1);
-    if (!shift) return "NO_ACTIVE_SHIFT";
-  }
+  if (!device) return { ok: false, reason: "DEVICE_NOT_OWNED" };
+  if (canonicalScanHash(event) !== event.payloadHash) return { ok: false, reason: "PAYLOAD_HASH_MISMATCH" };
+  const capturedAt = new Date(event.capturedAt);
+  if (Number.isNaN(capturedAt.getTime())) return { ok: false, reason: "INVALID_CAPTURED_AT" };
+
+  let orderId: string | undefined;
+  let notAssignedReason = "ORDER_NOT_ASSIGNED";
 
   if (event.scannedType === "order") {
-    const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
-      eq(routeStops.organizationId, principal.organizationId),
-      eq(routeStops.orderId, event.scannedId),
-      eq(routeStops.assignedCourierId, principal.userId),
-      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
-    )).limit(1);
-    return stop ? undefined : "ORDER_NOT_ASSIGNED";
-  }
-
-  if (event.scannedType === "container") {
-    const [row] = await db.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
+    orderId = event.scannedId;
+    notAssignedReason = "ORDER_NOT_ASSIGNED";
+  } else if (event.scannedType === "container") {
+    notAssignedReason = "CONTAINER_NOT_ASSIGNED";
+    const [row] = await tx.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
       .innerJoin(containers, eq(containers.id, containerAssignments.containerId))
       .where(and(
         eq(containerAssignments.organizationId, principal.organizationId),
         eq(containers.organizationId, principal.organizationId),
         eq(containers.code, event.scannedId),
       )).limit(1);
-    if (!row) return "CONTAINER_NOT_ASSIGNED";
-    const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
-      eq(routeStops.organizationId, principal.organizationId),
-      eq(routeStops.orderId, row.orderId),
-      eq(routeStops.assignedCourierId, principal.userId),
-      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
-    )).limit(1);
-    return stop ? undefined : "CONTAINER_NOT_ASSIGNED";
+    orderId = row?.orderId;
+  } else {
+    notAssignedReason = "SEAL_NOT_ASSIGNED";
+    const [sealRow] = await tx.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
+      .innerJoin(seals, eq(seals.id, containerAssignments.sealId))
+      .where(and(
+        eq(containerAssignments.organizationId, principal.organizationId),
+        eq(seals.serialNumber, event.scannedId),
+        eq(seals.state, "assigned"),
+      )).limit(1);
+    orderId = sealRow?.orderId;
   }
 
-  const [sealRow] = await db.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
-    .innerJoin(seals, eq(seals.id, containerAssignments.sealId))
-    .where(and(
-      eq(containerAssignments.organizationId, principal.organizationId),
-      eq(seals.serialNumber, event.scannedId),
-      eq(seals.state, "assigned"),
-    )).limit(1);
-  if (!sealRow) return "SEAL_NOT_ASSIGNED";
-  const [sealStop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
-    eq(routeStops.organizationId, principal.organizationId),
-    eq(routeStops.orderId, sealRow.orderId),
-    eq(routeStops.assignedCourierId, principal.userId),
-    inArray(routeStops.state, ["pending", "en_route", "arrived"]),
-  )).limit(1);
-  return sealStop ? undefined : "SEAL_NOT_ASSIGNED";
+  if (!orderId) return { ok: false, reason: notAssignedReason };
+
+  const shiftResolution = await resolveVerifiedScanShift(tx, principal, orderId, capturedAt);
+  if (!shiftResolution.ok) {
+    return {
+      ok: false,
+      reason: shiftResolution.reason === "NO_ACTIVE_SHIFT" ? "NO_ACTIVE_SHIFT" : notAssignedReason,
+    };
+  }
+  return {
+    ok: true,
+    shiftId: shiftResolution.shiftId,
+    isLateCompletedShift: shiftResolution.isLateCompletedShift,
+  };
 }
 
-function rejectedRetryMismatchReason(
+function retryMismatchReason(
   existing: typeof scanEvents.$inferSelect,
   principal: Principal,
   event: ScanEventInput,
@@ -450,71 +448,136 @@ function rejectedRetryMismatchReason(
   return undefined;
 }
 
+async function recordLateShiftAdjustment(
+  tx: Tx,
+  principal: Principal,
+  input: { shiftId: string; scanEventId: string; clientEventId: string; capturedAt: string; receivedAt: Date },
+) {
+  const insertedAdj = await tx.insert(shiftReconciliationAdjustments).values({
+    organizationId: principal.organizationId,
+    shiftId: input.shiftId,
+    scanEventId: input.scanEventId,
+    deltaAccepted: 1,
+    deltaRejected: 0,
+    reason: "late_offline_scan",
+  }).onConflictDoNothing().returning({ id: shiftReconciliationAdjustments.id });
+
+  if (insertedAdj.length > 0) {
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "courier_shift",
+      aggregateId: input.shiftId,
+      eventType: "shift.reconciliation_adjusted",
+      payload: {
+        adjustmentId: insertedAdj[0].id,
+        scanEventId: input.scanEventId,
+        clientEventId: input.clientEventId,
+        deltaAccepted: 1,
+        deltaRejected: 0,
+        reason: "late_offline_scan",
+        capturedAt: input.capturedAt,
+        receivedAt: input.receivedAt.toISOString(),
+      },
+    });
+  }
+}
+
 export async function syncScanEvents(db: Db, principal: Principal, events: ScanEventInput[]) {
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   const accepted: string[] = [];
   const duplicate: string[] = [];
   const rejected: Array<{ clientEventId: string; reason: string }> = [];
+
   for (const event of events) {
-    const [existing] = await db.select().from(scanEvents).where(and(
-      eq(scanEvents.deviceId, event.deviceId),
-      eq(scanEvents.clientEventId, event.clientEventId),
-    )).limit(1);
-    if (existing) {
-      if (existing.syncStatus === "rejected") {
-        // Re-evaluate previously rejected scans (e.g., courier opened shift or registered device since then).
-        // Verify payloadHash and all stored canonical fields match so an inconsistent row can never be promoted.
-        const reason = rejectedRetryMismatchReason(existing, principal, event)
-          ?? await scanRejection(db, principal, event);
-        if (reason) {
-          rejected.push({ clientEventId: event.clientEventId, reason });
-        } else {
-          const updated = await db.update(scanEvents)
-            .set({ syncStatus: "accepted", receivedAt: new Date() })
+    const outcome = await db.transaction(async tx => {
+      const [existing] = await tx.select().from(scanEvents).where(and(
+        eq(scanEvents.deviceId, event.deviceId),
+        eq(scanEvents.clientEventId, event.clientEventId),
+      )).limit(1);
+
+      if (existing) {
+        // Always verify actor, tenant, and canonical payload/hash on retry — even for already-accepted
+        // rows — so a tampered or cross-actor/cross-tenant replay is rejected without mutating the journal.
+        const mismatch = retryMismatchReason(existing, principal, event);
+        if (mismatch) {
+          return { kind: "rejected" as const, reason: mismatch };
+        }
+        if (existing.syncStatus === "rejected") {
+          const evaluation = await evaluateScanEvent(tx, principal, event);
+          if (!evaluation.ok) {
+            return { kind: "rejected" as const, reason: evaluation.reason };
+          }
+          const receivedAt = new Date();
+          const updated = await tx.update(scanEvents)
+            .set({ syncStatus: "accepted", shiftId: evaluation.shiftId, receivedAt })
             .where(and(
               eq(scanEvents.id, existing.id),
               eq(scanEvents.syncStatus, "rejected"),
             ))
             .returning({ id: scanEvents.id });
           if (updated.length > 0) {
-            accepted.push(event.clientEventId);
-            await db.update(courierDevices).set({ lastSeenAt: new Date() }).where(and(
+            if (evaluation.isLateCompletedShift) {
+              await recordLateShiftAdjustment(tx, principal, {
+                shiftId: evaluation.shiftId,
+                scanEventId: existing.id,
+                clientEventId: event.clientEventId,
+                capturedAt: event.capturedAt,
+                receivedAt,
+              });
+            }
+            await tx.update(courierDevices).set({ lastSeenAt: receivedAt }).where(and(
               eq(courierDevices.id, event.deviceId),
               eq(courierDevices.organizationId, principal.organizationId),
             ));
-          } else {
-            duplicate.push(event.clientEventId);
+            return { kind: "accepted" as const };
           }
+          return { kind: "duplicate" as const };
         }
-        continue;
+        return { kind: "duplicate" as const };
       }
-      duplicate.push(event.clientEventId);
-      continue;
-    }
-    const reason = await scanRejection(db, principal, event);
-    const inserted = await db.insert(scanEvents).values({
-      organizationId: principal.organizationId,
-      deviceId: event.deviceId,
-      clientEventId: event.clientEventId,
-      actorId: principal.userId,
-      scannedType: event.scannedType,
-      scannedId: event.scannedId,
-      contextJson: event.context,
-      capturedAt: new Date(event.capturedAt),
-      payloadHash: event.payloadHash,
-      syncStatus: reason ? "rejected" : "accepted",
-    }).onConflictDoNothing().returning({ id: scanEvents.id });
-    if (!inserted.length) {
-      duplicate.push(event.clientEventId);
-    } else if (reason) {
-      rejected.push({ clientEventId: event.clientEventId, reason });
-    } else {
-      accepted.push(event.clientEventId);
-      await db.update(courierDevices).set({ lastSeenAt: new Date() }).where(and(
+
+      const evaluation = await evaluateScanEvent(tx, principal, event);
+      const receivedAt = new Date();
+      const inserted = await tx.insert(scanEvents).values({
+        organizationId: principal.organizationId,
+        deviceId: event.deviceId,
+        clientEventId: event.clientEventId,
+        actorId: principal.userId,
+        scannedType: event.scannedType,
+        scannedId: event.scannedId,
+        contextJson: event.context,
+        capturedAt: new Date(event.capturedAt),
+        receivedAt,
+        payloadHash: event.payloadHash,
+        syncStatus: evaluation.ok ? "accepted" : "rejected",
+        shiftId: evaluation.ok ? evaluation.shiftId : null,
+      }).onConflictDoNothing().returning({ id: scanEvents.id });
+
+      if (!inserted.length) {
+        return { kind: "duplicate" as const };
+      }
+      if (!evaluation.ok) {
+        return { kind: "rejected" as const, reason: evaluation.reason };
+      }
+      if (evaluation.isLateCompletedShift) {
+        await recordLateShiftAdjustment(tx, principal, {
+          shiftId: evaluation.shiftId,
+          scanEventId: inserted[0].id,
+          clientEventId: event.clientEventId,
+          capturedAt: event.capturedAt,
+          receivedAt,
+        });
+      }
+      await tx.update(courierDevices).set({ lastSeenAt: receivedAt }).where(and(
         eq(courierDevices.id, event.deviceId),
         eq(courierDevices.organizationId, principal.organizationId),
       ));
-    }
+      return { kind: "accepted" as const };
+    });
+
+    if (outcome.kind === "accepted") accepted.push(event.clientEventId);
+    else if (outcome.kind === "duplicate") duplicate.push(event.clientEventId);
+    else rejected.push({ clientEventId: event.clientEventId, reason: outcome.reason });
   }
   return { accepted, duplicate, rejected };
 }

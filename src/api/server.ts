@@ -16,7 +16,7 @@ import { isPreviewProfileEnabled } from "../core/preview.js";
 import { listServices, listWindows, resolveAddress } from "../services/catalog.js";
 import { createQuote, getQuote } from "../services/quotes.js";
 import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, repeatOrder, rescheduleOrder, scheduleOrder } from "../services/orders.js";
-import { recordIntake, registerCourierDevice, syncScanEvents } from "../services/intake.js";
+import { checkCourierDeviceOwnership, recordIntake, registerCourierDevice, syncScanEvents } from "../services/intake.js";
 import {
   assignOrderToPartner, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
   returnUnprocessedOrder, startInspection, startProcessing, partnerWorkspace,
@@ -41,7 +41,7 @@ import {
   addAddress, countUnreadNotifications, listAddresses, listNotifications, markNotificationsRead,
   removeAddress as removeAddressRoute, trackOrder,
 } from "../services/customer.js";
-import { completeShift, currentShift, openShift } from "../services/courier-shift.js";
+import { completeShift, currentShift, getShiftReconciliation, openShift } from "../services/courier-shift.js";
 import {
   decideCompensation, deleteEvidence, exportMyPrivacyData, listEvidence, listMySessions, opsMetrics,
   proposeCompensation, readEvidence, readEvidenceContent, registerEvidence, revokeOwnSession, searchOrders, uploadEvidence,
@@ -793,6 +793,16 @@ export function buildApp(db: Db) {
     handler: ctx => completeShift(db, ctx.principal, {
       shiftId: ctx.params.id, key: ctx.body.key ?? idempotencyKey(ctx),
     }),
+  });
+  add({
+    method: "GET", path: "/courier/shifts/:id/reconciliation", summary: "Close snapshot and late-scan reconciliation adjustments for a shift", tags: ["Courier"],
+    params: idSchema,
+    handler: ctx => getShiftReconciliation(db, ctx.principal, ctx.params.id),
+  });
+  add({
+    method: "GET", path: "/courier/devices/:id", summary: "Read-only check whether a scanning device is already bound to the courier", tags: ["Courier"],
+    params: idSchema,
+    handler: ctx => checkCourierDeviceOwnership(db, ctx.principal, ctx.params.id),
   });
   add({
     method: "POST", path: "/courier/devices", summary: "Bind a scanning device to the courier", tags: ["Courier"],

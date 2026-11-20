@@ -17,12 +17,14 @@ import {
   partnerContracts,
   partnerCreditNotes,
   partnerInvoiceLines,
+  scanEvents,
   seals,
   serviceWindows,
   slotReservations,
 } from "../../src/db/schema.js";
 import { buildApp } from "../../src/api/server.js";
 import { hashRequest } from "../../src/core/idempotency.js";
+import { canonicalScanHash } from "../../src/core/scan-hash.js";
 import { seedAddress, seedCatalog, seedDeliveryWindow, seedWindow } from "../fixtures.js";
 import { login, seedPartner, seedTenant, uniquePhone } from "../api/_fixtures.js";
 
@@ -1116,10 +1118,46 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
     expect(claimRow.state).toBe("reopened");
   });
 
-  it("[F19][F20][AU-012][CO-005][CO-006][OP-016] courier offline scan sync dedupes duplicates and rejects suspended courier", async () => {
+  it("[F19][F20][AU-012][CO-005][CO-006][OP-016] courier offline scan sync (API) accepts canonical hash, dedupes duplicates, rejects tampered/foreign retries, and rejects suspended courier", async () => {
     const seed = await seedTenant(db);
+    const otherTenant = await seedTenant(db);
+    const deliveryWindowId = await seedDeliveryWindow(db, seed, 4);
+    const customer = await login(app, { organizationId: seed.organizationId, phone: seed.phone, roles: ["customer"] });
+    const dispatcher = await login(app, { organizationId: seed.organizationId, phone: uniquePhone(), roles: ["dispatcher"] });
     const courier = await login(app, { organizationId: seed.organizationId, phone: uniquePhone(), roles: ["courier"] });
+    const otherCourier = await login(app, { organizationId: seed.organizationId, phone: uniquePhone(), roles: ["courier"] });
+    const foreignCourier = await login(app, { organizationId: otherTenant.organizationId, phone: uniquePhone(), roles: ["courier"] });
     const admin = await login(app, { organizationId: seed.organizationId, phone: uniquePhone(), roles: ["platform_admin"] });
+
+    // Book & schedule an order, open shift, and assign pickup stop to the courier.
+    const booked = await createBookedAndScheduledOrder(app, db, {
+      organizationId: seed.organizationId,
+      buildingId: seed.buildingId,
+      pickupWindowId: seed.windowId,
+      deliveryWindowId,
+      serviceId: seed.catalog.serviceId,
+      tariffVersionId: seed.catalog.tariffVersionId,
+      termsVersion: seed.catalog.termsVersion,
+      customerCookie: customer.cookie,
+    });
+
+    const shiftRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/courier/shifts",
+      headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-f19-${randomUUID()}` }),
+      payload: {},
+    });
+    expect(shiftRes.statusCode, shiftRes.body).toBe(200);
+    const { shiftId } = shiftRes.json() as { shiftId: string };
+
+    const assignRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/dispatch/pickups/assign",
+      headers: cookieHeader(dispatcher.cookie, { "idempotency-key": `ap-f19-${randomUUID()}` }),
+      payload: { orderId: booked.order.id, shiftId },
+    });
+    expect(assignRes.statusCode, assignRes.body).toBe(200);
+    const { stopId } = assignRes.json() as { stopId: string };
 
     const deviceId = randomUUID();
     expect((await app.inject({
@@ -1130,23 +1168,17 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
     })).statusCode).toBe(200);
 
     const clientEventId = randomUUID();
-    const capturedAt = "2026-11-19T12:00:00.000Z";
-    const event = {
+    const capturedAt = new Date().toISOString();
+    const eventBase = {
       clientEventId,
       deviceId,
-      scannedType: "container" as const,
-      scannedId: "BAG-SYNC-1",
+      scannedType: "order" as const,
+      scannedId: booked.order.id,
       capturedAt,
-      context: { stop: "S1" },
-      payloadHash: hashRequest({
-        clientEventId,
-        deviceId,
-        scannedType: "container",
-        scannedId: "BAG-SYNC-1",
-        capturedAt,
-        context: { stop: "S1" },
-      }),
+      context: { stopId },
     };
+    const validHash = canonicalScanHash(eventBase);
+    const event = { ...eventBase, payloadHash: validHash };
 
     const sync1 = await app.inject({
       method: "POST",
@@ -1155,6 +1187,76 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       payload: { events: [event, event] },
     });
     expect(sync1.statusCode, sync1.body).toBe(200);
+    expect(sync1.json()).toEqual({
+      accepted: [clientEventId],
+      duplicate: [clientEventId],
+      rejected: [],
+    });
+
+    // Verify persisted DB state and canonical hash.
+    const persistedBefore = await db.select().from(scanEvents).where(eq(scanEvents.clientEventId, clientEventId));
+    expect(persistedBefore).toHaveLength(1);
+    expect(persistedBefore[0]).toMatchObject({
+      organizationId: seed.organizationId,
+      deviceId,
+      clientEventId,
+      actorId: courier.body.userId,
+      scannedType: "order",
+      scannedId: booked.order.id,
+      payloadHash: validHash,
+      syncStatus: "accepted",
+      shiftId,
+    });
+
+    // Negative check 1: mutated payload with same clientEventId is rejected without altering DB.
+    const mutatedBase = { ...eventBase, context: { stopId, tampered: true } };
+    const mutatedSync = await app.inject({
+      method: "POST",
+      url: "/api/v1/courier/scan-events/sync",
+      headers: cookieHeader(courier.cookie),
+      payload: { events: [{ ...mutatedBase, payloadHash: canonicalScanHash(mutatedBase) }] },
+    });
+    expect(mutatedSync.statusCode, mutatedSync.body).toBe(200);
+    expect(mutatedSync.json()).toEqual({
+      accepted: [],
+      duplicate: [],
+      rejected: [{ clientEventId, reason: "HASH_MISMATCH" }],
+    });
+
+    // Negative check 2: another courier in same tenant replaying same event is rejected without changing owner.
+    const wrongActorSync = await app.inject({
+      method: "POST",
+      url: "/api/v1/courier/scan-events/sync",
+      headers: cookieHeader(otherCourier.cookie),
+      payload: { events: [event] },
+    });
+    expect(wrongActorSync.statusCode, wrongActorSync.body).toBe(200);
+    expect(wrongActorSync.json()).toEqual({
+      accepted: [],
+      duplicate: [],
+      rejected: [{ clientEventId, reason: "DEVICE_NOT_OWNED" }],
+    });
+
+    // Negative check 3: courier in another tenant replaying same event is rejected without changing tenant/owner.
+    const wrongTenantSync = await app.inject({
+      method: "POST",
+      url: "/api/v1/courier/scan-events/sync",
+      headers: cookieHeader(foreignCourier.cookie),
+      payload: { events: [event] },
+    });
+    expect(wrongTenantSync.statusCode, wrongTenantSync.body).toBe(200);
+    expect(wrongTenantSync.json()).toEqual({
+      accepted: [],
+      duplicate: [],
+      rejected: [{ clientEventId, reason: "DEVICE_NOT_OWNED" }],
+    });
+
+    const persistedAfter = await db.select().from(scanEvents).where(eq(scanEvents.clientEventId, clientEventId));
+    expect(persistedAfter).toHaveLength(1);
+    expect(persistedAfter[0].actorId).toBe(courier.body.userId);
+    expect(persistedAfter[0].organizationId).toBe(seed.organizationId);
+    expect(persistedAfter[0].payloadHash).toBe(validHash);
+    expect(persistedAfter[0].syncStatus).toBe("accepted");
 
     // Admin suspends courier -> revokes active sessions -> next offline sync is rejected
     expect((await app.inject({
