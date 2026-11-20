@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AlertTriangle, FileCheck2, RefreshCw, Trash2, Upload } from "lucide-react";
 import { ApiError, api, dt, sha256FileHex } from "../api";
 import { EVIDENCE_PURPOSE_LABELS, formatError, stateLabel } from "../labels";
@@ -7,13 +7,22 @@ import { Badge, type BadgeTone, Button, Card, CardBody, CardHeader } from "./ui"
 export type EvidenceOwnerType = "order" | "claim" | "custody_event";
 export type EvidencePurpose = "intake_condition" | "delivery_proof" | "claim_evidence" | "qc";
 
+export type EvidenceUploadState = {
+  ownerId: string;
+  uploadedIds: string[];
+  uploadingCount: number;
+  hasError: boolean;
+};
+
 export type EvidenceUploaderProps = {
   ownerType: EvidenceOwnerType;
   ownerId: string;
   purpose: EvidencePurpose;
   title?: string;
+  refreshKey?: number;
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
   onUploadedIdsChange?: (ids: string[]) => void;
+  onUploadStateChange?: (state: EvidenceUploadState) => void;
 };
 
 type EvidenceAssetItem = {
@@ -107,57 +116,138 @@ export function EvidenceUploader({
   ownerId,
   purpose,
   title = "Фото- и документ-доказательства",
+  refreshKey = 0,
   notify,
   onUploadedIdsChange,
+  onUploadStateChange,
 }: EvidenceUploaderProps) {
   const inputId = useId();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const onUploadedIdsChangeRef = useRef(onUploadedIdsChange);
+  const onUploadStateChangeRef = useRef(onUploadStateChange);
 
-  const [assets, setAssets] = useState<EvidenceAssetItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const currentOwnerKey = ownerId ? `${ownerType}:${ownerId}` : "";
+  const activeOwnerRef = useRef({ ownerType, ownerId, ownerKey: currentOwnerKey });
+  const requestGenRef = useRef(0);
+
+  const [assetsState, setAssetsState] = useState<{ ownerKey: string; items: EvidenceAssetItem[] }>({
+    ownerKey: currentOwnerKey,
+    items: [],
+  });
+  const [loadingState, setLoadingState] = useState<{ ownerKey: string; active: boolean }>({
+    ownerKey: currentOwnerKey,
+    active: false,
+  });
+  const [uploadState, setUploadState] = useState<{ ownerKey: string; count: number }>({
+    ownerKey: currentOwnerKey,
+    count: 0,
+  });
+  const [deletingState, setDeletingState] = useState<{ ownerKey: string; id: string | null }>({
+    ownerKey: currentOwnerKey,
+    id: null,
+  });
+  const [errorState, setErrorState] = useState<{
+    ownerKey: string;
+    loadError: string | null;
+    uploadError: string | null;
+  }>({
+    ownerKey: currentOwnerKey,
+    loadError: null,
+    uploadError: null,
+  });
+
+  const assets = assetsState.ownerKey === currentOwnerKey ? assetsState.items : [];
+  const loading = loadingState.ownerKey === currentOwnerKey ? loadingState.active : false;
+  const uploadingCount = uploadState.ownerKey === currentOwnerKey ? uploadState.count : 0;
+  const uploading = uploadingCount > 0;
+  const deletingId = deletingState.ownerKey === currentOwnerKey ? deletingState.id : null;
+  const loadError = errorState.ownerKey === currentOwnerKey ? errorState.loadError : null;
+  const uploadError = errorState.ownerKey === currentOwnerKey ? errorState.uploadError : null;
+  const hasError = Boolean(loadError || uploadError);
 
   useEffect(() => {
     onUploadedIdsChangeRef.current = onUploadedIdsChange;
   }, [onUploadedIdsChange]);
 
   useEffect(() => {
-    const verifiedIds = assets.filter(a => a.status === "verified").map(a => a.id);
+    onUploadStateChangeRef.current = onUploadStateChange;
+  }, [onUploadStateChange]);
+
+  const verifiedIds = useMemo(
+    () => assets.filter(a => a.status === "verified").map(a => a.id),
+    [assets],
+  );
+
+  useEffect(() => {
     onUploadedIdsChangeRef.current?.(verifiedIds);
-  }, [assets]);
+  }, [ownerId, verifiedIds]);
+
+  useEffect(() => {
+    onUploadStateChangeRef.current?.({
+      ownerId,
+      uploadedIds: verifiedIds,
+      uploadingCount,
+      hasError,
+    });
+  }, [ownerId, verifiedIds, uploadingCount, hasError]);
 
   const loadAssets = useCallback(
     async (options?: { reportErrorToast?: boolean }) => {
+      const targetOwnerKey = ownerId ? `${ownerType}:${ownerId}` : "";
+      const gen = ++requestGenRef.current;
       if (!ownerId) {
-        setAssets([]);
-        setLoadError(null);
+        setAssetsState({ ownerKey: targetOwnerKey, items: [] });
+        setErrorState({ ownerKey: targetOwnerKey, loadError: null, uploadError: null });
+        setLoadingState({ ownerKey: targetOwnerKey, active: false });
         return;
       }
-      setLoading(true);
-      setLoadError(null);
+      setLoadingState({ ownerKey: targetOwnerKey, active: true });
+      setErrorState(prev => ({
+        ownerKey: targetOwnerKey,
+        loadError: null,
+        uploadError: prev.ownerKey === targetOwnerKey ? prev.uploadError : null,
+      }));
       try {
         const res = await api<unknown>(`/evidence/${ownerType}/${ownerId}`);
-        setAssets(normalizeEvidenceList(res));
+        if (requestGenRef.current !== gen || activeOwnerRef.current.ownerKey !== targetOwnerKey) {
+          return;
+        }
+        setAssetsState({ ownerKey: targetOwnerKey, items: normalizeEvidenceList(res) });
       } catch (err) {
+        if (requestGenRef.current !== gen || activeOwnerRef.current.ownerKey !== targetOwnerKey) {
+          return;
+        }
         const message = formatError(err);
-        setLoadError(message);
+        setErrorState(prev => ({
+          ownerKey: targetOwnerKey,
+          loadError: message,
+          uploadError: prev.ownerKey === targetOwnerKey ? prev.uploadError : null,
+        }));
         if (options?.reportErrorToast || !(err instanceof ApiError && err.status === 403)) {
           notify({ kind: "error", text: message });
         }
       } finally {
-        setLoading(false);
+        if (requestGenRef.current === gen && activeOwnerRef.current.ownerKey === targetOwnerKey) {
+          setLoadingState({ ownerKey: targetOwnerKey, active: false });
+        }
       }
     },
     [ownerType, ownerId, notify],
   );
 
   useEffect(() => {
-    setAssets([]);
+    activeOwnerRef.current = { ownerType, ownerId, ownerKey: currentOwnerKey };
+    requestGenRef.current += 1;
+    setAssetsState({ ownerKey: currentOwnerKey, items: [] });
+    setErrorState({ ownerKey: currentOwnerKey, loadError: null, uploadError: null });
+    setUploadState({ ownerKey: currentOwnerKey, count: 0 });
+    setDeletingState({ ownerKey: currentOwnerKey, id: null });
+    setLoadingState({ ownerKey: currentOwnerKey, active: false });
+  }, [ownerType, ownerId, currentOwnerKey]);
+
+  useEffect(() => {
     void loadAssets();
-  }, [loadAssets]);
+  }, [loadAssets, refreshKey]);
 
   const handleFilesSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = event.target.files;
@@ -178,40 +268,58 @@ export function EvidenceUploader({
       return;
     }
 
-    setUploading(true);
+    const targetOwnerType = ownerType;
+    const targetOwnerId = ownerId;
+    const targetOwnerKey = `${targetOwnerType}:${targetOwnerId}`;
+    const isSameOwner = () => activeOwnerRef.current.ownerKey === targetOwnerKey;
+
+    setUploadState(prev => ({
+      ownerKey: targetOwnerKey,
+      count: (prev.ownerKey === targetOwnerKey ? prev.count : 0) + 1,
+    }));
+    setErrorState(prev => ({
+      ownerKey: targetOwnerKey,
+      loadError: prev.ownerKey === targetOwnerKey ? prev.loadError : null,
+      uploadError: null,
+    }));
     let uploadedCount = 0;
 
     try {
       for (const file of files) {
+        if (!isSameOwner()) return;
         if (!ALLOWED_MIME_SET.has(file.type)) {
-          notify({
-            kind: "error",
-            text: `Файл «${file.name}»: неподдерживаемый формат. Допустимы JPEG, PNG, WebP и PDF.`,
-          });
+          const msg = `Файл «${file.name}»: неподдерживаемый формат. Допустимы JPEG, PNG, WebP и PDF.`;
+          setErrorState(prev =>
+            prev.ownerKey === targetOwnerKey ? { ...prev, uploadError: msg } : prev,
+          );
+          notify({ kind: "error", text: msg });
           continue;
         }
         if (file.size <= 0) {
-          notify({
-            kind: "error",
-            text: `Файл «${file.name}» пустой и не может быть загружен.`,
-          });
+          const msg = `Файл «${file.name}» пустой и не может быть загружен.`;
+          setErrorState(prev =>
+            prev.ownerKey === targetOwnerKey ? { ...prev, uploadError: msg } : prev,
+          );
+          notify({ kind: "error", text: msg });
           continue;
         }
         if (file.size > MAX_EVIDENCE_BYTES) {
-          notify({
-            kind: "error",
-            text: `Файл «${file.name}» превышает максимальный размер 15 МБ.`,
-          });
+          const msg = `Файл «${file.name}» превышает максимальный размер 15 МБ.`;
+          setErrorState(prev =>
+            prev.ownerKey === targetOwnerKey ? { ...prev, uploadError: msg } : prev,
+          );
+          notify({ kind: "error", text: msg });
           continue;
         }
 
         const sha256 = await sha256FileHex(file);
-        const objectKey = buildObjectKey(ownerType, ownerId, file.name);
+        if (!isSameOwner()) return;
+        const objectKey = buildObjectKey(targetOwnerType, targetOwnerId, file.name);
         const regRes = await api<{ evidenceId?: string; id?: string; status?: string }>("/evidence", {
           method: "POST",
           body: {
-            ownerType,
-            ownerId,
+            ownerType: targetOwnerType,
+            ownerId: targetOwnerId,
             objectKey,
             sha256,
             purpose,
@@ -219,6 +327,7 @@ export function EvidenceUploader({
             sizeBytes: file.size,
           },
         });
+        if (!isSameOwner()) return;
 
         const evidenceId = regRes.evidenceId ?? regRes.id;
         if (!evidenceId) {
@@ -226,6 +335,7 @@ export function EvidenceUploader({
         }
 
         const buffer = await file.arrayBuffer();
+        if (!isSameOwner()) return;
         const contentBase64 = arrayBufferToBase64(buffer);
 
         await api(`/evidence/${evidenceId}/upload`, {
@@ -235,12 +345,14 @@ export function EvidenceUploader({
             mimeType: file.type,
           },
         });
+        if (!isSameOwner()) return;
 
         uploadedCount += 1;
       }
 
-      if (uploadedCount > 0) {
+      if (uploadedCount > 0 && isSameOwner()) {
         await loadAssets({ reportErrorToast: true });
+        if (!isSameOwner()) return;
         notify({
           kind: "ok",
           text:
@@ -250,25 +362,50 @@ export function EvidenceUploader({
         });
       }
     } catch (err) {
+      if (!isSameOwner()) return;
+      const msg = formatError(err);
+      setErrorState(prev => ({
+        ownerKey: targetOwnerKey,
+        loadError: prev.ownerKey === targetOwnerKey ? prev.loadError : null,
+        uploadError: msg,
+      }));
       await loadAssets().catch(() => {});
-      notify({ kind: "error", text: formatError(err) });
+      if (isSameOwner()) {
+        notify({ kind: "error", text: msg });
+      }
     } finally {
-      setUploading(false);
+      if (isSameOwner()) {
+        setUploadState(prev => ({
+          ownerKey: targetOwnerKey,
+          count: prev.ownerKey === targetOwnerKey ? Math.max(0, prev.count - 1) : 0,
+        }));
+      }
     }
   };
 
   const handleDelete = async (asset: EvidenceAssetItem) => {
-    setDeletingId(asset.id);
+    const targetOwnerKey = currentOwnerKey;
+    const isSameOwner = () => activeOwnerRef.current.ownerKey === targetOwnerKey;
+    setDeletingState({ ownerKey: targetOwnerKey, id: asset.id });
     try {
       await api(`/evidence/${asset.id}`, {
         method: "DELETE",
       });
-      setAssets(prev => prev.filter(item => item.id !== asset.id));
+      if (!isSameOwner()) return;
+      setAssetsState(prev =>
+        prev.ownerKey === targetOwnerKey
+          ? { ownerKey: targetOwnerKey, items: prev.items.filter(item => item.id !== asset.id) }
+          : prev,
+      );
       notify({ kind: "ok", text: `Доказательство #${asset.id.slice(0, 8)} удалено.` });
     } catch (err) {
-      notify({ kind: "error", text: formatError(err) });
+      if (isSameOwner()) {
+        notify({ kind: "error", text: formatError(err) });
+      }
     } finally {
-      setDeletingId(null);
+      if (isSameOwner()) {
+        setDeletingState({ ownerKey: targetOwnerKey, id: null });
+      }
     }
   };
 
