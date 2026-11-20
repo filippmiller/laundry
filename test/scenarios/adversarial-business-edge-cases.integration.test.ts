@@ -8,9 +8,12 @@ import {
   evidenceAssets,
   ledgerEntries,
   ledgerJournals,
+  orderLines,
   orders,
+  partnerContracts,
   partnerPayouts,
   partnerReceiptLines,
+  partnerServiceAccruals,
   paymentIntents,
   seals,
   serviceWindows,
@@ -375,6 +378,39 @@ describe("Adversarial business & security edge cases", () => {
   it("[FI-013][AD-002] Separation of Duties (SoD): finance user cannot self-approve a partner payout; second approver succeeds", async () => {
     const seed = await seedTenant(db);
     const partnerId = await seedPartner(db, seed.organizationId, "Прачечная SoD");
+    const { order: sodOrder } = await seedOrder(db, {
+      organizationId: seed.organizationId,
+      customerId: seed.userId,
+      addressId: seed.addressId,
+      tariffVersionId: seed.catalog.tariffVersionId,
+      termsVersion: seed.catalog.termsVersion,
+      publicNumber: `SOD-${uniquePhone().slice(-6)}`,
+      assignedPartnerId: partnerId,
+    });
+    const [sodLine] = await db.insert(orderLines).values({
+      orderId: sodOrder.id,
+      serviceId: seed.catalog.serviceId,
+      tier: "economy",
+      quotedQuantity: 1_000,
+      unit: "gram",
+      quotedAmountKopeks: 300_000,
+      tariffSnapshotJson: {},
+    }).returning();
+    const [sodContract] = await db.insert(partnerContracts).values({
+      partnerId,
+      version: "1.0",
+      effectiveFrom: new Date(Date.now() - 86_400_000),
+      signed: true,
+    }).returning();
+    await db.insert(partnerServiceAccruals).values({
+      organizationId: seed.organizationId,
+      partnerId,
+      orderLineId: sodLine.id,
+      contractId: sodContract.id,
+      quantity: 1_000,
+      amountKopeks: 300_000,
+      status: "accrued",
+    });
 
     const finance1 = await login(app, { organizationId: seed.organizationId, phone: uniquePhone(), roles: ["platform_finance"] });
     const finance2 = await login(app, { organizationId: seed.organizationId, phone: uniquePhone(), roles: ["platform_finance"] });
@@ -582,6 +618,30 @@ describe("Adversarial business & security edge cases", () => {
         purpose: "claim_evidence",
       },
     })).json() as { evidenceId: string };
+    const [lineA] = await db.insert(orderLines).values({
+      orderId: orderA.id,
+      serviceId: orgA.catalog.serviceId,
+      tier: "economy",
+      quotedQuantity: 1_000,
+      unit: "gram",
+      quotedAmountKopeks: 100_000,
+      tariffSnapshotJson: {},
+    }).returning();
+    const [contractA] = await db.insert(partnerContracts).values({
+      partnerId: partnerAId,
+      version: "1.0",
+      effectiveFrom: new Date(Date.now() - 86_400_000),
+      signed: true,
+    }).returning();
+    await db.insert(partnerServiceAccruals).values({
+      organizationId: orgA.organizationId,
+      partnerId: partnerAId,
+      orderLineId: lineA.id,
+      contractId: contractA.id,
+      quantity: 1_000,
+      amountKopeks: 100_000,
+      status: "accrued",
+    });
     const { payoutId: payoutA } = (await app.inject({
       method: "POST", url: "/api/v1/finance/partner-payouts",
       headers: cookieHeader(finA.cookie, { "idempotency-key": `payA-${randomUUID()}` }),

@@ -54,7 +54,10 @@ export type PartnerPayableRow = {
   estimatedKopeks: number;
   disputedKopeks: number;
   paidKopeks: number;
+  reservedKopeks: number;
   payableKopeks: number;
+  availablePayableKopeks: number;
+  advanceKopeks: number;
 };
 
 export type MonthPoint = {
@@ -69,6 +72,7 @@ export type FinanceAnalytics = {
     invoicedKopeks: number;
     netCollectedKopeks: number;
     refundedKopeks: number;
+    pendingRefundKopeks: number;
     receivableKopeks: number;
     creditKopeks: number;
     invoiceCount: number;
@@ -88,7 +92,10 @@ export type FinanceAnalytics = {
     invoicedKopeks: number;
     disputedKopeks: number;
     paidKopeks: number;
+    reservedKopeks: number;
     payableKopeks: number;
+    availablePayableKopeks: number;
+    advanceKopeks: number;
     partners: PartnerPayableRow[];
   };
   margin: {
@@ -151,7 +158,18 @@ type AccrualSqlRow = {
 
 type PayoutSqlRow = {
   partner_id: string;
-  total_kopeks: string;
+  partner_name: string | null;
+  paid_kopeks: string;
+  reserved_kopeks: string;
+};
+
+type OwedRefundSqlRow = {
+  credit_kopeks: string | null;
+  refunded_kopeks: string | null;
+};
+
+type PendingRefundSqlRow = {
+  total_kopeks: string | null;
 };
 
 type AdjustmentSqlRow = { total_kopeks: string | null };
@@ -168,7 +186,17 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
   const organizationId = principal.organizationId;
   const now = new Date();
 
-  const [invoiceResult, accrualResult, payoutResult, adjustmentResult, compensationResult, chargebackResult, monthResult] =
+  const [
+    invoiceResult,
+    accrualResult,
+    payoutResult,
+    adjustmentResult,
+    compensationResult,
+    chargebackResult,
+    monthResult,
+    owedRefundResult,
+    pendingRefundResult,
+  ] =
     await Promise.all([
       db.execute(sql`
         SELECT
@@ -220,11 +248,16 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
         GROUP BY a.partner_id, p.name, a.status, a.disputed
       `),
       db.execute(sql`
-        SELECT partner_id, COALESCE(SUM(amount_kopeks), 0) AS total_kopeks
-        FROM partner_payouts
-        WHERE organization_id = ${organizationId}
-          AND state IN ('approved', 'paid')
-        GROUP BY partner_id
+        SELECT
+          pp.partner_id AS partner_id,
+          p.name AS partner_name,
+          COALESCE(SUM(CASE WHEN pp.state IN ('approved', 'paid') THEN pp.amount_kopeks ELSE 0 END), 0) AS paid_kopeks,
+          COALESCE(SUM(CASE WHEN pp.state IN ('scheduled', 'pending') THEN pp.amount_kopeks ELSE 0 END), 0) AS reserved_kopeks
+        FROM partner_payouts pp
+        LEFT JOIN partners p ON p.id = pp.partner_id
+        WHERE pp.organization_id = ${organizationId}
+          AND pp.state IN ('scheduled', 'pending', 'approved', 'paid')
+        GROUP BY pp.partner_id, p.name
       `),
       db.execute(sql`
         SELECT COALESCE(SUM(delta_kopeks), 0) AS total_kopeks
@@ -271,6 +304,43 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
         ORDER BY 1 DESC
         LIMIT 12
       `),
+      // Orders with no active (non-cancelled) invoice that still hold net captured customer funds
+      // (e.g. captured order cancelled while refund settlement is pending/error) must still show
+      // up as customer credit/owed-refund in finance analytics, matching customerFinance.
+      db.execute(sql`
+        SELECT
+          COALESCE(SUM(GREATEST(0, COALESCE(p.captured, 0) - COALESCE(r.refunded, 0))), 0) AS credit_kopeks,
+          COALESCE(SUM(COALESCE(r.refunded, 0)), 0) AS refunded_kopeks
+        FROM orders o
+        LEFT JOIN LATERAL (
+          SELECT SUM(amount_kopeks) AS captured
+          FROM payment_intents pi
+          WHERE pi.order_id = o.id
+            AND pi.organization_id = o.organization_id
+            AND pi.state IN ('captured', 'partially_refunded', 'refunded')
+        ) p ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT SUM(rf.amount_kopeks) AS refunded
+          FROM refunds rf
+          JOIN payment_intents pi ON pi.id = rf.payment_intent_id
+          WHERE pi.order_id = o.id
+            AND rf.organization_id = o.organization_id
+            AND rf.state = 'completed'
+        ) r ON TRUE
+        WHERE o.organization_id = ${organizationId}
+          AND NOT EXISTS (
+            SELECT 1 FROM customer_invoices ci
+            WHERE ci.order_id = o.id
+              AND ci.organization_id = o.organization_id
+              AND ci.state <> 'cancelled'
+          )
+      `),
+      db.execute(sql`
+        SELECT COALESCE(SUM(amount_kopeks), 0) AS total_kopeks
+        FROM refunds
+        WHERE organization_id = ${organizationId}
+          AND state IN ('pending', 'error')
+      `),
     ]);
 
   const invoiceRows = invoiceResult.rows as unknown as InvoiceSqlRow[];
@@ -280,6 +350,8 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
   const compensationRows = compensationResult.rows as unknown as CompensationSqlRow[];
   const chargebackRows = chargebackResult.rows as unknown as ChargebackSqlRow[];
   const monthRows = monthResult.rows as unknown as MonthSqlRow[];
+  const owedRefundRow = (owedRefundResult.rows as unknown as OwedRefundSqlRow[])[0];
+  const pendingRefundRow = (pendingRefundResult.rows as unknown as PendingRefundSqlRow[])[0];
 
   // --- Receivables -------------------------------------------------------------------------
   const aging: AgingBucket[] = AGING_BUCKETS.map(bucket => ({
@@ -377,11 +449,18 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
     };
   });
 
+  creditKopeks += Number(owedRefundRow?.credit_kopeks ?? 0);
+  refundedKopeks += Number(owedRefundRow?.refunded_kopeks ?? 0);
+  const pendingRefundKopeks = Number(pendingRefundRow?.total_kopeks ?? 0);
+
   // --- Payables ---------------------------------------------------------------------------
   const partnerMap = new Map<string, PartnerPayableRow>();
   const partnerFor = (partnerId: string, partnerName: string | null): PartnerPayableRow => {
     const existing = partnerMap.get(partnerId);
-    if (existing) return existing;
+    if (existing) {
+      if (partnerName && existing.partnerName === "Партнёр") existing.partnerName = partnerName;
+      return existing;
+    }
     const created: PartnerPayableRow = {
       partnerId,
       partnerName: partnerName ?? "Партнёр",
@@ -390,7 +469,10 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
       estimatedKopeks: 0,
       disputedKopeks: 0,
       paidKopeks: 0,
+      reservedKopeks: 0,
       payableKopeks: 0,
+      availablePayableKopeks: 0,
+      advanceKopeks: 0,
     };
     partnerMap.set(partnerId, created);
     return created;
@@ -421,18 +503,31 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
   }
 
   let paidKopeks = 0;
+  let reservedKopeks = 0;
   for (const row of payoutRows) {
-    const total = Number(row.total_kopeks ?? 0);
-    paidKopeks += total;
-    const partner = partnerFor(row.partner_id, null);
-    partner.paidKopeks += total;
+    const paid = Number(row.paid_kopeks ?? 0);
+    const reserved = Number(row.reserved_kopeks ?? 0);
+    paidKopeks += paid;
+    reservedKopeks += reserved;
+    const partner = partnerFor(row.partner_id, row.partner_name);
+    partner.paidKopeks += paid;
+    partner.reservedKopeks += reserved;
   }
 
-  // A payable is what we still owe: every non-disputed accrual minus what has already been paid.
+  // Reconcile partner balances without silently clamping overpayments/advances to zero:
+  // netBalance = (accrued - disputed) - paid. Positive netBalance is payable; negative netBalance
+  // is an explicit advance/overpayment asset so (payable - advance) always equals the ledger net.
   let payableKopeks = 0;
+  let availablePayableKopeks = 0;
+  let advanceKopeks = 0;
   for (const partner of partnerMap.values()) {
-    partner.payableKopeks = Math.max(0, partner.accruedKopeks - partner.disputedKopeks - partner.paidKopeks);
+    const netBalance = partner.accruedKopeks - partner.disputedKopeks - partner.paidKopeks;
+    partner.payableKopeks = Math.max(0, netBalance);
+    partner.advanceKopeks = Math.max(0, -netBalance);
+    partner.availablePayableKopeks = Math.max(0, netBalance - partner.reservedKopeks);
     payableKopeks += partner.payableKopeks;
+    availablePayableKopeks += partner.availablePayableKopeks;
+    advanceKopeks += partner.advanceKopeks;
   }
 
   // --- Margin ------------------------------------------------------------------------------
@@ -473,6 +568,7 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
       invoicedKopeks,
       netCollectedKopeks,
       refundedKopeks,
+      pendingRefundKopeks,
       receivableKopeks,
       creditKopeks,
       invoiceCount: invoiceRows.length,
@@ -488,7 +584,10 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
       invoicedKopeks: invoicedAccrualKopeks,
       disputedKopeks,
       paidKopeks,
+      reservedKopeks,
       payableKopeks,
+      availablePayableKopeks,
+      advanceKopeks,
       partners: [...partnerMap.values()].sort((a, b) => b.payableKopeks - a.payableKopeks),
     },
     margin: {

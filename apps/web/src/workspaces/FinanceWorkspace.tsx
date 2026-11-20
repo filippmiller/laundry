@@ -123,6 +123,14 @@ type DeliveredOrderItem = {
   createdAt?: string;
 };
 
+type PaginatedBucket<T> = {
+  bucket?: "active" | "history" | "all";
+  items: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  totalCount: number;
+};
+
 type FinanceOverviewResponse = {
   invoices?: InvoiceItem[];
   intents?: PaymentIntentItem[];
@@ -133,6 +141,10 @@ type FinanceOverviewResponse = {
   partners?: PartnerOption[];
   partnerPayouts?: PartnerPayoutItem[];
   partnerCreditNotes?: PartnerCreditNoteItem[];
+  partnerPayoutsActive?: PaginatedBucket<PartnerPayoutItem>;
+  partnerPayoutsHistory?: PaginatedBucket<PartnerPayoutItem>;
+  partnerCreditNotesActive?: PaginatedBucket<PartnerCreditNoteItem>;
+  partnerCreditNotesHistory?: PaginatedBucket<PartnerCreditNoteItem>;
   deliveredOrders?: DeliveredOrderItem[];
 };
 
@@ -215,6 +227,22 @@ export function FinanceWorkspace({
   const [payoutAmountRub, setPayoutAmountRub] = useState("");
   const [payoutReference, setPayoutReference] = useState("");
 
+  const [payoutTab, setPayoutTab] = useState<"active" | "history">("active");
+  const [payoutActiveBucket, setPayoutActiveBucket] = useState<PaginatedBucket<PartnerPayoutItem>>({
+    items: [], nextCursor: null, hasMore: false, totalCount: 0,
+  });
+  const [payoutHistoryBucket, setPayoutHistoryBucket] = useState<PaginatedBucket<PartnerPayoutItem>>({
+    items: [], nextCursor: null, hasMore: false, totalCount: 0,
+  });
+
+  const [creditNoteTab, setCreditNoteTab] = useState<"active" | "history">("active");
+  const [creditNoteActiveBucket, setCreditNoteActiveBucket] = useState<PaginatedBucket<PartnerCreditNoteItem>>({
+    items: [], nextCursor: null, hasMore: false, totalCount: 0,
+  });
+  const [creditNoteHistoryBucket, setCreditNoteHistoryBucket] = useState<PaginatedBucket<PartnerCreditNoteItem>>({
+    items: [], nextCursor: null, hasMore: false, totalCount: 0,
+  });
+
   const partnerSelectId = useId();
   const partnerInputId = useId();
   const periodStartId = useId();
@@ -253,6 +281,30 @@ export function FinanceWorkspace({
         api<DriftItem[] | { items?: DriftItem[] }>("/finance/payment-drift"),
       ]);
       setOverview(ov ?? {});
+      if (ov?.partnerPayoutsActive) {
+        setPayoutActiveBucket(ov.partnerPayoutsActive);
+      } else {
+        const active = (ov?.partnerPayouts ?? []).filter(p => p.state === "scheduled" || p.state === "pending");
+        setPayoutActiveBucket({ items: active, nextCursor: null, hasMore: false, totalCount: active.length });
+      }
+      if (ov?.partnerPayoutsHistory) {
+        setPayoutHistoryBucket(ov.partnerPayoutsHistory);
+      } else {
+        const hist = (ov?.partnerPayouts ?? []).filter(p => p.state !== "scheduled" && p.state !== "pending");
+        setPayoutHistoryBucket({ items: hist, nextCursor: null, hasMore: false, totalCount: hist.length });
+      }
+      if (ov?.partnerCreditNotesActive) {
+        setCreditNoteActiveBucket(ov.partnerCreditNotesActive);
+      } else {
+        const active = (ov?.partnerCreditNotes ?? []).filter(cn => cn.state === "draft" || cn.state === "pending");
+        setCreditNoteActiveBucket({ items: active, nextCursor: null, hasMore: false, totalCount: active.length });
+      }
+      if (ov?.partnerCreditNotesHistory) {
+        setCreditNoteHistoryBucket(ov.partnerCreditNotesHistory);
+      } else {
+        const hist = (ov?.partnerCreditNotes ?? []).filter(cn => cn.state !== "draft" && cn.state !== "pending");
+        setCreditNoteHistoryBucket({ items: hist, nextCursor: null, hasMore: false, totalCount: hist.length });
+      }
       setReconciliation(rec ?? {});
       if (Array.isArray(dr)) {
         setDrift(dr);
@@ -521,11 +573,67 @@ export function FinanceWorkspace({
     }
   };
 
+  const loadMorePayouts = async (bucket: "active" | "history") => {
+    const current = bucket === "active" ? payoutActiveBucket : payoutHistoryBucket;
+    if (!current.nextCursor) return;
+    setBusyAction(`payouts-more-${bucket}`);
+    try {
+      const page = await api<PaginatedBucket<PartnerPayoutItem>>(
+        `/finance/partner-payouts?bucket=${bucket}&limit=50&cursor=${encodeURIComponent(current.nextCursor)}`,
+      );
+      const merge = (prev: PaginatedBucket<PartnerPayoutItem>): PaginatedBucket<PartnerPayoutItem> => {
+        const seen = new Set(prev.items.map(i => i.id));
+        const nextItems = [...prev.items, ...page.items.filter(i => !seen.has(i.id))];
+        return {
+          bucket,
+          items: nextItems,
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+          totalCount: page.totalCount,
+        };
+      };
+      if (bucket === "active") setPayoutActiveBucket(merge);
+      else setPayoutHistoryBucket(merge);
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const loadMoreCreditNotes = async (bucket: "active" | "history") => {
+    const current = bucket === "active" ? creditNoteActiveBucket : creditNoteHistoryBucket;
+    if (!current.nextCursor) return;
+    setBusyAction(`credit-notes-more-${bucket}`);
+    try {
+      const page = await api<PaginatedBucket<PartnerCreditNoteItem>>(
+        `/finance/partner-credit-notes?bucket=${bucket}&limit=50&cursor=${encodeURIComponent(current.nextCursor)}`,
+      );
+      const merge = (prev: PaginatedBucket<PartnerCreditNoteItem>): PaginatedBucket<PartnerCreditNoteItem> => {
+        const seen = new Set(prev.items.map(i => i.id));
+        const nextItems = [...prev.items, ...page.items.filter(i => !seen.has(i.id))];
+        return {
+          bucket,
+          items: nextItems,
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+          totalCount: page.totalCount,
+        };
+      };
+      if (bucket === "active") setCreditNoteActiveBucket(merge);
+      else setCreditNoteHistoryBucket(merge);
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const invoices = overview.invoices ?? [];
   const intents = overview.intents ?? [];
   const partnerInvoices = overview.partnerInvoices ?? [];
-  const partnerPayouts = overview.partnerPayouts ?? [];
-  const partnerCreditNotes = overview.partnerCreditNotes ?? [];
+  const visiblePayoutBucket = payoutTab === "active" ? payoutActiveBucket : payoutHistoryBucket;
+  const visibleCreditNoteBucket = creditNoteTab === "active" ? creditNoteActiveBucket : creditNoteHistoryBucket;
   const deliveredOrders = overview.deliveredOrders ?? [];
   const pendingCompensations = overview.pendingCompensations ?? [];
   const fiscalReceipts = overview.fiscalReceipts ?? [];
@@ -993,8 +1101,27 @@ export function FinanceWorkspace({
           </div>
         </form>
 
-        {partnerPayouts.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>Выплаты партнёрам отсутствуют.</p>
+        <div className="button-row" style={{ marginBlock: "0 10px" }}>
+          <Button
+            variant={payoutTab === "active" ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setPayoutTab("active")}
+          >
+            Активная очередь ({payoutActiveBucket.totalCount})
+          </Button>
+          <Button
+            variant={payoutTab === "history" ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setPayoutTab("history")}
+          >
+            История ({payoutHistoryBucket.totalCount})
+          </Button>
+        </div>
+
+        {visiblePayoutBucket.items.length === 0 ? (
+          <p className="muted" style={{ marginBlockEnd: 18 }}>
+            {payoutTab === "active" ? "Запланированных выплат в очереди нет." : "Завершённых выплат пока нет."}
+          </p>
         ) : (
           <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
             <table className="clean-table">
@@ -1009,7 +1136,7 @@ export function FinanceWorkspace({
                 </tr>
               </thead>
               <tbody>
-                {partnerPayouts.map(p => {
+                {visiblePayoutBucket.items.map(p => {
                   const isBusy = busyAction === `payout-${p.id}`;
                   const canApprove = p.state === "scheduled" || p.state === "pending";
                   return (
@@ -1043,12 +1170,42 @@ export function FinanceWorkspace({
                 })}
               </tbody>
             </table>
+            {visiblePayoutBucket.hasMore && (
+              <div className="button-row" style={{ marginBlockStart: 10 }}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busyAction === `payouts-more-${payoutTab}`}
+                  onClick={() => void loadMorePayouts(payoutTab)}
+                >
+                  Загрузить ещё ({visiblePayoutBucket.items.length} из {visiblePayoutBucket.totalCount})
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
         <h4 style={{ marginBlock: "8px 10px" }}>Кредит-ноты партнёров</h4>
-        {partnerCreditNotes.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>Кредит-ноты партнёров отсутствуют.</p>
+        <div className="button-row" style={{ marginBlock: "0 10px" }}>
+          <Button
+            variant={creditNoteTab === "active" ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setCreditNoteTab("active")}
+          >
+            Активная очередь ({creditNoteActiveBucket.totalCount})
+          </Button>
+          <Button
+            variant={creditNoteTab === "history" ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setCreditNoteTab("history")}
+          >
+            История ({creditNoteHistoryBucket.totalCount})
+          </Button>
+        </div>
+        {visibleCreditNoteBucket.items.length === 0 ? (
+          <p className="muted" style={{ marginBlockEnd: 18 }}>
+            {creditNoteTab === "active" ? "Черновиков кредит-нот в очереди нет." : "Завершённых кредит-нот пока нет."}
+          </p>
         ) : (
           <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
             <table className="clean-table">
@@ -1063,9 +1220,9 @@ export function FinanceWorkspace({
                 </tr>
               </thead>
               <tbody>
-                {partnerCreditNotes.map(cn => {
+                {visibleCreditNoteBucket.items.map(cn => {
                   const isBusy = busyAction === `credit-note-${cn.id}`;
-                  const canApprove = cn.state === "draft";
+                  const canApprove = cn.state === "draft" || cn.state === "pending";
                   return (
                     <tr key={cn.id}>
                       <td className="mono">{cn.invoiceId.slice(0, 8)}</td>
@@ -1097,6 +1254,18 @@ export function FinanceWorkspace({
                 })}
               </tbody>
             </table>
+            {visibleCreditNoteBucket.hasMore && (
+              <div className="button-row" style={{ marginBlockStart: 10 }}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busyAction === `credit-notes-more-${creditNoteTab}`}
+                  onClick={() => void loadMoreCreditNotes(creditNoteTab)}
+                >
+                  Загрузить ещё ({visibleCreditNoteBucket.items.length} из {visibleCreditNoteBucket.totalCount})
+                </Button>
+              </div>
+            )}
           </div>
         )}
 

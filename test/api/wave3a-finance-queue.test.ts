@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/api/server.js";
 import { createDb, type Db } from "../../src/db/client.js";
-import { partnerCreditNotes, partnerInvoices, partnerPayouts } from "../../src/db/schema.js";
-import { login, seedPartner, seedTenant, uniquePhone } from "./_fixtures.js";
+import { orderLines, partnerContracts, partnerCreditNotes, partnerInvoices, partnerPayouts, partnerServiceAccruals } from "../../src/db/schema.js";
+import { login, seedOrder, seedPartner, seedTenant, uniquePhone } from "./_fixtures.js";
 
 const rid = () => randomUUID();
 
@@ -127,6 +127,41 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 3A finance queue prioritiz
   });
 
   it("returns DUAL_CONTROL_REQUIRED in error.message when the payout creator attempts to approve it", async () => {
+    const dualPartnerId = await seedPartner(db, tenant.organizationId, "Прачечная Dual Control");
+    const { order } = await seedOrder(db, {
+      organizationId: tenant.organizationId,
+      customerId: tenant.userId,
+      addressId: tenant.addressId,
+      tariffVersionId: tenant.catalog.tariffVersionId,
+      termsVersion: tenant.catalog.termsVersion,
+      publicNumber: `DUAL-${uniquePhone().slice(-6)}`,
+      assignedPartnerId: dualPartnerId,
+    });
+    const [line] = await db.insert(orderLines).values({
+      orderId: order.id,
+      serviceId: tenant.catalog.serviceId,
+      tier: "economy",
+      quotedQuantity: 1_000,
+      unit: "gram",
+      quotedAmountKopeks: 50_000,
+      tariffSnapshotJson: {},
+    }).returning();
+    const [contract] = await db.insert(partnerContracts).values({
+      partnerId: dualPartnerId,
+      version: "1.0",
+      effectiveFrom: new Date(Date.now() - 86_400_000),
+      signed: true,
+    }).returning();
+    await db.insert(partnerServiceAccruals).values({
+      organizationId: tenant.organizationId,
+      partnerId: dualPartnerId,
+      orderLineId: line.id,
+      contractId: contract.id,
+      quantity: 1_000,
+      amountKopeks: 50_000,
+      status: "accrued",
+    });
+
     const creatorFinance = await login(app, {
       organizationId: tenant.organizationId,
       phone: uniquePhone(),
@@ -141,7 +176,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 3A finance queue prioritiz
         "idempotency-key": `w3a-pay-${rid()}`,
       },
       payload: {
-        partnerId,
+        partnerId: dualPartnerId,
         amountKopeks: 12_000,
         reference: "W3A-DUAL-CTRL",
       },

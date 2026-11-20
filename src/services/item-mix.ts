@@ -36,6 +36,9 @@ export type ItemMix = {
     ordersWithOverReceipt: number;
     ordersWithUnderReceipt: number;
     ordersWithIntake: number;
+    ordersWithoutIntake: number;
+    quotedGramsPendingIntake: number;
+    cancelledWithoutIntake: number;
   };
   daily: Array<{ date: string; itemCount: number; receivedGrams: number; orderCount: number }>;
   topVariance: Array<{
@@ -68,6 +71,9 @@ type WeightRow = {
   over_count: string | null;
   under_count: string | null;
   intake_count: string | null;
+  no_intake_count: string | null;
+  quoted_grams_pending_intake: string | null;
+  cancelled_without_intake: string | null;
 };
 type DailyItemRow = { day: string; item_count: string };
 type DailyWeightRow = { day: string; received_grams: string; order_count: string };
@@ -130,28 +136,22 @@ export async function itemMix(
     `),
     db.execute(sql`
       SELECT
-        COALESCE(SUM(per_order.quoted_grams), 0)   AS quoted_grams,
-        COALESCE(SUM(per_order.received_grams), 0) AS received_grams,
-        COALESCE(SUM(per_order.over_flag), 0)      AS over_count,
-        COALESCE(SUM(per_order.under_flag), 0)     AS under_count,
-        COALESCE(SUM(per_order.intake_flag), 0)    AS intake_count
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 1 AND NOT per_order.is_cancelled THEN per_order.quoted_grams ELSE 0 END), 0) AS quoted_grams,
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 1 AND NOT per_order.is_cancelled THEN per_order.received_grams ELSE 0 END), 0) AS received_grams,
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 1 AND NOT per_order.is_cancelled AND per_order.received_grams > per_order.quoted_grams THEN 1 ELSE 0 END), 0) AS over_count,
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 1 AND NOT per_order.is_cancelled AND per_order.received_grams < per_order.quoted_grams THEN 1 ELSE 0 END), 0) AS under_count,
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 1 AND NOT per_order.is_cancelled THEN 1 ELSE 0 END), 0) AS intake_count,
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 0 AND NOT per_order.is_cancelled AND per_order.quoted_grams > 0 THEN 1 ELSE 0 END), 0) AS no_intake_count,
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 0 AND NOT per_order.is_cancelled THEN per_order.quoted_grams ELSE 0 END), 0) AS quoted_grams_pending_intake,
+        COALESCE(SUM(CASE WHEN per_order.intake_flag = 0 AND per_order.is_cancelled AND per_order.quoted_grams > 0 THEN 1 ELSE 0 END), 0) AS cancelled_without_intake
       FROM (
         SELECT
           o.id AS order_id,
+          (o.lifecycle_state = 'cancelled') AS is_cancelled,
           COALESCE((SELECT SUM(ol.quoted_quantity) FROM order_lines ol
                     WHERE ol.order_id = o.id AND ol.unit = 'gram'), 0) AS quoted_grams,
           COALESCE((SELECT SUM(im.weight_grams) FROM intake_manifests im
                     WHERE im.order_id = o.id AND im.organization_id = o.organization_id), 0) AS received_grams,
-          CASE WHEN COALESCE((SELECT SUM(im.weight_grams) FROM intake_manifests im
-                              WHERE im.order_id = o.id AND im.organization_id = o.organization_id), 0)
-                    > COALESCE((SELECT SUM(ol.quoted_quantity) FROM order_lines ol
-                                WHERE ol.order_id = o.id AND ol.unit = 'gram'), 0)
-               THEN 1 ELSE 0 END AS over_flag,
-          CASE WHEN COALESCE((SELECT SUM(im.weight_grams) FROM intake_manifests im
-                              WHERE im.order_id = o.id AND im.organization_id = o.organization_id), 0)
-                    < COALESCE((SELECT SUM(ol.quoted_quantity) FROM order_lines ol
-                                WHERE ol.order_id = o.id AND ol.unit = 'gram'), 0)
-               THEN 1 ELSE 0 END AS under_flag,
           CASE WHEN EXISTS (SELECT 1 FROM intake_manifests im
                             WHERE im.order_id = o.id AND im.organization_id = o.organization_id)
                THEN 1 ELSE 0 END AS intake_flag
@@ -285,6 +285,9 @@ export async function itemMix(
       ordersWithOverReceipt: Number(weight.over_count ?? 0),
       ordersWithUnderReceipt: Number(weight.under_count ?? 0),
       ordersWithIntake: Number(weight.intake_count ?? 0),
+      ordersWithoutIntake: Number(weight.no_intake_count ?? 0),
+      quotedGramsPendingIntake: Number(weight.quoted_grams_pending_intake ?? 0),
+      cancelledWithoutIntake: Number(weight.cancelled_without_intake ?? 0),
     },
     daily: [...dailyMap.entries()]
       .map(([date, entry]) => ({ date, ...entry }))

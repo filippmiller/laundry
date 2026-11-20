@@ -120,7 +120,10 @@ type FinanceAnalyticsDto = {
     invoicedKopeks: number;
     disputedKopeks: number;
     paidKopeks: number;
+    reservedKopeks?: number;
     payableKopeks: number;
+    availablePayableKopeks?: number;
+    advanceKopeks?: number;
     partners: Array<{
       partnerId: string;
       partnerName: string;
@@ -129,7 +132,10 @@ type FinanceAnalyticsDto = {
       estimatedKopeks: number;
       disputedKopeks: number;
       paidKopeks: number;
+      reservedKopeks?: number;
       payableKopeks: number;
+      availablePayableKopeks?: number;
+      advanceKopeks?: number;
     }>;
   };
   margin: {
@@ -288,7 +294,11 @@ export function FinanceMoneyPanel({ notify }: { notify: NotifyFn }) {
         <Metric label="Не выставлено" value={money(p.estimatedKopeks)} hint="Ожидает формирования акта" />
         <Metric label="Оспорено" value={money(p.disputedKopeks)} tone={p.disputedKopeks > 0 ? "warn" : "default"} />
         <Metric label="Выплачено" value={money(p.paidKopeks)} tone="good" />
+        <Metric label="В резерве" value={money(p.reservedKopeks ?? 0)} hint="Запланированные выплаты" />
         <Metric label="К выплате" value={money(p.payableKopeks)} tone={p.payableKopeks > 0 ? "warn" : "default"} />
+        {(p.advanceKopeks ?? 0) > 0 && (
+          <Metric label="Аванс / переплата" value={money(p.advanceKopeks ?? 0)} tone="bad" />
+        )}
       </div>
 
       {p.partners.length > 0 && (

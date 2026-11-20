@@ -864,15 +864,15 @@ export async function decideAdjustment(
     await applyWeightDecision(tx as Db, adjustment, false);
     if (input.returnUnprocessed === true) {
       await assertOrderNotNetCharged(tx, principal.organizationId, order.id);
-      const openInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
+      const activeInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
         eq(customerInvoices.organizationId, principal.organizationId),
         eq(customerInvoices.orderId, order.id),
-        eq(customerInvoices.state, "open"),
+        ne(customerInvoices.state, "cancelled"),
       ));
-      for (const invoice of openInvoices) {
+      for (const invoice of activeInvoices) {
         await tx.update(customerInvoices).set({ state: "cancelled" }).where(and(
           eq(customerInvoices.id, invoice.id),
-          eq(customerInvoices.state, "open"),
+          ne(customerInvoices.state, "cancelled"),
         ));
       }
       const hubState = nextStateAsSystem(inspected, "return_unprocessed", {
@@ -931,7 +931,7 @@ export async function decideAdjustment(
           from: inspected,
           to: readyState,
           releasedReservations,
-          voidedInvoices: openInvoices.length,
+          voidedInvoices: activeInvoices.length,
           voidedAccruals,
           creditedAccruals,
         },
@@ -981,14 +981,15 @@ export async function returnUnprocessedOrder(
       throw errors.transition(order.lifecycleState, "return_unprocessed");
     }
     // An order that was never processed must never leave the customer payable: a positive net
-    // capture is refused so finance resolves the money explicitly, and an open invoice is voided.
+    // capture is refused so finance resolves the money explicitly, and any open or paid invoice
+    // (e.g. after a full refund) is voided so no phantom receivable remains.
     await assertOrderNotNetCharged(tx, principal.organizationId, order.id);
-    const openInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
+    const activeInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
       eq(customerInvoices.organizationId, principal.organizationId),
       eq(customerInvoices.orderId, order.id),
-      eq(customerInvoices.state, "open"),
+      ne(customerInvoices.state, "cancelled"),
     ));
-    for (const invoice of openInvoices) {
+    for (const invoice of activeInvoices) {
       await tx.update(customerInvoices).set({ state: "cancelled" }).where(eq(customerInvoices.id, invoice.id));
     }
     const { voidedAccruals, creditedAccruals } = await voidPartnerAccrualsForOrder(
@@ -1036,7 +1037,7 @@ export async function returnUnprocessedOrder(
       reason: input.reason,
       payload: {
         from: order.lifecycleState, to: readyState, reason: input.reason,
-        releasedReservations, voidedInvoices: openInvoices.length,
+        releasedReservations, voidedInvoices: activeInvoices.length,
         voidedAccruals, creditedAccruals,
       },
     });
@@ -1117,6 +1118,9 @@ export async function recordQualityCheck(
     organizationId: principal.organizationId, scope: "partner:qc", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
@@ -1126,23 +1130,27 @@ export async function recordQualityCheck(
     const garmentRows = await tx.select({ id: garments.id }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId), eq(garments.orderId, order.id),
     ));
-    // Economy bags have no per-item inventory, so QC is recorded at order/bag level.
-    if (garmentRows.length && !input.results.length) throw new AppError("VALIDATION_ERROR", "QC_RESULTS_REQUIRED");
-    if (input.results.length) {
+    let allPassed: boolean;
+    if (garmentRows.length) {
+      if (!input.results.length) throw new AppError("VALIDATION_ERROR", "QC_RESULTS_REQUIRED");
       const garmentIds = input.results.map(result => result.garmentId);
+      const uniqueIds = new Set(garmentIds);
+      if (uniqueIds.size !== garmentIds.length) {
+        throw new AppError("VALIDATION_ERROR", "QC_DUPLICATE_GARMENT", {
+          submitted: garmentIds.length,
+          unique: uniqueIds.size,
+        });
+      }
       const owned = await tx.select({ id: garments.id }).from(garments).where(and(
         eq(garments.organizationId, principal.organizationId),
         eq(garments.orderId, order.id),
         inArray(garments.id, garmentIds),
       ));
-      if (owned.length !== new Set(garmentIds).size) throw errors.notFound("garment");
-    }
-    // QC must cover every accepted garment of the order exactly once.
-    if (garmentRows.length) {
-      const covered = new Set(input.results.map(result => result.garmentId));
-      if (covered.size !== garmentRows.length || !garmentRows.every(row => covered.has(row.id))) {
+      if (owned.length !== uniqueIds.size) throw errors.notFound("garment");
+      // QC must cover every accepted garment of the order exactly once with no duplicates or foreign IDs.
+      if (uniqueIds.size !== garmentRows.length || !garmentRows.every(row => uniqueIds.has(row.id))) {
         throw new AppError("VALIDATION_ERROR", "QC_INCOMPLETE_COVERAGE", {
-          required: garmentRows.length, covered: covered.size,
+          required: garmentRows.length, covered: uniqueIds.size,
         });
       }
       for (const result of input.results) {
@@ -1155,20 +1163,26 @@ export async function recordQualityCheck(
           actorId: principal.userId,
         });
       }
+      allPassed = input.results.every(result => result.passed);
     } else {
-      const bagPassed = input.bagPassed ?? true;
+      // Economy bags have no per-item inventory; foreign garment results are rejected and an
+      // explicit boolean `bagPassed` decision is mandatory (never defaulted to true).
+      if (input.results.length > 0) throw errors.notFound("garment");
+      if (typeof input.bagPassed !== "boolean") {
+        throw new AppError("VALIDATION_ERROR", "QC_DECISION_REQUIRED", {
+          reason: "bagPassed boolean is required for economy orders",
+        });
+      }
       await tx.insert(qualityChecks).values({
         organizationId: principal.organizationId,
         orderId: order.id,
         garmentId: null,
-        result: bagPassed ? "passed" : "failed",
+        result: input.bagPassed ? "passed" : "failed",
         note: input.note ?? null,
         actorId: principal.userId,
       });
+      allPassed = input.bagPassed;
     }
-    const allPassed = garmentRows.length
-      ? input.results.every(result => result.passed)
-      : (input.bagPassed ?? true);
     const to = nextState("processing", allPassed ? "qc_start" : "qc_start", principal);
     let finalState: OrderState = to;
     await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
@@ -1245,6 +1259,7 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
       description: garments.description,
       status: garments.status,
       brandMark: garments.brandMark,
+      declaredValueKopeks: garments.declaredValueKopeks,
     }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId),
       inArray(garments.orderId, orderIds),

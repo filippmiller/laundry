@@ -25,8 +25,8 @@ import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierSto
 import { decideClaim, getClaim, openClaim, reopenClaim } from "../services/claims.js";
 import {
   approvePartnerCreditNote, approvePartnerPayout, capturePayment, createCustomerInvoice, createPartnerInvoice,
-  createPartnerPayout, disputePartnerLine, handlePaymentWebhook, orderFinance, partnerAccruals, refundPayment,
-  settleClaimCompensation,
+  createPartnerPayout, disputePartnerLine, handlePaymentWebhook, listPartnerCreditNotes, listPartnerPayouts,
+  orderFinance, partnerAccruals, processPendingRefunds, refundPayment, settleClaimCompensation,
 } from "../services/finance.js";
 import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
 import { MAX_DECLARED_ROWS, MAX_PICKED_QUANTITY } from "../../shared/garment-taxonomy.js";
@@ -612,9 +612,18 @@ export function buildApp(db: Db) {
   add({
     method: "POST", path: "/orders/:id/cancel", summary: "Cancel an order and release its capacity", tags: ["Customer"],
     params: idSchema,
-    body: z.object({ reason: z.string().min(3), key: z.string().optional() }),
+    body: z.object({
+      reason: z.string().min(3),
+      retainedKopeks: z.number().int().nonnegative().optional(),
+      deferRefundSettlement: z.boolean().optional(),
+      key: z.string().optional(),
+    }),
     handler: ctx => cancelOrder(db, ctx.principal, {
-      orderId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+      orderId: ctx.params.id,
+      reason: ctx.body.reason,
+      retainedKopeks: ctx.body.retainedKopeks,
+      deferRefundSettlement: ctx.body.deferRefundSettlement,
+      key: idempotencyKey(ctx),
     }),
   });
   add({
@@ -1144,6 +1153,12 @@ export function buildApp(db: Db) {
     handler: ctx => refundPayment(db, ctx.principal, { ...ctx.body, key: idempotencyKey(ctx) }),
   });
   add({
+    method: "POST", path: "/finance/refunds/process-pending", summary: "Settle pending or errored refund obligations idempotently", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.worker],
+    body: z.object({ orderId: z.uuid().optional(), refundId: z.uuid().optional(), limit: z.number().int().min(1).max(200).optional() }),
+    handler: ctx => processPendingRefunds(db, ctx.principal, ctx.body),
+  });
+  add({
     method: "POST", path: "/webhooks/payments/:provider", summary: "Signature-verified provider webhook inbox", tags: ["Integrations"], public: true,
     rateLimit: { max: 120, timeWindow: "1 minute" },
     body: z.object({ eventId: z.string().min(1), eventType: z.string().min(1), payload: z.record(z.string(), z.unknown()) }),
@@ -1197,6 +1212,20 @@ export function buildApp(db: Db) {
     }),
   });
   add({
+    method: "GET", path: "/finance/partner-credit-notes", summary: "Paginated partner credit notes (active queue or history)", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    query: z.object({
+      bucket: z.enum(["active", "history", "all"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).optional(),
+    }),
+    handler: ctx => listPartnerCreditNotes(db, ctx.principal, {
+      bucket: ctx.query.bucket as "active" | "history" | "all" | undefined,
+      limit: ctx.query.limit as number | undefined,
+      cursor: ctx.query.cursor as string | undefined,
+    }),
+  });
+  add({
     method: "POST", path: "/finance/partner-credit-notes/:id/approve", summary: "Approve a partner credit note", tags: ["Finance"],
     params: idSchema,
     roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
@@ -1204,6 +1233,20 @@ export function buildApp(db: Db) {
     handler: ctx => approvePartnerCreditNote(db, ctx.principal, {
       creditNoteId: ctx.params.id,
       key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/finance/partner-payouts", summary: "Paginated partner payouts (active queue or history)", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    query: z.object({
+      bucket: z.enum(["active", "history", "all"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).optional(),
+    }),
+    handler: ctx => listPartnerPayouts(db, ctx.principal, {
+      bucket: ctx.query.bucket as "active" | "history" | "all" | undefined,
+      limit: ctx.query.limit as number | undefined,
+      cursor: ctx.query.cursor as string | undefined,
     }),
   });
   add({
