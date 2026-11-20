@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { ApiError, DemoConfig, api, dt, money, newKey } from "../api";
 import { GarmentIcon } from "../components/garment-icons";
+import { EvidenceUploader } from "../components/EvidenceUploader";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { QrScannerDialog } from "../components/QrScannerDialog";
 import {
@@ -492,6 +493,7 @@ export function CourierWorkspace({
   const [handoffCode, setHandoffCode] = useState("");
   const [picked, setPicked] = useState<PickedGarment[]>([]);
   const [itemMeta, setItemMeta] = useState<Record<string, IntakeItemMeta>>({});
+  const [intakeEvidenceIds, setIntakeEvidenceIds] = useState<string[]>([]);
   const [dualConfirmed, setDualConfirmed] = useState(false);
   const [intakeBusy, setIntakeBusy] = useState(false);
 
@@ -622,6 +624,7 @@ export function CourierWorkspace({
   useEffect(() => {
     setPicked([]);
     setItemMeta({});
+    setIntakeEvidenceIds([]);
     setDualConfirmed(false);
   }, [selectedStop?.stopId]);
 
@@ -1000,13 +1003,17 @@ export function CourierWorkspace({
           const meta = itemMeta[item.subtypeId] ?? { declaredValueRub: "5000", note: "" };
           for (let piece = 0; piece < item.quantity; piece += 1) {
             index += 1;
-            items.push({
+            const entry: Record<string, unknown> = {
               itemCode: `${codePrefix}-${String(index).padStart(2, "0")}`,
               category: item.category,
               subtypeId: item.subtypeId,
               description: meta.note.trim() || item.label,
               declaredValueKopeks: Math.max(0, Math.round((Number(meta.declaredValueRub) || 0) * 100)),
-            });
+            };
+            if (intakeEvidenceIds.length > 0) {
+              entry.evidenceAssetIds = intakeEvidenceIds;
+            }
+            items.push(entry);
           }
         }
         payload.items = items;
@@ -1023,6 +1030,7 @@ export function CourierWorkspace({
       });
       setDualConfirmed(false);
       setHandoffCode("");
+      setIntakeEvidenceIds([]);
       // Every handover needs its own bag and seal: the bag stays assigned to the order it was
       // received with, and the seal moves to `assigned`. Reusing the same codes made the second
       // customer of a shift fail with a custody conflict.
@@ -1586,6 +1594,15 @@ export function CourierWorkspace({
                   </div>
                 )}
 
+                <EvidenceUploader
+                  ownerType="order"
+                  ownerId={selectedStop.orderId}
+                  purpose="intake_condition"
+                  title="Фотофиксация приёмки"
+                  notify={notify}
+                  onUploadedIdsChange={setIntakeEvidenceIds}
+                />
+
                 <Checkbox
                   label="Клиент и курьер подтвердили передачу и опись"
                   checked={dualConfirmed}
@@ -1707,6 +1724,14 @@ export function CourierWorkspace({
                     Сначала зафиксируйте прибытие по адресу кнопкой «Прибыл», чтобы оформить попытку доставки.
                   </p>
                 )}
+
+                <EvidenceUploader
+                  ownerType="order"
+                  ownerId={selectedStop.orderId}
+                  purpose="delivery_proof"
+                  title="Фотофиксация выдачи"
+                  notify={notify}
+                />
 
                 <div className="button-row">
                   <Button
