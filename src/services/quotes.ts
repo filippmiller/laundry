@@ -6,6 +6,7 @@ import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
 import { calculateQuote, type QuoteInput, type ServiceLineInput } from "../domain/pricing.js";
+import { releaseHeldReservationsInTx } from "../domain/slot-reservation.js";
 import { activeTariff, resolveAddress } from "./catalog.js";
 import { normalizeDeclaredItems } from "../../shared/garment-taxonomy.js";
 
@@ -33,6 +34,11 @@ export type CreateQuoteInput = {
    * one the customer actually accepted.
    */
   declaredItems?: Array<{ subtypeId: string; quantity: number }>;
+  /**
+   * Optional prior unattached held slot reservation IDs from an earlier quote attempt
+   * that should be released atomically when the customer re-quotes after editing the form.
+   */
+  releaseReservationIds?: string[];
   key: string;
   now?: Date;
 };
@@ -167,12 +173,24 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       totalKopeks: pricedQuote.totalKopeks,
       expiresAt,
     }).returning();
+    const releasedReservationIds = input.releaseReservationIds?.length
+      ? await releaseHeldReservationsInTx(tx, {
+        principal,
+        reservationIds: input.releaseReservationIds,
+        reason: "Released on re-quote",
+        ownerPrincipalId: customerId,
+      })
+      : [];
     await appendEvent(tx, {
       principal,
       aggregateType: "quote",
       aggregateId: quote.id,
       eventType: "quote.created",
-      payload: { totalKopeks: quote.totalKopeks, quoteHash: quote.quoteHash },
+      payload: {
+        totalKopeks: quote.totalKopeks,
+        quoteHash: quote.quoteHash,
+        releasedReservationIds,
+      },
     });
     return {
       id: quote.id,
@@ -187,6 +205,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       lines: pricedQuote.lines,
       declaredItems: declared.items,
       snapshot: pricedQuote.snapshot,
+      releasedReservationIds,
     };
   });
   return { ...result.value, replayed: result.replayed };

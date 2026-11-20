@@ -545,15 +545,24 @@ export async function repeatOrder(db: Db, principal: Principal, orderId: string)
       unit: line.unit,
     }));
 
-  const [address] = await db.select({ buildingId: customerAddresses.buildingId }).from(customerAddresses).where(and(
+  const [address] = await db.select({
+    id: customerAddresses.id,
+    buildingId: customerAddresses.buildingId,
+    apartment: customerAddresses.apartment,
+  }).from(customerAddresses).where(and(
     eq(customerAddresses.id, order.addressId),
     eq(customerAddresses.organizationId, principal.organizationId),
+    eq(customerAddresses.customerId, order.customerId),
   )).limit(1);
 
+  const addressAvailable = Boolean(address);
   return {
     sourceOrderId: order.id,
     publicNumber: order.publicNumber,
     buildingId: address?.buildingId ?? null,
+    addressId: address?.id ?? null,
+    originalAddressId: order.addressId,
+    addressAvailable,
     lines,
     declaredItems: snapshot.declaredItems ?? [],
     note: "Повтор заказа — это новая котировка с новой ценой и новыми слотами. Старый заказ не меняется.",

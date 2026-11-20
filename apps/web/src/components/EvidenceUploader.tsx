@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { AlertTriangle, FileCheck2, RefreshCw, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, FileCheck2, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { ApiError, api, dt, sha256FileHex } from "../api";
 import { EVIDENCE_PURPOSE_LABELS, formatError, stateLabel } from "../labels";
 import { Badge, type BadgeTone, Button, Card, CardBody, CardHeader } from "./ui";
+import {
+  cancelEvidenceUploadBatches,
+  clearEvidenceUploadError,
+  evidenceOwnerKey,
+  finishEvidenceUploadBatch,
+  getOwnerUploadSnapshot,
+  setEvidenceUploadError,
+  startEvidenceUploadBatch,
+  subscribeEvidenceUploads,
+} from "./evidence-upload-store";
 
 export type EvidenceOwnerType = "order" | "claim" | "custody_event";
 export type EvidencePurpose = "intake_condition" | "delivery_proof" | "claim_evidence" | "qc";
@@ -126,7 +136,7 @@ export function EvidenceUploader({
   const onUploadedIdsChangeRef = useRef(onUploadedIdsChange);
   const onUploadStateChangeRef = useRef(onUploadStateChange);
 
-  const currentOwnerKey = ownerId ? `${ownerType}:${ownerId}` : "";
+  const currentOwnerKey = evidenceOwnerKey(ownerType, ownerId);
   const activeOwnerRef = useRef({ ownerType, ownerId, ownerKey: currentOwnerKey });
   const requestGenRef = useRef(0);
 
@@ -138,31 +148,33 @@ export function EvidenceUploader({
     ownerKey: currentOwnerKey,
     active: false,
   });
-  const [uploadState, setUploadState] = useState<{ ownerKey: string; count: number }>({
-    ownerKey: currentOwnerKey,
-    count: 0,
-  });
+  const [uploadSnapshot, setUploadSnapshot] = useState(() => getOwnerUploadSnapshot(currentOwnerKey));
   const [deletingState, setDeletingState] = useState<{ ownerKey: string; id: string | null }>({
     ownerKey: currentOwnerKey,
     id: null,
   });
-  const [errorState, setErrorState] = useState<{
+  const [loadErrorState, setLoadErrorState] = useState<{
     ownerKey: string;
     loadError: string | null;
-    uploadError: string | null;
   }>({
     ownerKey: currentOwnerKey,
     loadError: null,
-    uploadError: null,
   });
+
+  useEffect(() => {
+    setUploadSnapshot(getOwnerUploadSnapshot(currentOwnerKey));
+    return subscribeEvidenceUploads(() => {
+      setUploadSnapshot(getOwnerUploadSnapshot(currentOwnerKey));
+    });
+  }, [currentOwnerKey]);
 
   const assets = assetsState.ownerKey === currentOwnerKey ? assetsState.items : [];
   const loading = loadingState.ownerKey === currentOwnerKey ? loadingState.active : false;
-  const uploadingCount = uploadState.ownerKey === currentOwnerKey ? uploadState.count : 0;
+  const uploadingCount = uploadSnapshot.ownerKey === currentOwnerKey ? uploadSnapshot.uploadingCount : 0;
   const uploading = uploadingCount > 0;
   const deletingId = deletingState.ownerKey === currentOwnerKey ? deletingState.id : null;
-  const loadError = errorState.ownerKey === currentOwnerKey ? errorState.loadError : null;
-  const uploadError = errorState.ownerKey === currentOwnerKey ? errorState.uploadError : null;
+  const loadError = loadErrorState.ownerKey === currentOwnerKey ? loadErrorState.loadError : null;
+  const uploadError = uploadSnapshot.ownerKey === currentOwnerKey ? uploadSnapshot.lastError : null;
   const hasError = Boolean(loadError || uploadError);
 
   useEffect(() => {
@@ -193,20 +205,16 @@ export function EvidenceUploader({
 
   const loadAssets = useCallback(
     async (options?: { reportErrorToast?: boolean }) => {
-      const targetOwnerKey = ownerId ? `${ownerType}:${ownerId}` : "";
+      const targetOwnerKey = evidenceOwnerKey(ownerType, ownerId);
       const gen = ++requestGenRef.current;
       if (!ownerId) {
         setAssetsState({ ownerKey: targetOwnerKey, items: [] });
-        setErrorState({ ownerKey: targetOwnerKey, loadError: null, uploadError: null });
+        setLoadErrorState({ ownerKey: targetOwnerKey, loadError: null });
         setLoadingState({ ownerKey: targetOwnerKey, active: false });
         return;
       }
       setLoadingState({ ownerKey: targetOwnerKey, active: true });
-      setErrorState(prev => ({
-        ownerKey: targetOwnerKey,
-        loadError: null,
-        uploadError: prev.ownerKey === targetOwnerKey ? prev.uploadError : null,
-      }));
+      setLoadErrorState({ ownerKey: targetOwnerKey, loadError: null });
       try {
         const res = await api<unknown>(`/evidence/${ownerType}/${ownerId}`);
         if (requestGenRef.current !== gen || activeOwnerRef.current.ownerKey !== targetOwnerKey) {
@@ -218,11 +226,7 @@ export function EvidenceUploader({
           return;
         }
         const message = formatError(err);
-        setErrorState(prev => ({
-          ownerKey: targetOwnerKey,
-          loadError: message,
-          uploadError: prev.ownerKey === targetOwnerKey ? prev.uploadError : null,
-        }));
+        setLoadErrorState({ ownerKey: targetOwnerKey, loadError: message });
         if (options?.reportErrorToast || !(err instanceof ApiError && err.status === 403)) {
           notify({ kind: "error", text: message });
         }
@@ -239,8 +243,7 @@ export function EvidenceUploader({
     activeOwnerRef.current = { ownerType, ownerId, ownerKey: currentOwnerKey };
     requestGenRef.current += 1;
     setAssetsState({ ownerKey: currentOwnerKey, items: [] });
-    setErrorState({ ownerKey: currentOwnerKey, loadError: null, uploadError: null });
-    setUploadState({ ownerKey: currentOwnerKey, count: 0 });
+    setLoadErrorState({ ownerKey: currentOwnerKey, loadError: null });
     setDeletingState({ ownerKey: currentOwnerKey, id: null });
     setLoadingState({ ownerKey: currentOwnerKey, active: false });
   }, [ownerType, ownerId, currentOwnerKey]);
@@ -248,6 +251,14 @@ export function EvidenceUploader({
   useEffect(() => {
     void loadAssets();
   }, [loadAssets, refreshKey]);
+
+  const handleCancelUploads = () => {
+    if (!currentOwnerKey) return;
+    const cancelledCount = cancelEvidenceUploadBatches(currentOwnerKey);
+    if (cancelledCount > 0) {
+      notify({ kind: "error", text: "Загрузка файлов отменена." });
+    }
+  };
 
   const handleFilesSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = event.target.files;
@@ -270,53 +281,41 @@ export function EvidenceUploader({
 
     const targetOwnerType = ownerType;
     const targetOwnerId = ownerId;
-    const targetOwnerKey = `${targetOwnerType}:${targetOwnerId}`;
+    const targetOwnerKey = evidenceOwnerKey(targetOwnerType, targetOwnerId);
     const isSameOwner = () => activeOwnerRef.current.ownerKey === targetOwnerKey;
 
-    setUploadState(prev => ({
-      ownerKey: targetOwnerKey,
-      count: (prev.ownerKey === targetOwnerKey ? prev.count : 0) + 1,
-    }));
-    setErrorState(prev => ({
-      ownerKey: targetOwnerKey,
-      loadError: prev.ownerKey === targetOwnerKey ? prev.loadError : null,
-      uploadError: null,
-    }));
+    const { generation, abortController } = startEvidenceUploadBatch(targetOwnerKey, files.length);
+    const isCancelled = () => abortController.signal.aborted;
     let uploadedCount = 0;
 
     try {
       for (const file of files) {
-        if (!isSameOwner()) return;
+        if (isCancelled()) return;
         if (!ALLOWED_MIME_SET.has(file.type)) {
           const msg = `Файл «${file.name}»: неподдерживаемый формат. Допустимы JPEG, PNG, WebP и PDF.`;
-          setErrorState(prev =>
-            prev.ownerKey === targetOwnerKey ? { ...prev, uploadError: msg } : prev,
-          );
-          notify({ kind: "error", text: msg });
+          setEvidenceUploadError(targetOwnerKey, msg);
+          if (isSameOwner()) notify({ kind: "error", text: msg });
           continue;
         }
         if (file.size <= 0) {
           const msg = `Файл «${file.name}» пустой и не может быть загружен.`;
-          setErrorState(prev =>
-            prev.ownerKey === targetOwnerKey ? { ...prev, uploadError: msg } : prev,
-          );
-          notify({ kind: "error", text: msg });
+          setEvidenceUploadError(targetOwnerKey, msg);
+          if (isSameOwner()) notify({ kind: "error", text: msg });
           continue;
         }
         if (file.size > MAX_EVIDENCE_BYTES) {
           const msg = `Файл «${file.name}» превышает максимальный размер 15 МБ.`;
-          setErrorState(prev =>
-            prev.ownerKey === targetOwnerKey ? { ...prev, uploadError: msg } : prev,
-          );
-          notify({ kind: "error", text: msg });
+          setEvidenceUploadError(targetOwnerKey, msg);
+          if (isSameOwner()) notify({ kind: "error", text: msg });
           continue;
         }
 
         const sha256 = await sha256FileHex(file);
-        if (!isSameOwner()) return;
+        if (isCancelled()) return;
         const objectKey = buildObjectKey(targetOwnerType, targetOwnerId, file.name);
         const regRes = await api<{ evidenceId?: string; id?: string; status?: string }>("/evidence", {
           method: "POST",
+          signal: abortController.signal,
           body: {
             ownerType: targetOwnerType,
             ownerId: targetOwnerId,
@@ -327,7 +326,7 @@ export function EvidenceUploader({
             sizeBytes: file.size,
           },
         });
-        if (!isSameOwner()) return;
+        if (isCancelled()) return;
 
         const evidenceId = regRes.evidenceId ?? regRes.id;
         if (!evidenceId) {
@@ -335,17 +334,18 @@ export function EvidenceUploader({
         }
 
         const buffer = await file.arrayBuffer();
-        if (!isSameOwner()) return;
+        if (isCancelled()) return;
         const contentBase64 = arrayBufferToBase64(buffer);
 
         await api(`/evidence/${evidenceId}/upload`, {
           method: "POST",
+          signal: abortController.signal,
           body: {
             contentBase64,
             mimeType: file.type,
           },
         });
-        if (!isSameOwner()) return;
+        if (isCancelled()) return;
 
         uploadedCount += 1;
       }
@@ -362,24 +362,19 @@ export function EvidenceUploader({
         });
       }
     } catch (err) {
-      if (!isSameOwner()) return;
+      if (isCancelled() || (err instanceof DOMException && err.name === "AbortError")) {
+        return;
+      }
       const msg = formatError(err);
-      setErrorState(prev => ({
-        ownerKey: targetOwnerKey,
-        loadError: prev.ownerKey === targetOwnerKey ? prev.loadError : null,
-        uploadError: msg,
-      }));
-      await loadAssets().catch(() => {});
+      setEvidenceUploadError(targetOwnerKey, msg);
       if (isSameOwner()) {
-        notify({ kind: "error", text: msg });
+        await loadAssets().catch(() => {});
+        if (isSameOwner()) {
+          notify({ kind: "error", text: msg });
+        }
       }
     } finally {
-      if (isSameOwner()) {
-        setUploadState(prev => ({
-          ownerKey: targetOwnerKey,
-          count: prev.ownerKey === targetOwnerKey ? Math.max(0, prev.count - 1) : 0,
-        }));
-      }
+      finishEvidenceUploadBatch(targetOwnerKey, generation);
     }
   };
 
@@ -438,11 +433,22 @@ export function EvidenceUploader({
               variant="secondary"
               size="sm"
               leadingIcon={<Upload size={15} aria-hidden="true" />}
-              disabled={uploading || !ownerId}
+              disabled={!ownerId}
               onClick={() => fileInputRef.current?.click()}
             >
-              {uploading ? "Загрузка..." : "Загрузить фото / PDF"}
+              {uploading ? `Загрузка (${uploadingCount})...` : "Загрузить фото / PDF"}
             </Button>
+            {uploading && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                leadingIcon={<X size={15} aria-hidden="true" />}
+                onClick={handleCancelUploads}
+              >
+                Отменить загрузку
+              </Button>
+            )}
             <Button
               type="button"
               variant="ghost"
@@ -461,6 +467,20 @@ export function EvidenceUploader({
           <div className="alert-banner" role="alert">
             <AlertTriangle size={16} aria-hidden="true" />
             <span>Не удалось загрузить список доказательств: {loadError}</span>
+          </div>
+        )}
+        {uploadError && (
+          <div className="alert-banner" role="alert">
+            <AlertTriangle size={16} aria-hidden="true" />
+            <span>{uploadError}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => clearEvidenceUploadError(currentOwnerKey)}
+            >
+              Скрыть
+            </Button>
           </div>
         )}
 

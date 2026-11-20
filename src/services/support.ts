@@ -1,7 +1,8 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { orders, supportMessages, supportThreads } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -102,41 +103,145 @@ export async function postMessage(
   });
 }
 
-export async function listThreads(db: Db, principal: Principal, input: { limit?: number } = {}) {
+export async function listThreadsPage(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number; cursor?: string; query?: string; state?: string } = {},
+) {
   assertRole(principal, "customer", ...SUPPORT_ROLES);
-  const limit = Math.min(input.limit ?? 50, 100);
-  if (isSupport(principal)) {
-    return db.select().from(supportThreads)
-      .where(eq(supportThreads.organizationId, principal.organizationId))
-      .orderBy(desc(supportThreads.createdAt))
-      .limit(limit);
-  }
-  return db.select({
-    id: supportThreads.id, orderId: supportThreads.orderId, subject: supportThreads.subject,
-    state: supportThreads.state, createdAt: supportThreads.createdAt,
-  }).from(supportThreads)
-    .innerJoin(orders, eq(orders.id, supportThreads.orderId))
-    .where(and(
-      eq(supportThreads.organizationId, principal.organizationId),
-      eq(orders.customerId, principal.userId),
-    ))
-    .orderBy(desc(supportThreads.createdAt))
-    .limit(limit);
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 100);
+  const decoded = input.cursor ? decodeKeysetCursor(input.cursor) : null;
+  const trimmedQuery = input.query?.trim();
+  const likePattern = trimmedQuery ? `%${escapeLikePattern(trimmedQuery)}%` : null;
+  const stateFilter = input.state?.trim() || null;
+
+  const support = isSupport(principal);
+  const baseWhere = and(
+    eq(supportThreads.organizationId, principal.organizationId),
+    support ? undefined : eq(orders.customerId, principal.userId),
+    stateFilter ? eq(supportThreads.state, stateFilter) : undefined,
+    likePattern
+      ? or(
+        sql`${supportThreads.subject} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${orders.publicNumber} ILIKE ${likePattern} ESCAPE '\\'`,
+      )
+      : undefined,
+  );
+  const pageWhere = and(
+    baseWhere,
+    decoded
+      ? sql`(${supportThreads.createdAt}, ${supportThreads.id}) < (${decoded.ts}, ${decoded.id})`
+      : undefined,
+  );
+
+  const [[countRow], rows] = await Promise.all([
+    support
+      ? db.select({ count: sql<number>`count(*)::int` })
+        .from(supportThreads)
+        .leftJoin(orders, and(
+          eq(orders.id, supportThreads.orderId),
+          eq(orders.organizationId, supportThreads.organizationId),
+        ))
+        .where(baseWhere)
+      : db.select({ count: sql<number>`count(*)::int` })
+        .from(supportThreads)
+        .innerJoin(orders, and(
+          eq(orders.id, supportThreads.orderId),
+          eq(orders.organizationId, supportThreads.organizationId),
+        ))
+        .where(baseWhere),
+    support
+      ? db.select({
+        id: supportThreads.id,
+        organizationId: supportThreads.organizationId,
+        orderId: supportThreads.orderId,
+        orderPublicNumber: orders.publicNumber,
+        subject: supportThreads.subject,
+        state: supportThreads.state,
+        createdAt: supportThreads.createdAt,
+      }).from(supportThreads)
+        .leftJoin(orders, and(
+          eq(orders.id, supportThreads.orderId),
+          eq(orders.organizationId, supportThreads.organizationId),
+        ))
+        .where(pageWhere)
+        .orderBy(desc(supportThreads.createdAt), desc(supportThreads.id))
+        .limit(limit + 1)
+      : db.select({
+        id: supportThreads.id,
+        orderId: supportThreads.orderId,
+        orderPublicNumber: orders.publicNumber,
+        subject: supportThreads.subject,
+        state: supportThreads.state,
+        createdAt: supportThreads.createdAt,
+      }).from(supportThreads)
+        .innerJoin(orders, and(
+          eq(orders.id, supportThreads.orderId),
+          eq(orders.organizationId, supportThreads.organizationId),
+        ))
+        .where(pageWhere)
+        .orderBy(desc(supportThreads.createdAt), desc(supportThreads.id))
+        .limit(limit + 1),
+  ]);
+
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  const last = items[items.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.createdAt, last.id) : null;
+  return {
+    items,
+    totalCount: countRow?.count ?? 0,
+    hasMore,
+    nextCursor,
+  };
 }
 
-export async function getThread(db: Db, principal: Principal, threadId: string) {
+export async function listThreads(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number; cursor?: string; query?: string; state?: string } = {},
+) {
+  const page = await listThreadsPage(db, principal, input);
+  return page.items;
+}
+
+export async function getThread(
+  db: Db,
+  principal: Principal,
+  threadId: string,
+  options: { limit?: number; beforeCursor?: string } = {},
+) {
   assertRole(principal, "customer", ...SUPPORT_ROLES);
   const { thread, support, customerId } = await loadThread(db, principal, threadId);
-  const latestMessages = await db.select({
-    id: supportMessages.id,
-    body: supportMessages.body,
-    createdAt: supportMessages.createdAt,
-    authorId: supportMessages.authorId,
-  }).from(supportMessages)
-    .where(eq(supportMessages.threadId, thread.id))
-    .orderBy(desc(supportMessages.createdAt), desc(supportMessages.id))
-    .limit(500);
-  const messages = latestMessages.reverse();
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 500), 1), 500);
+  const decoded = options.beforeCursor ? decodeKeysetCursor(options.beforeCursor) : null;
+
+  const [[countRow], fetched] = await Promise.all([
+    db.select({ count: sql<number>`count(*)::int` })
+      .from(supportMessages)
+      .where(eq(supportMessages.threadId, thread.id)),
+    db.select({
+      id: supportMessages.id,
+      body: supportMessages.body,
+      createdAt: supportMessages.createdAt,
+      authorId: supportMessages.authorId,
+    }).from(supportMessages)
+      .where(and(
+        eq(supportMessages.threadId, thread.id),
+        decoded
+          ? sql`(${supportMessages.createdAt}, ${supportMessages.id}) < (${decoded.ts}, ${decoded.id})`
+          : undefined,
+      ))
+      .orderBy(desc(supportMessages.createdAt), desc(supportMessages.id))
+      .limit(limit + 1),
+  ]);
+
+  const hasEarlier = fetched.length > limit;
+  const pageDesc = hasEarlier ? fetched.slice(0, limit) : fetched;
+  const messages = pageDesc.reverse();
+  const oldest = messages[0];
+  const earlierCursor = hasEarlier && oldest ? encodeKeysetCursor(oldest.createdAt, oldest.id) : null;
+
   return {
     thread,
     messages: messages.map(message => ({
@@ -146,6 +251,9 @@ export async function getThread(db: Db, principal: Principal, threadId: string) 
       isMine: message.authorId === principal.userId,
       authorKind: (customerId && message.authorId === customerId ? "customer" : "support") as "customer" | "support",
     })),
+    hasEarlier,
+    earlierCursor,
+    totalMessages: countRow?.count ?? messages.length,
     viewer: support ? "support" : "customer",
   };
 }

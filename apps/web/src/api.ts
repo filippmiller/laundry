@@ -15,7 +15,7 @@ export class ApiError extends Error {
 
 export async function api<T>(
   path: string,
-  options: { method?: string; body?: unknown; key?: string; headers?: Record<string, string> } = {},
+  options: { method?: string; body?: unknown; key?: string; headers?: Record<string, string>; signal?: AbortSignal } = {},
 ): Promise<T> {
   const method = (options.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { ...(options.headers ?? {}) };
@@ -30,6 +30,7 @@ export async function api<T>(
     method,
     headers,
     credentials: "include",
+    signal: options.signal,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   const payload = await response.json().catch(() => ({}));

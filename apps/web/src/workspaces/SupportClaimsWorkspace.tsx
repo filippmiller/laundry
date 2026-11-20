@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import {
+  AlertTriangle,
   Banknote,
   CheckCircle2,
+  Eye,
   EyeOff,
   FileText,
   Lock,
@@ -16,7 +18,7 @@ import {
   Star,
   ThumbsUp,
 } from "lucide-react";
-import { api, dt, money } from "../api";
+import { ApiError, api, dt, money } from "../api";
 import { ModalDialog } from "../components/ModalDialog";
 import { Badge, type BadgeTone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -80,6 +82,9 @@ type SupportMessage = {
 type ThreadDetail = {
   thread: SupportThread;
   messages: SupportMessage[];
+  hasEarlier?: boolean;
+  earlierCursor?: string | null;
+  totalMessages?: number;
 };
 
 type ClaimSummary = {
@@ -136,17 +141,57 @@ type EvidenceHold = {
 
 type EvidenceAsset = {
   id: string;
-  objectKey?: string;
   sha256?: string;
   sha256Hex?: string;
   contentHash?: string;
   digest?: string;
   purpose?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  status?: string;
   legalHold?: boolean;
   legal_hold?: boolean;
   holdActive?: boolean;
   createdAt?: string;
 };
+
+type EvidencePreview = {
+  assetId: string;
+  label: string;
+  mimeType: string;
+  blobUrl: string;
+};
+
+const SUPPORT_LIST_PAGE_SIZE = 50;
+
+async function fetchPaginatedList<T>(
+  path: string,
+  keys: string[],
+  options: { cursor?: string | null; query?: string } = {},
+): Promise<{ items: T[]; totalCount: number; nextCursor: string | null; hasMore: boolean }> {
+  const params = new URLSearchParams({ limit: String(SUPPORT_LIST_PAGE_SIZE) });
+  if (options.cursor) params.set("cursor", options.cursor);
+  if (options.query?.trim()) params.set("query", options.query.trim());
+  const response = await fetch(`/api/v1${path}?${params.toString()}`, {
+    method: "GET",
+    credentials: "include",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new ApiError(
+      payload?.error?.code ?? payload?.error?.message ?? "REQUEST_FAILED",
+      response.status,
+      payload?.error?.details,
+    );
+  }
+  const items = unwrapList<T>(payload, keys);
+  const rawTotal = response.headers.get("X-Total-Count");
+  const parsedTotal = rawTotal !== null ? Number(rawTotal) : NaN;
+  const totalCount = Number.isFinite(parsedTotal) && parsedTotal >= 0 ? parsedTotal : items.length;
+  const nextCursor = response.headers.get("X-Next-Cursor");
+  const hasMore = response.headers.get("X-Has-More") === "true" && Boolean(nextCursor);
+  return { items, totalCount, nextCursor, hasMore };
+}
 
 type ClaimDetail = {
   claim: ClaimSummary;
@@ -190,14 +235,12 @@ function getHashPrefix(asset: EvidenceAsset): string {
 }
 
 function isAssetOnLegalHold(asset: EvidenceAsset, holds: EvidenceHold[]): boolean {
-  if (asset.legalHold || asset.legal_hold || asset.holdActive) return true;
+  if (asset.legalHold || asset.legal_hold || asset.holdActive || asset.status === "legal_hold") return true;
   return holds.some(
     (h) =>
       !h.releasedAt &&
       h.active !== false &&
-      (h.evidenceAssetId === asset.id ||
-        h.assetId === asset.id ||
-        (h.objectKey && h.objectKey === asset.objectKey)),
+      (h.evidenceAssetId === asset.id || h.assetId === asset.id),
   );
 }
 
@@ -255,22 +298,40 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   // 2. Support threads
   const [threads, setThreads] = useState<SupportThread[]>([]);
+  const [threadsTotalCount, setThreadsTotalCount] = useState<number | null>(null);
+  const [threadsNextCursor, setThreadsNextCursor] = useState<string | null>(null);
+  const [threadsHasMore, setThreadsHasMore] = useState(false);
   const [loadingThreads, setLoadingThreads] = useState(false);
+  const [loadingMoreThreads, setLoadingMoreThreads] = useState(false);
+  const [threadsLoadError, setThreadsLoadError] = useState<string | null>(null);
+  const [threadsSearch, setThreadsSearch] = useState("");
+  const [appliedThreadsSearch, setAppliedThreadsSearch] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null);
   const [loadingThreadDetail, setLoadingThreadDetail] = useState(false);
-  const [replyText, setReplyText] = useState("");
+  const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false);
+  // Isolate drafts per threadId so switching threads never leaks replyText or closeReason.
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [closeReasonDrafts, setCloseReasonDrafts] = useState<Record<string, string>>({});
   const [sendingReply, setSendingReply] = useState(false);
   const [closingThread, setClosingThread] = useState(false);
-  const [closeReason, setCloseReason] = useState("");
 
   // 3. Claims & legal hold evidence
   const [claims, setClaims] = useState<ClaimSummary[]>([]);
+  const [claimsTotalCount, setClaimsTotalCount] = useState<number | null>(null);
+  const [claimsNextCursor, setClaimsNextCursor] = useState<string | null>(null);
+  const [claimsHasMore, setClaimsHasMore] = useState(false);
   const [loadingClaims, setLoadingClaims] = useState(false);
+  const [loadingMoreClaims, setLoadingMoreClaims] = useState(false);
+  const [claimsLoadError, setClaimsLoadError] = useState<string | null>(null);
+  const [claimsSearch, setClaimsSearch] = useState("");
+  const [appliedClaimsSearch, setAppliedClaimsSearch] = useState("");
   const [selectedClaimId, setSelectedClaimId] = useState<string | null>(null);
   const [claimDetail, setClaimDetail] = useState<ClaimDetail | null>(null);
   const [orderEvidence, setOrderEvidence] = useState<EvidenceAsset[]>([]);
   const [loadingClaimDetail, setLoadingClaimDetail] = useState(false);
+  const [openingEvidenceId, setOpeningEvidenceId] = useState<string | null>(null);
+  const [evidencePreview, setEvidencePreview] = useState<EvidencePreview | null>(null);
 
   const [compModalOpen, setCompModalOpen] = useState(false);
   const [compRub, setCompRub] = useState("");
@@ -295,17 +356,118 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const threadReqRef = useRef(0);
   const claimReqRef = useRef(0);
 
-  const loadThreads = useCallback(async () => {
+  const activeThreadId = threadDetail && threadDetail.thread.id === selectedThreadId ? selectedThreadId : null;
+  const replyText = activeThreadId ? (replyDrafts[activeThreadId] ?? "") : "";
+  const closeReason = activeThreadId ? (closeReasonDrafts[activeThreadId] ?? "") : "";
+
+  const setActiveReplyText = (value: string) => {
+    if (!activeThreadId) return;
+    setReplyDrafts((prev) => ({ ...prev, [activeThreadId]: value }));
+  };
+
+  const setActiveCloseReason = (value: string) => {
+    if (!activeThreadId) return;
+    setCloseReasonDrafts((prev) => ({ ...prev, [activeThreadId]: value }));
+  };
+
+  const closeEvidencePreview = useCallback(() => {
+    setEvidencePreview((prev) => {
+      if (prev?.blobUrl) URL.revokeObjectURL(prev.blobUrl);
+      return null;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (evidencePreview?.blobUrl) {
+        URL.revokeObjectURL(evidencePreview.blobUrl);
+      }
+    };
+  }, [evidencePreview]);
+
+  const handleOpenEvidence = useCallback(
+    async (assetId: string, label?: string) => {
+      setOpeningEvidenceId(assetId);
+      try {
+        const response = await fetch(`/api/v1/evidence/${encodeURIComponent(assetId)}/content`, {
+          method: "GET",
+          credentials: "include",
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new ApiError(
+            payload?.error?.code ?? payload?.error?.message ?? "REQUEST_FAILED",
+            response.status,
+            payload?.error?.details,
+          );
+        }
+        const blob = await response.blob();
+        const mimeType = response.headers.get("Content-Type") || blob.type || "application/octet-stream";
+        const blobUrl = URL.createObjectURL(blob);
+        setEvidencePreview((prev) => {
+          if (prev?.blobUrl) URL.revokeObjectURL(prev.blobUrl);
+          return {
+            assetId,
+            label: label || `Файл #${assetId.slice(0, 8)}`,
+            mimeType,
+            blobUrl,
+          };
+        });
+      } catch (err) {
+        notify({ kind: "error", text: formatError(err) });
+      } finally {
+        setOpeningEvidenceId(null);
+      }
+    },
+    [notify],
+  );
+
+  const loadThreads = useCallback(async (queryOverride?: string) => {
+    const queryText = queryOverride !== undefined ? queryOverride : appliedThreadsSearch;
     setLoadingThreads(true);
     try {
-      const res = await api<unknown>("/support/threads");
-      setThreads(unwrapList<SupportThread>(res, ["threads", "items", "data"]));
+      const page = await fetchPaginatedList<SupportThread>(
+        "/support/threads",
+        ["threads", "items", "data"],
+        { query: queryText },
+      );
+      setThreads(page.items);
+      setThreadsTotalCount(page.totalCount);
+      setThreadsNextCursor(page.nextCursor);
+      setThreadsHasMore(page.hasMore);
+      setThreadsLoadError(null);
     } catch (err) {
-      notify({ kind: "error", text: formatError(err) });
+      const msg = formatError(err);
+      setThreadsLoadError(msg);
+      notify({ kind: "error", text: msg });
     } finally {
       setLoadingThreads(false);
     }
-  }, [notify]);
+  }, [appliedThreadsSearch, notify]);
+
+  const loadMoreThreads = useCallback(async () => {
+    if (!threadsNextCursor) return;
+    setLoadingMoreThreads(true);
+    try {
+      const page = await fetchPaginatedList<SupportThread>(
+        "/support/threads",
+        ["threads", "items", "data"],
+        { cursor: threadsNextCursor, query: appliedThreadsSearch },
+      );
+      setThreads((prev) => {
+        const seen = new Set(prev.map((item) => item.id));
+        return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
+      });
+      setThreadsTotalCount(page.totalCount);
+      setThreadsNextCursor(page.nextCursor);
+      setThreadsHasMore(page.hasMore);
+      setThreadsLoadError(null);
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setLoadingMoreThreads(false);
+    }
+  }, [threadsNextCursor, appliedThreadsSearch, notify]);
 
   const loadThreadDetail = useCallback(
     async (threadId: string) => {
@@ -318,7 +480,13 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         if (threadReqRef.current !== reqId) return;
         const thread = (res.thread as SupportThread | undefined) ?? (res as unknown as SupportThread);
         const messages = unwrapList<SupportMessage>(res.messages ?? res, ["messages", "items"]);
-        setThreadDetail({ thread, messages });
+        setThreadDetail({
+          thread,
+          messages,
+          hasEarlier: Boolean(res.hasEarlier),
+          earlierCursor: typeof res.earlierCursor === "string" ? res.earlierCursor : null,
+          totalMessages: typeof res.totalMessages === "number" ? res.totalMessages : messages.length,
+        });
       } catch (err) {
         if (threadReqRef.current !== reqId) return;
         notify({ kind: "error", text: formatError(err) });
@@ -331,17 +499,83 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     [notify],
   );
 
-  const loadClaims = useCallback(async () => {
+  const loadEarlierThreadMessages = useCallback(async () => {
+    if (!threadDetail?.earlierCursor || !selectedThreadId || threadDetail.thread.id !== selectedThreadId) return;
+    const targetId = threadDetail.thread.id;
+    const reqId = threadReqRef.current;
+    setLoadingEarlierMessages(true);
+    try {
+      const res = await api<Record<string, unknown>>(
+        `/support/threads/${targetId}?beforeCursor=${encodeURIComponent(threadDetail.earlierCursor)}`,
+      );
+      if (threadReqRef.current !== reqId) return;
+      const earlier = unwrapList<SupportMessage>(res.messages ?? res, ["messages", "items"]);
+      setThreadDetail((prev) => {
+        if (!prev || prev.thread.id !== targetId) return prev;
+        const existingIds = new Set(prev.messages.map((m) => m.id));
+        const prepended = earlier.filter((m) => !existingIds.has(m.id));
+        return {
+          ...prev,
+          messages: [...prepended, ...prev.messages],
+          hasEarlier: Boolean(res.hasEarlier),
+          earlierCursor: typeof res.earlierCursor === "string" ? res.earlierCursor : null,
+          totalMessages: typeof res.totalMessages === "number" ? res.totalMessages : prev.totalMessages,
+        };
+      });
+    } catch (err) {
+      if (threadReqRef.current !== reqId) return;
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setLoadingEarlierMessages(false);
+    }
+  }, [threadDetail, selectedThreadId, notify]);
+
+  const loadClaims = useCallback(async (queryOverride?: string) => {
+    const queryText = queryOverride !== undefined ? queryOverride : appliedClaimsSearch;
     setLoadingClaims(true);
     try {
-      const res = await api<unknown>("/claims");
-      setClaims(unwrapList<ClaimSummary>(res, ["claims", "items", "data"]));
+      const page = await fetchPaginatedList<ClaimSummary>(
+        "/claims",
+        ["claims", "items", "data"],
+        { query: queryText },
+      );
+      setClaims(page.items);
+      setClaimsTotalCount(page.totalCount);
+      setClaimsNextCursor(page.nextCursor);
+      setClaimsHasMore(page.hasMore);
+      setClaimsLoadError(null);
     } catch (err) {
-      notify({ kind: "error", text: formatError(err) });
+      const msg = formatError(err);
+      setClaimsLoadError(msg);
+      notify({ kind: "error", text: msg });
     } finally {
       setLoadingClaims(false);
     }
-  }, [notify]);
+  }, [appliedClaimsSearch, notify]);
+
+  const loadMoreClaims = useCallback(async () => {
+    if (!claimsNextCursor) return;
+    setLoadingMoreClaims(true);
+    try {
+      const page = await fetchPaginatedList<ClaimSummary>(
+        "/claims",
+        ["claims", "items", "data"],
+        { cursor: claimsNextCursor, query: appliedClaimsSearch },
+      );
+      setClaims((prev) => {
+        const seen = new Set(prev.map((item) => item.id));
+        return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
+      });
+      setClaimsTotalCount(page.totalCount);
+      setClaimsNextCursor(page.nextCursor);
+      setClaimsHasMore(page.hasMore);
+      setClaimsLoadError(null);
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setLoadingMoreClaims(false);
+    }
+  }, [claimsNextCursor, appliedClaimsSearch, notify]);
 
   const loadClaimAndEvidence = useCallback(
     async (claimId: string, knownOrderId?: string) => {
@@ -488,7 +722,11 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         method: "POST",
         body: { body: trimmed },
       });
-      setReplyText("");
+      setReplyDrafts((prev) => {
+        const next = { ...prev };
+        delete next[targetThreadId];
+        return next;
+      });
       notify({ kind: "ok", text: "Сообщение отправлено клиенту" });
       await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
     } catch (err) {
@@ -515,7 +753,11 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         body: { reason },
       });
       notify({ kind: "ok", text: "Обращение закрыто" });
-      setCloseReason("");
+      setCloseReasonDrafts((prev) => {
+        const next = { ...prev };
+        delete next[targetThreadId];
+        return next;
+      });
       await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -672,13 +914,13 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       <StatGrid>
         <StatTile
           label="Обращения"
-          value={threads.length}
+          value={threadsTotalCount ?? threads.length}
           icon={<MessageSquare size={16} aria-hidden="true" />}
           tone="accent"
         />
         <StatTile
           label="Претензии"
-          value={claims.length}
+          value={claimsTotalCount ?? claims.length}
           icon={<ShieldAlert size={16} aria-hidden="true" />}
         />
         <StatTile
@@ -795,6 +1037,11 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   <span>Обращения клиентов</span>
                 </span>
               }
+              subtitle={
+                threadsTotalCount !== null
+                  ? `Показано ${threads.length} из ${threadsTotalCount}`
+                  : undefined
+              }
               actions={
                 <Button
                   variant="ghost"
@@ -807,46 +1054,108 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
               }
             />
             <CardBody>
-              {threads.length === 0 ? (
-                <EmptyState
-                  icon={<MessageSquare size={20} aria-hidden="true" />}
-                  title="Обращений пока нет."
+              <form
+                className="row row--tight"
+                style={{ marginBlockEnd: 12 }}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const next = threadsSearch.trim();
+                  setAppliedThreadsSearch(next);
+                  void loadThreads(next);
+                }}
+              >
+                <Input
+                  aria-label="Поиск обращений по теме или номеру заказа"
+                  type="text"
+                  value={threadsSearch}
+                  onChange={(e) => setThreadsSearch(e.target.value)}
+                  placeholder="Поиск по теме или номеру заказа…"
                 />
-              ) : (
-                <div className="data-list">
-                  {threads.map((t) => {
-                    const isSelected = t.id === selectedThreadId;
-                    const orderRef = t.orderPublicNumber ?? t.publicNumber;
-                    const threadState = t.state ?? t.status ?? "open";
-                    return (
-                      <button
-                        key={t.id}
-                        type="button"
-                        className={isSelected ? "data-row selected" : "data-row"}
-                        onClick={() => void loadThreadDetail(t.id)}
-                      >
-                        <span className="data-row__main">
-                          <span className="row row--tight">
-                            <span>
-                              {t.subject ||
-                                (orderRef ? `Заказ ${orderRef}` : `Тикет #${t.id.slice(0, 8)}`)}
-                            </span>
-                          </span>
-                          <span className="muted row row--tight">
-                            <span>
-                              {orderRef ? `Заказ ${orderRef} · ` : ""}
-                              {t.channel ? `${stateLabel(CHANNEL_LABELS, t.channel)} · ` : ""}
-                              {dt(t.createdAt)}
-                            </span>
-                          </span>
-                        </span>
-                        <Badge tone={threadStatusTone(threadState)}>
-                          {stateLabel(THREAD_STATUS_LABELS, threadState)}
-                        </Badge>
-                      </button>
-                    );
-                  })}
+                <Button type="submit" variant="secondary" size="sm" disabled={loadingThreads}>
+                  Найти
+                </Button>
+                {appliedThreadsSearch && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={loadingThreads}
+                    onClick={() => {
+                      setThreadsSearch("");
+                      setAppliedThreadsSearch("");
+                      void loadThreads("");
+                    }}
+                  >
+                    Сбросить
+                  </Button>
+                )}
+              </form>
+
+              {threadsLoadError && (
+                <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+                  <AlertTriangle size={16} aria-hidden="true" />
+                  <span>Не удалось загрузить обращения: {threadsLoadError}</span>
                 </div>
+              )}
+
+              {threads.length === 0 ? (
+                loadingThreads ? (
+                  <p className="muted">Загрузка обращений...</p>
+                ) : threadsLoadError ? null : (
+                  <EmptyState
+                    icon={<MessageSquare size={20} aria-hidden="true" />}
+                    title="Обращений пока нет."
+                  />
+                )
+              ) : (
+                <>
+                  <div className="data-list">
+                    {threads.map((t) => {
+                      const isSelected = t.id === selectedThreadId;
+                      const orderRef = t.orderPublicNumber ?? t.publicNumber;
+                      const threadState = t.state ?? t.status ?? "open";
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          className={isSelected ? "data-row selected" : "data-row"}
+                          onClick={() => void loadThreadDetail(t.id)}
+                        >
+                          <span className="data-row__main">
+                            <span className="row row--tight">
+                              <span>
+                                {t.subject ||
+                                  (orderRef ? `Заказ ${orderRef}` : `Тикет #${t.id.slice(0, 8)}`)}
+                              </span>
+                            </span>
+                            <span className="muted row row--tight">
+                              <span>
+                                {orderRef ? `Заказ ${orderRef} · ` : ""}
+                                {t.channel ? `${stateLabel(CHANNEL_LABELS, t.channel)} · ` : ""}
+                                {dt(t.createdAt)}
+                              </span>
+                            </span>
+                          </span>
+                          <Badge tone={threadStatusTone(threadState)}>
+                            {stateLabel(THREAD_STATUS_LABELS, threadState)}
+                          </Badge>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {threadsHasMore && (
+                    <div className="button-row" style={{ marginBlockStart: 12 }}>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={loadingThreads || loadingMoreThreads}
+                        onClick={() => void loadMoreThreads()}
+                      >
+                        {loadingMoreThreads ? "Загрузка…" : "Загрузить ещё"}
+                      </Button>
+                    </div>
+                  )}
+                </>
               )}
             </CardBody>
           </Card>
@@ -882,7 +1191,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                       aria-label="Причина закрытия обращения"
                       placeholder="Причина закрытия"
                       value={closeReason}
-                      onChange={(event) => setCloseReason(event.target.value)}
+                      onChange={(event) => setActiveCloseReason(event.target.value)}
                     />
                     <Button
                       variant="ghost"
@@ -891,6 +1200,21 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                       leadingIcon={<CheckCircle2 size={16} aria-hidden="true" />}
                     >
                       {closingThread ? "Закрытие..." : "Закрыть обращение"}
+                    </Button>
+                  </div>
+                )}
+
+                {threadDetail.hasEarlier && threadDetail.earlierCursor && (
+                  <div className="button-row">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={loadingEarlierMessages}
+                      onClick={() => void loadEarlierThreadMessages()}
+                    >
+                      {loadingEarlierMessages
+                        ? "Загрузка более ранних…"
+                        : `Загрузить более ранние сообщения (показано ${threadDetail.messages.length}${threadDetail.totalMessages ? ` из ${threadDetail.totalMessages}` : ""})`}
                     </Button>
                   </div>
                 )}
@@ -940,7 +1264,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                       label="Ответ клиенту"
                       rows={3}
                       value={replyText}
-                      onChange={(e) => setReplyText(e.target.value)}
+                      onChange={(e) => setActiveReplyText(e.target.value)}
                       placeholder="Введите сообщение для клиента..."
                     />
                     <div className="row row--end">
@@ -976,6 +1300,11 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   <span>Претензии</span>
                 </span>
               }
+              subtitle={
+                claimsTotalCount !== null
+                  ? `Показано ${claims.length} из ${claimsTotalCount}`
+                  : undefined
+              }
               actions={
                 <Button
                   variant="ghost"
@@ -988,42 +1317,104 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
               }
             />
             <CardBody>
-              {claims.length === 0 ? (
-                <EmptyState
-                  icon={<ShieldAlert size={20} aria-hidden="true" />}
-                  title="Претензий нет."
+              <form
+                className="row row--tight"
+                style={{ marginBlockEnd: 12 }}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const next = claimsSearch.trim();
+                  setAppliedClaimsSearch(next);
+                  void loadClaims(next);
+                }}
+              >
+                <Input
+                  aria-label="Поиск претензий по описанию или номеру заказа"
+                  type="text"
+                  value={claimsSearch}
+                  onChange={(e) => setClaimsSearch(e.target.value)}
+                  placeholder="Поиск по описанию или номеру заказа…"
                 />
+                <Button type="submit" variant="secondary" size="sm" disabled={loadingClaims}>
+                  Найти
+                </Button>
+                {appliedClaimsSearch && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={loadingClaims}
+                    onClick={() => {
+                      setClaimsSearch("");
+                      setAppliedClaimsSearch("");
+                      void loadClaims("");
+                    }}
+                  >
+                    Сбросить
+                  </Button>
+                )}
+              </form>
+
+              {claimsLoadError && (
+                <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+                  <AlertTriangle size={16} aria-hidden="true" />
+                  <span>Не удалось загрузить претензии: {claimsLoadError}</span>
+                </div>
+              )}
+
+              {claims.length === 0 ? (
+                loadingClaims ? (
+                  <p className="muted">Загрузка претензий...</p>
+                ) : claimsLoadError ? null : (
+                  <EmptyState
+                    icon={<ShieldAlert size={20} aria-hidden="true" />}
+                    title="Претензий нет."
+                  />
+                )
               ) : (
-                <Stagger as="div" className="data-list">
-                  {claims.map((c) => {
-                    const status = getClaimStatus(c);
-                    const isSelected = c.id === selectedClaimId;
-                    const orderRef = c.orderPublicNumber ?? c.publicNumber ?? c.orderId;
-                    return (
-                      <Reveal as="div" key={c.id}>
-                        <button
-                          type="button"
-                          className={isSelected ? "data-row selected" : "data-row"}
-                          onClick={() => void loadClaimAndEvidence(c.id, c.orderId)}
-                        >
-                          <span className="data-row__main">
-                            <span className="row row--tight">
-                              <span>Заказ {orderRef}</span>
-                            </span>
-                            <span className="muted row row--tight">
-                              <span>
-                                {c.description ?? c.reason ?? c.summary ?? (c.claimType ? stateLabel(CLAIM_TYPE_LABELS, c.claimType) : "Претензия")} · {dt(c.openedAt ?? c.createdAt)}
+                <>
+                  <Stagger as="div" className="data-list">
+                    {claims.map((c) => {
+                      const status = getClaimStatus(c);
+                      const isSelected = c.id === selectedClaimId;
+                      const orderRef = c.orderPublicNumber ?? c.publicNumber ?? c.orderId;
+                      return (
+                        <Reveal as="div" key={c.id}>
+                          <button
+                            type="button"
+                            className={isSelected ? "data-row selected" : "data-row"}
+                            onClick={() => void loadClaimAndEvidence(c.id, c.orderId)}
+                          >
+                            <span className="data-row__main">
+                              <span className="row row--tight">
+                                <span>Заказ {orderRef}</span>
+                              </span>
+                              <span className="muted row row--tight">
+                                <span>
+                                  {c.description ?? c.reason ?? c.summary ?? (c.claimType ? stateLabel(CLAIM_TYPE_LABELS, c.claimType) : "Претензия")} · {dt(c.openedAt ?? c.createdAt)}
+                                </span>
                               </span>
                             </span>
-                          </span>
-                          <Badge tone={claimStateTone(status)}>
-                            {stateLabel(CLAIM_STATE_LABELS, status)}
-                          </Badge>
-                        </button>
-                      </Reveal>
-                    );
-                  })}
-                </Stagger>
+                            <Badge tone={claimStateTone(status)}>
+                              {stateLabel(CLAIM_STATE_LABELS, status)}
+                            </Badge>
+                          </button>
+                        </Reveal>
+                      );
+                    })}
+                  </Stagger>
+                  {claimsHasMore && (
+                    <div className="button-row" style={{ marginBlockStart: 12 }}>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={loadingClaims || loadingMoreClaims}
+                        onClick={() => void loadMoreClaims()}
+                      >
+                        {loadingMoreClaims ? "Загрузка…" : "Загрузить ещё"}
+                      </Button>
+                    </div>
+                  )}
+                </>
               )}
             </CardBody>
           </Card>
@@ -1160,11 +1551,18 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                     <div className="data-list">
                       {orderEvidence.map((asset) => {
                         const held = isAssetOnLegalHold(asset, claimDetail.evidenceHolds);
+                        const servable =
+                          !asset.status ||
+                          asset.status === "verified" ||
+                          asset.status === "legal_hold" ||
+                          asset.status === "retained";
+                        const fileLabel = `Файл #${asset.id.slice(0, 8)}`;
                         return (
                           <div className="data-row" key={asset.id}>
                             <span className="data-row__main">
                               <span className="row row--tight">
-                                <code>{asset.objectKey || `Файл #${asset.id.slice(0, 8)}`}</code>
+                                <code>{fileLabel}</code>
+                                {asset.mimeType ? <span className="muted">{asset.mimeType}</span> : null}
                               </span>
                               <span className="muted row row--tight">
                                 <span>
@@ -1173,30 +1571,64 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                                 </span>
                               </span>
                             </span>
-                            {held && <Badge tone="warn">Юридическое удержание</Badge>}
+                            <span className="row row--tight">
+                              {held && <Badge tone="warn">Юридическое удержание</Badge>}
+                              {servable && (
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  size="sm"
+                                  disabled={openingEvidenceId === asset.id}
+                                  leadingIcon={<Eye size={14} aria-hidden="true" />}
+                                  onClick={() => void handleOpenEvidence(asset.id, fileLabel)}
+                                >
+                                  {openingEvidenceId === asset.id ? "Загрузка…" : "Открыть"}
+                                </Button>
+                              )}
+                            </span>
                           </div>
                         );
                       })}
                     </div>
                   ) : (
                     <div className="data-list">
-                      {claimDetail.evidenceHolds.map((hold, idx) => (
-                        <div className="data-row" key={hold.id ?? hold.assetId ?? idx}>
-                          <span className="data-row__main">
-                            <span className="row row--tight">
-                              <code>{hold.objectKey ?? hold.evidenceAssetId ?? hold.assetId ?? hold.id ?? `Удержание #${idx + 1}`}</code>
-                            </span>
-                            {hold.reason ? (
-                              <span className="muted row row--tight">
-                                <span>{hold.reason}</span>
+                      {claimDetail.evidenceHolds.map((hold, idx) => {
+                        const holdAssetId = hold.evidenceAssetId ?? hold.assetId;
+                        const holdLabel = holdAssetId
+                          ? `Файл #${holdAssetId.slice(0, 8)}`
+                          : `Удержание #${idx + 1}`;
+                        return (
+                          <div className="data-row" key={hold.id ?? hold.assetId ?? idx}>
+                            <span className="data-row__main">
+                              <span className="row row--tight">
+                                <code>{holdLabel}</code>
                               </span>
-                            ) : null}
-                          </span>
-                          {!hold.releasedAt && hold.active !== false && (
-                            <Badge tone="warn">Юридическое удержание</Badge>
-                          )}
-                        </div>
-                      ))}
+                              {hold.reason ? (
+                                <span className="muted row row--tight">
+                                  <span>{hold.reason}</span>
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="row row--tight">
+                              {!hold.releasedAt && hold.active !== false && (
+                                <Badge tone="warn">Юридическое удержание</Badge>
+                              )}
+                              {holdAssetId && (
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  size="sm"
+                                  disabled={openingEvidenceId === holdAssetId}
+                                  leadingIcon={<Eye size={14} aria-hidden="true" />}
+                                  onClick={() => void handleOpenEvidence(holdAssetId, holdLabel)}
+                                >
+                                  {openingEvidenceId === holdAssetId ? "Загрузка…" : "Открыть"}
+                                </Button>
+                              )}
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -1459,6 +1891,48 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
             </Button>
           </div>
         </form>
+      </ModalDialog>
+
+      {/* Modal: Просмотр защищённого доказательства */}
+      <ModalDialog
+        open={evidencePreview !== null}
+        title={evidencePreview ? `Просмотр доказательства · ${evidencePreview.label}` : "Просмотр доказательства"}
+        onClose={closeEvidencePreview}
+      >
+        {evidencePreview && (
+          <div className="stack">
+            {evidencePreview.mimeType.startsWith("image/") ? (
+              <img
+                src={evidencePreview.blobUrl}
+                alt={evidencePreview.label}
+                style={{ maxWidth: "100%", maxHeight: "65vh", objectFit: "contain", borderRadius: 8 }}
+              />
+            ) : evidencePreview.mimeType === "application/pdf" ? (
+              <iframe
+                src={evidencePreview.blobUrl}
+                title={evidencePreview.label}
+                style={{ width: "100%", height: "65vh", border: "1px solid var(--border-hairline)", borderRadius: 8 }}
+              />
+            ) : (
+              <p className="muted">
+                Предпросмотр для формата <code>{evidencePreview.mimeType}</code> недоступен — откройте файл в новой вкладке.
+              </p>
+            )}
+            <div className="row row--end row--tight">
+              <a
+                className="ghost btn--sm"
+                href={`/api/v1/evidence/${encodeURIComponent(evidencePreview.assetId)}/content`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Открыть в новой вкладке
+              </a>
+              <Button variant="primary" onClick={closeEvidencePreview}>
+                Закрыть
+              </Button>
+            </div>
+          </div>
+        )}
       </ModalDialog>
 
       {/* Modal: Скрыть отзыв с причиной */}
