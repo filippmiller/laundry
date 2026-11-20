@@ -2,10 +2,12 @@ import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   AlertCircle,
   Banknote,
+  Bell,
   Calendar,
   Check,
   Copy,
   CreditCard,
+  Download,
   FileText,
   Info,
   ListOrdered,
@@ -16,6 +18,7 @@ import {
   RefreshCw,
   Send,
   ShoppingBag,
+  ThumbsUp,
   Trash2,
   Wallet,
 } from "lucide-react";
@@ -42,6 +45,7 @@ import {
   formatError,
   GARMENT_STATUS_LABELS,
   INVOICE_STATE_LABELS,
+  NOTIFICATION_LABELS,
   ORDER_STATE_LABELS,
   orderStateTone,
   PAYMENT_STATE_LABELS,
@@ -217,6 +221,17 @@ type ReviewDto = {
   likedByMe: boolean;
 };
 
+type NotificationDto = {
+  id: string;
+  orderId: string | null;
+  channel: string;
+  template: string;
+  payloadJson: Record<string, unknown>;
+  readAt: string | null;
+  createdAt: string;
+  read: boolean;
+};
+
 const HOLD_TTL_MINUTES = 10;
 
 const TIER_OPTIONS = [
@@ -256,6 +271,31 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
   const tabsId = useId();
   const [activeTab, setActiveTab] = useState("new");
   const [repeat, setRepeat] = useState<RepeatDto | null>(null);
+  const [notifications, setNotifications] = useState<NotificationDto[] | null>(null);
+  const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
+
+  const loadNotifications = useCallback(async () => {
+    setNotificationsLoading(true);
+    try {
+      setNotifications(await api<NotificationDto[]>("/notifications"));
+      setNotificationsError(null);
+    } catch (err) {
+      setNotifications([]);
+      setNotificationsError(errorText(err));
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadNotifications();
+  }, [loadNotifications]);
+
+  const unreadCount = useMemo(
+    () => (notifications ?? []).filter((item) => !item.read).length,
+    [notifications],
+  );
 
   const handleRepeat = async (orderId: string) => {
     try {
@@ -273,6 +313,7 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
     { id: "my", label: "Мои заказы", icon: ListOrdered },
     { id: "spending", label: "Мои расходы", icon: Wallet },
     { id: "addresses", label: "Адресная книга", icon: MapPin },
+    { id: "notifications", label: "Уведомления", icon: Bell },
     { id: "support", label: "Отзывы и поддержка", icon: MessageSquare },
   ];
 
@@ -288,6 +329,9 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
               <span>{tab.label}</span>
             </>
           ),
+          badge: tab.id === "notifications" && unreadCount > 0
+            ? <Badge tone="accent">{unreadCount}</Badge>
+            : undefined,
         }))}
         value={activeTab}
         onChange={setActiveTab}
@@ -305,6 +349,15 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
       </TabPanel>
       <TabPanel idPrefix={tabsId} id="addresses" active={activeTab === "addresses"}>
         <AddressesTab demo={demo} notify={notify} />
+      </TabPanel>
+      <TabPanel idPrefix={tabsId} id="notifications" active={activeTab === "notifications"}>
+        <NotificationsTab
+          notifications={notifications}
+          loading={notificationsLoading}
+          loadError={notificationsError}
+          onReload={loadNotifications}
+          notify={notify}
+        />
       </TabPanel>
       <TabPanel idPrefix={tabsId} id="support" active={activeTab === "support"}>
         <SupportTab notify={notify} />
@@ -1846,6 +1899,7 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
   const [apartment, setApartment] = useState("");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const buildings = useMemo(() => demo?.buildings ?? [], [demo?.buildings]);
 
@@ -1899,6 +1953,42 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
     }
   };
 
+  const handleDelete = async (addressId: string) => {
+    setBusy(true);
+    notify(null);
+    try {
+      await api<{ addressId: string; removed: true }>(`/addresses/${addressId}`, { method: "DELETE" });
+      await loadAddresses();
+      notify({ kind: "ok", text: "Адрес удалён" });
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePrivacyExport = async () => {
+    setExporting(true);
+    notify(null);
+    try {
+      const payload = await api<unknown>("/me/privacy-export");
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "privacy-export.json";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      notify({ kind: "ok", text: "Выгрузка персональных данных сформирована" });
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="workspace-grid">
       <section className="panel">
@@ -1939,7 +2029,20 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
                   {address.apartment ? ` · кв. ${address.apartment}` : ""}
                   {address.notes ? <><br /><span className="muted">{address.notes}</span></> : null}
                 </span>
-                <span className="mono">{dt(address.createdAt)}</span>
+                <span className="row row--tight">
+                  <span className="mono">{dt(address.createdAt)}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    iconOnly
+                    disabled={busy}
+                    aria-label="Удалить адрес"
+                    title="Удалить адрес"
+                    onClick={() => void handleDelete(address.id)}
+                  >
+                    <Trash2 size={15} aria-hidden="true" />
+                  </Button>
+                </span>
               </div>
             ))}
           </div>
@@ -1990,6 +2093,156 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
           </button>
         </div>
       </section>
+
+      <section className="panel">
+        <h3 className="panel-title" style={{ marginBlockEnd: 8 }}>Мои персональные данные (152-ФЗ)</h3>
+        <p className="muted" style={{ marginBlockEnd: 12 }}>
+          Выгрузка ваших персональных данных (профиль, адреса, заказы, претензии, уведомления) в формате JSON.
+        </p>
+        <div className="button-row">
+          <Button
+            variant="secondary"
+            disabled={exporting}
+            leadingIcon={<Download size={16} aria-hidden="true" />}
+            onClick={() => void handlePrivacyExport()}
+          >
+            Скачать выгрузку (JSON)
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function NotificationsTab({
+  notifications,
+  loading,
+  loadError,
+  onReload,
+  notify,
+}: {
+  notifications: NotificationDto[] | null;
+  loading: boolean;
+  loadError: string | null;
+  onReload: () => Promise<void>;
+  notify: NotifyFn;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const unreadIds = useMemo(
+    () => (notifications ?? []).filter((item) => !item.read).map((item) => item.id),
+    [notifications],
+  );
+
+  const markRead = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    setBusy(true);
+    notify(null);
+    try {
+      await api<{ marked: number }>("/notifications/read", {
+        method: "POST",
+        body: { ids },
+      });
+      await onReload();
+      notify({
+        kind: "ok",
+        text: ids.length === 1 ? "Уведомление отмечено прочитанным" : "Все уведомления отмечены прочитанными",
+      });
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="workspace-grid">
+      <section className="panel">
+        <CardHeader
+          title="Уведомления"
+          actions={
+            <div className="row row--tight">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy || unreadIds.length === 0}
+                leadingIcon={<Check size={16} aria-hidden="true" />}
+                onClick={() => void markRead(unreadIds)}
+              >
+                Отметить все прочитанными
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={loading || busy}
+                leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+                onClick={() => void onReload()}
+              >
+                Обновить
+              </Button>
+            </div>
+          }
+        />
+
+        {loadError && (
+          <div className="notice error">
+            <span>Не удалось загрузить уведомления: {loadError}</span>
+          </div>
+        )}
+        {loading && !notifications && <p className="muted">Загрузка уведомлений…</p>}
+        {!loading && notifications && notifications.length === 0 && (
+          <EmptyState
+            icon={<Bell size={20} aria-hidden="true" />}
+            title="Уведомлений пока нет"
+            text="Здесь появятся сообщения о статусах заказов, оплате и решениях по обращениям."
+          />
+        )}
+        {notifications && notifications.length > 0 && (
+          <div className="data-list">
+            {notifications.map((item) => {
+              const payload = item.payloadJson ?? {};
+              const title =
+                typeof payload.title === "string" && payload.title.trim()
+                  ? payload.title
+                  : (NOTIFICATION_LABELS[item.template] ?? item.template);
+              const body =
+                typeof payload.body === "string" && payload.body.trim()
+                  ? payload.body
+                  : typeof payload.message === "string" && payload.message.trim()
+                    ? payload.message
+                    : null;
+              return (
+                <div className="data-row" key={item.id}>
+                  <span className="data-row__main">
+                    <span className="row row--tight">
+                      <strong>{title}</strong>
+                      <Badge tone={item.read ? "neutral" : "accent"}>
+                        {item.read ? "Прочитано" : "Новое"}
+                      </Badge>
+                      <span className="muted">{item.channel}</span>
+                    </span>
+                    {body && <span>{body}</span>}
+                  </span>
+                  <span className="row row--tight">
+                    <span className="mono">{dt(item.createdAt)}</span>
+                    {!item.read && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={busy}
+                        leadingIcon={<Check size={14} aria-hidden="true" />}
+                        onClick={() => void markRead([item.id])}
+                      >
+                        Прочитано
+                      </Button>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -2024,11 +2277,36 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
     }
   }, []);
 
+  const loadReviews = useCallback(async () => {
+    try {
+      setReviews(await api<ReviewDto[]>("/reviews"));
+    } catch {
+      setReviews([]);
+    }
+  }, []);
+
   useEffect(() => {
     void loadThreads();
     api<OrderListItemDto[]>("/orders").then(setOrders).catch(() => setOrders([]));
-    api<ReviewDto[]>("/reviews").then(setReviews).catch(() => setReviews([]));
-  }, [loadThreads]);
+    void loadReviews();
+  }, [loadThreads, loadReviews]);
+
+  const handleToggleLike = async (review: ReviewDto) => {
+    setBusy(`like-${review.id}`);
+    notify(null);
+    try {
+      if (review.likedByMe) {
+        await api(`/reviews/${review.id}/like`, { method: "DELETE" });
+      } else {
+        await api(`/reviews/${review.id}/like`, { method: "POST", body: {} });
+      }
+      await loadReviews();
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const loadThread = useCallback(async (threadId: string) => {
     try {
@@ -2248,7 +2526,20 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
                   <strong>{review.rating}/5</strong>
                   {review.body ? <> · {review.body}</> : null}
                 </span>
-                <span className="mono">{dt(review.createdAt)}</span>
+                <span className="row row--tight">
+                  <Button
+                    variant={review.likedByMe ? "primary" : "ghost"}
+                    size="sm"
+                    disabled={isBusy}
+                    leadingIcon={<ThumbsUp size={14} aria-hidden="true" />}
+                    aria-pressed={review.likedByMe}
+                    aria-label={review.likedByMe ? "Убрать лайк" : "Поставить лайк"}
+                    onClick={() => void handleToggleLike(review)}
+                  >
+                    {review.likeCount}
+                  </Button>
+                  <span className="mono">{dt(review.createdAt)}</span>
+                </span>
               </div>
             ))}
           </div>
