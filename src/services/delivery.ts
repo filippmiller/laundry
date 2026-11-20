@@ -4,11 +4,14 @@ import {
   buildings, claims, courierShifts, custodyDiscrepancies, custodyEvents, customerAddresses,
   deliveryAttempts, garments, notifications, orders, partners, routes, routeStops, users, vehicles,
 } from "../db/schema.js";
-import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 import { nextState, type OrderState } from "../domain/order-state.js";
+import {
+  activeCourierStopsFilter, assertCourierStopEntitlement, lockCourierShiftForShare,
+} from "./courier-entitlement.js";
 
 export async function assignPickup(
   db: Db,
@@ -20,14 +23,13 @@ export async function assignPickup(
     organizationId: principal.organizationId, scope: "pickup:assign", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
+    // Lock order: courier_shifts (FOR SHARE) before route_stops / orders.
+    const shift = await lockCourierShiftForShare(tx, principal.organizationId, input.shiftId);
+    if (!shift || shift.state !== "active") throw errors.notFound("shift");
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
-    const [shift] = await tx.select().from(courierShifts).where(and(
-      eq(courierShifts.id, input.shiftId), eq(courierShifts.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!shift || shift.state !== "active") throw errors.notFound("shift");
     const isReassign = order.lifecycleState === "pickup_assigned";
     const to: OrderState = isReassign
       ? "pickup_assigned"
@@ -68,24 +70,6 @@ export async function assignPickup(
   });
 }
 
-type DbTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
-
-async function assertStopShiftActive(tx: DbTx, principal: Principal, routeId: string) {
-  if (hasRole(principal, ...ROLE_GROUPS.dispatcher)) return;
-  const [shiftRow] = await tx.select({ state: courierShifts.state })
-    .from(routes)
-    .innerJoin(courierShifts, eq(courierShifts.id, routes.shiftId))
-    .where(and(
-      eq(routes.id, routeId),
-      eq(routes.organizationId, principal.organizationId),
-      eq(courierShifts.organizationId, principal.organizationId),
-    ))
-    .limit(1);
-  if (!shiftRow || shiftRow.state !== "active") {
-    throw new AppError("FORBIDDEN", "SHIFT_NOT_ACTIVE");
-  }
-}
-
 export async function currentCourierStops(db: Db, principal: Principal) {
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   return db.select({
@@ -107,13 +91,7 @@ export async function currentCourierStops(db: Db, principal: Principal) {
     .innerJoin(orders, eq(orders.id, routeStops.orderId))
     .leftJoin(customerAddresses, eq(customerAddresses.id, orders.addressId))
     .leftJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
-    .where(and(
-      eq(routeStops.organizationId, principal.organizationId),
-      eq(routeStops.assignedCourierId, principal.userId),
-      eq(courierShifts.organizationId, principal.organizationId),
-      eq(courierShifts.state, "active"),
-      inArray(routeStops.state, ["pending", "en_route", "arrived"]),
-    ))
+    .where(activeCourierStopsFilter(principal))
     .orderBy(routeStops.sequence)
     .limit(50);
 }
@@ -124,14 +102,7 @@ export async function startStop(db: Db, principal: Principal, input: { stopId: s
     organizationId: principal.organizationId, scope: "delivery:start", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    const [stop] = await tx.select().from(routeStops).where(and(
-      eq(routeStops.id, input.stopId), eq(routeStops.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!stop) throw errors.notFound("stop");
-    if (stop.assignedCourierId !== principal.userId && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
-      throw errors.forbidden("courier is not assigned to this stop");
-    }
-    await assertStopShiftActive(tx, principal, stop.routeId);
+    const { stop } = await assertCourierStopEntitlement(tx, principal, input.stopId);
     if (stop.state !== "pending") throw errors.transition(stop.state, "start");
     const [updated] = await tx.update(routeStops).set({ state: "en_route", version: stop.version + 1 })
       .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)))
@@ -155,6 +126,9 @@ export async function assignDelivery(
     organizationId: principal.organizationId, scope: "delivery:assign", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
+    // Lock order: courier_shifts (FOR SHARE) before route_stops / orders.
+    const shift = await lockCourierShiftForShare(tx, principal.organizationId, input.shiftId);
+    if (!shift || shift.state !== "active") throw errors.notFound("shift");
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
@@ -163,10 +137,6 @@ export async function assignDelivery(
     if (!isReassign && order.lifecycleState !== "ready") {
       throw errors.transition(order.lifecycleState, "dispatch");
     }
-    const [shift] = await tx.select().from(courierShifts).where(and(
-      eq(courierShifts.id, input.shiftId), eq(courierShifts.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!shift || shift.state !== "active") throw errors.notFound("shift");
 
     // Supersede any active delivery stop so a reassigned courier immediately loses access.
     await tx.update(routeStops).set({ state: "rescheduled", version: sql`${routeStops.version} + 1` }).where(and(
@@ -214,14 +184,7 @@ export async function arriveStop(db: Db, principal: Principal, input: { stopId: 
     organizationId: principal.organizationId, scope: "delivery:arrive", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
-    const [stop] = await tx.select().from(routeStops).where(and(
-      eq(routeStops.id, input.stopId), eq(routeStops.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!stop) throw errors.notFound("stop");
-    if (stop.assignedCourierId !== principal.userId && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
-      throw errors.forbidden("courier is not assigned to this stop");
-    }
-    await assertStopShiftActive(tx, principal, stop.routeId);
+    const { stop } = await assertCourierStopEntitlement(tx, principal, input.stopId);
     if (stop.state !== "pending" && stop.state !== "en_route") throw errors.transition(stop.state, "arrive");
     const [updated] = await tx.update(routeStops).set({ state: "arrived", version: stop.version + 1 })
       .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)))
@@ -250,14 +213,7 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
     organizationId: principal.organizationId, scope: "delivery:attempt", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    const [stop] = await tx.select().from(routeStops).where(and(
-      eq(routeStops.id, input.stopId), eq(routeStops.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!stop) throw errors.notFound("stop");
-    if (stop.assignedCourierId !== principal.userId && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
-      throw errors.forbidden("courier is not assigned to this stop");
-    }
-    await assertStopShiftActive(tx, principal, stop.routeId);
+    const { stop } = await assertCourierStopEntitlement(tx, principal, input.stopId);
     if (stop.state !== "arrived") throw errors.transition(stop.state, "attempt");
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, stop.orderId), eq(orders.organizationId, principal.organizationId),

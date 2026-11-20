@@ -50,6 +50,7 @@ import {
   QueuedScan,
   enqueueScan,
   localDeviceId,
+  migrateLegacyQueueForActor,
   queuedCount,
   queuedScans,
   removeScans,
@@ -458,9 +459,12 @@ export function CourierWorkspace({
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
 }) {
   const [actorScope, setActorScope] = useState<string | null>(null);
+  const [deviceNonce, setDeviceNonce] = useState(0);
+  const [unverifiedLegacyCount, setUnverifiedLegacyCount] = useState(0);
+  const [recoveringLegacy, setRecoveringLegacy] = useState(false);
   const deviceId = useMemo(
     () => (actorScope ? localDeviceId(actorScope) : ""),
-    [actorScope],
+    [actorScope, deviceNonce],
   );
 
   // Network & simulated offline mode
@@ -593,6 +597,69 @@ export function CourierWorkspace({
   useEffect(() => {
     void refreshQueue();
   }, [refreshQueue]);
+
+  // Owner-verified legacy IndexedDB ('laundry-courier') & legacy device key migration.
+  // Never auto-claims unknown legacy records: only devices positively verified via the read-only
+  // GET /courier/devices/:id endpoint are migrated automatically; unverified rows stay untouched
+  // until the rightful owner signs in or explicitly confirms recovery.
+  useEffect(() => {
+    if (!actorScope) {
+      setUnverifiedLegacyCount(0);
+      return;
+    }
+    let cancelled = false;
+    const verifyDeviceOwner = async (candidateDeviceId: string): Promise<boolean> => {
+      if (!isOnline) return false;
+      try {
+        const res = await api<{ owned?: boolean }>(`/courier/devices/${encodeURIComponent(candidateDeviceId)}`);
+        return res?.owned === true;
+      } catch {
+        return false;
+      }
+    };
+    void migrateLegacyQueueForActor(actorScope, { verifyDeviceOwner })
+      .then(result => {
+        if (cancelled) return;
+        setUnverifiedLegacyCount(result.unverifiedCount);
+        if (result.adoptedDeviceId) {
+          setDeviceNonce(n => n + 1);
+        }
+        if (result.migratedCount > 0) {
+          void refreshQueue();
+          notify({
+            kind: "ok",
+            text: `Перенесено ${result.migratedCount} записей из прежней офлайн-очереди устройства.`,
+          });
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [actorScope, isOnline, notify, refreshQueue]);
+
+  const handleRecoverLegacyQueue = useCallback(async () => {
+    if (!actorScope || recoveringLegacy) return;
+    setRecoveringLegacy(true);
+    try {
+      const result = await migrateLegacyQueueForActor(actorScope, {
+        verifyDeviceOwner: async () => false,
+        forceClaimUnverified: true,
+      });
+      setUnverifiedLegacyCount(result.unverifiedCount);
+      await refreshQueue();
+      if (result.migratedCount > 0) {
+        notify({
+          kind: "ok",
+          text: `Восстановлено ${result.migratedCount} устаревших сканов в вашу очередь.`,
+        });
+      }
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setRecoveringLegacy(false);
+    }
+  }, [actorScope, notify, recoveringLegacy, refreshQueue]);
 
   useEffect(() => {
     function handleOnline() {
@@ -1265,6 +1332,24 @@ export function CourierWorkspace({
                 {syncing ? "Синхронизация..." : `Синхронизировать очередь (${pendingQueueCount})`}
               </Button>
             </div>
+
+            {unverifiedLegacyCount > 0 && (
+              <div className="alert-banner" role="status">
+                <AlertTriangle size={16} aria-hidden="true" />
+                <span>
+                  Обнаружена прежняя офлайн-очередь ({unverifiedLegacyCount} записей) с неподтверждённым владельцем.
+                  Записи не удалены и не присвоены автоматически.
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={recoveringLegacy}
+                  onClick={() => void handleRecoverLegacyQueue()}
+                >
+                  {recoveringLegacy ? "Перенос..." : "Перенести в мою очередь"}
+                </Button>
+              </div>
+            )}
 
             {pendingScans.length > 0 && (
               <div className="stack stack--tight">

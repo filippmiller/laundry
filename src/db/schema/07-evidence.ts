@@ -17,9 +17,11 @@ export const scanEvents = pgTable("scan_events", {
   receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   payloadHash: text("payload_hash").notNull(),
   syncStatus: scanSyncState("sync_status").notNull().default("pending"),
+  shiftId: uuid("shift_id"),
 }, t => [
   uniqueIndex("scan_events_device_client_unique").on(t.deviceId, t.clientEventId),
   index("scan_events_actor_idx").on(t.organizationId, t.actorId, t.capturedAt),
+  index("scan_events_shift_idx").on(t.organizationId, t.shiftId),
 ]);
 
 export const custodyEvents = pgTable("custody_events", {

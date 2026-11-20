@@ -2,16 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import type { Db, Tx } from "../db/client.js";
 import {
   buildings, claims, compensations, courierShifts, custodyEvents, customerAddresses,
   evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
-  garmentEvidence, garments, notifications, orders, outboxEvents, reviews, routeStops, sessions, supportThreads, users,
+  garmentEvidence, garments, notifications, orders, outboxEvents, reviews, sessions, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
+import { hasActiveCourierOrderEntitlement } from "./courier-entitlement.js";
 
 const SUPPORT_ROLES = [...ROLE_GROUPS.support, ...ROLE_GROUPS.admin] as const;
 const STAFF = ["dispatcher", "platform_finance", "claims_approver", "customer_support", "platform_admin"] as const;
@@ -185,38 +186,42 @@ function entitledToOrder(principal: Principal, order: EvidenceOrderScope | undef
  * Resolves the ownership rule of an evidence owner for every owner type. Deny by default: an owner
  * type without a resolved rule, an object outside the principal's tenant, and a principal without a
  * matching entitlement are all refused.
+ *
+ * Courier access delegates to the canonical `hasActiveCourierOrderEntitlement` rule (checking
+ * tenant, `assignedCourierId`, `route.shiftId`, `shift.courierId`, and `shift.state === 'active'`),
+ * acquiring `FOR SHARE` on `courier_shifts` when `lockShift` is enabled so concurrent shift close
+ * cannot race evidence register/upload/list/read/content/delete.
  */
-async function isAssignedCourierForOrder(db: Db, principal: Principal, orderId: string): Promise<boolean> {
-  if (!hasRole(principal, "courier")) return false;
-  const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
-    eq(routeStops.organizationId, principal.organizationId),
-    eq(routeStops.orderId, orderId),
-    eq(routeStops.assignedCourierId, principal.userId),
-    inArray(routeStops.state, ["pending", "en_route", "arrived"]),
-  )).limit(1);
-  return Boolean(stop);
+async function isAssignedCourierForOrder(
+  dbOrTx: Db | Tx,
+  principal: Principal,
+  orderId: string,
+  options: { lockShift?: boolean } = {},
+): Promise<boolean> {
+  return hasActiveCourierOrderEntitlement(dbOrTx, principal, orderId, options);
 }
 
 async function resolveEvidenceOwnership(
-  db: Db,
+  dbOrTx: Db | Tx,
   principal: Principal,
   ownerType: string,
   ownerId: string,
+  options: { lockShift?: boolean } = {},
 ): Promise<boolean> {
   if (ownerType === "order") {
-    const order = await loadScopedOrder(db, principal, ownerId);
+    const order = await loadScopedOrder(dbOrTx as Db, principal, ownerId);
     if (entitledToOrder(principal, order)) return true;
-    if (order && await isAssignedCourierForOrder(db, principal, ownerId)) return true;
+    if (order && await isAssignedCourierForOrder(dbOrTx, principal, ownerId, options)) return true;
     return false;
   }
   if (ownerType === "claim") {
-    const [claim] = await db.select({ openedBy: claims.openedBy, orderId: claims.orderId }).from(claims).where(and(
+    const [claim] = await dbOrTx.select({ openedBy: claims.openedBy, orderId: claims.orderId }).from(claims).where(and(
       eq(claims.id, ownerId),
       eq(claims.organizationId, principal.organizationId),
     )).limit(1);
     if (!claim) return false;
     if (isEvidenceStaff(principal)) return true;
-    const order = await loadScopedOrder(db, principal, claim.orderId);
+    const order = await loadScopedOrder(dbOrTx as Db, principal, claim.orderId);
     // A customer sees the evidence of a claim they opened, or of a claim on their own order.
     if (hasRole(principal, "customer")
       && (claim.openedBy === principal.userId || order?.customerId === principal.userId)) {
@@ -225,13 +230,13 @@ async function resolveEvidenceOwnership(
     return entitledToOrder(principal, order);
   }
   if (ownerType === "custody_event") {
-    const [event] = await db.select({ orderId: custodyEvents.orderId }).from(custodyEvents).where(and(
+    const [event] = await dbOrTx.select({ orderId: custodyEvents.orderId }).from(custodyEvents).where(and(
       eq(custodyEvents.id, ownerId),
       eq(custodyEvents.organizationId, principal.organizationId),
     )).limit(1);
     if (!event) return false;
     if (isEvidenceStaff(principal)) return true;
-    return entitledToOrder(principal, await loadScopedOrder(db, principal, event.orderId));
+    return entitledToOrder(principal, await loadScopedOrder(dbOrTx as Db, principal, event.orderId));
   }
   return false;
 }
@@ -242,9 +247,10 @@ async function resolveEvidenceOwnership(
  * owner object, never the person who happened to upload the file.
  */
 async function authorizeEvidenceOwner(
-  db: Db,
+  dbOrTx: Db | Tx,
   principal: Principal,
   asset: { id: string; organizationId: string; ownerType: string; ownerId: string },
+  options: { lockShift?: boolean } = {},
 ) {
   authorize(principal, {
     resource: "evidence",
@@ -252,7 +258,7 @@ async function authorizeEvidenceOwner(
     organizationId: asset.organizationId,
     resourceId: asset.id,
   });
-  const entitled = await resolveEvidenceOwnership(db, principal, asset.ownerType, asset.ownerId);
+  const entitled = await resolveEvidenceOwnership(dbOrTx, principal, asset.ownerType, asset.ownerId, options);
   authorize(principal, {
     resource: "evidence",
     action: "read",
@@ -289,7 +295,8 @@ export async function registerEvidence(
     organizationId: principal.organizationId, scope: "evidence:register", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    if (!await resolveEvidenceOwnership(tx, principal, input.ownerType, input.ownerId)) {
+    // Lock order: courier_shifts (FOR SHARE) via resolveEvidenceOwnership BEFORE inserting evidence_assets.
+    if (!await resolveEvidenceOwnership(tx, principal, input.ownerType, input.ownerId, { lockShift: true })) {
       throw errors.notFound("evidence");
     }
     const [asset] = await tx.insert(evidenceAssets).values({
@@ -351,7 +358,8 @@ export async function uploadEvidence(
       eq(evidenceAssets.organizationId, principal.organizationId),
     )).limit(1);
     if (!asset) throw errors.notFound("evidence");
-    await authorizeEvidenceOwner(tx, principal, asset);
+    // Lock order: courier_shifts (FOR SHARE) BEFORE writing bytes or mutating evidence_assets.
+    await authorizeEvidenceOwner(tx, principal, asset, { lockShift: true });
     if (asset.deletedAt !== null || asset.status === "expired") {
       throw errors.notFound("evidence");
     }
@@ -401,33 +409,35 @@ export async function uploadEvidence(
 
 export async function listEvidence(db: Db, principal: Principal, ownerType: string, ownerId: string) {
   assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
-  if (!await resolveEvidenceOwnership(db, principal, ownerType, ownerId)) {
-    throw errors.notFound("evidence");
-  }
-  // The object storage key never leaves the service: the projection carries the digest and the
-  // metadata a client needs to fetch the file through an authorized endpoint, nothing more.
-  const rows = await db.select({
-    id: evidenceAssets.id,
-    sha256: evidenceAssets.sha256,
-    purpose: evidenceAssets.purpose,
-    mimeType: evidenceAssets.mimeType,
-    sizeBytes: evidenceAssets.sizeBytes,
-    status: evidenceAssets.status,
-    createdAt: evidenceAssets.capturedAt,
-  }).from(evidenceAssets).where(and(
-    eq(evidenceAssets.organizationId, principal.organizationId),
-    eq(evidenceAssets.ownerType, ownerType),
-    eq(evidenceAssets.ownerId, ownerId),
-    isNull(evidenceAssets.deletedAt),
-    ne(evidenceAssets.status, "expired"),
-  )).orderBy(desc(evidenceAssets.capturedAt));
-  // Reading evidence is itself auditable: every list access is logged.
-  if (rows.length) {
-    await db.insert(evidenceAccessEvents).values(
-      rows.map(row => ({ assetId: row.id, actorId: principal.userId, purpose: "owner_listing" })),
-    );
-  }
-  return rows;
+  return db.transaction(async tx => {
+    if (!await resolveEvidenceOwnership(tx, principal, ownerType, ownerId, { lockShift: true })) {
+      throw errors.notFound("evidence");
+    }
+    // The object storage key never leaves the service: the projection carries the digest and the
+    // metadata a client needs to fetch the file through an authorized endpoint, nothing more.
+    const rows = await tx.select({
+      id: evidenceAssets.id,
+      sha256: evidenceAssets.sha256,
+      purpose: evidenceAssets.purpose,
+      mimeType: evidenceAssets.mimeType,
+      sizeBytes: evidenceAssets.sizeBytes,
+      status: evidenceAssets.status,
+      createdAt: evidenceAssets.capturedAt,
+    }).from(evidenceAssets).where(and(
+      eq(evidenceAssets.organizationId, principal.organizationId),
+      eq(evidenceAssets.ownerType, ownerType),
+      eq(evidenceAssets.ownerId, ownerId),
+      isNull(evidenceAssets.deletedAt),
+      ne(evidenceAssets.status, "expired"),
+    )).orderBy(desc(evidenceAssets.capturedAt));
+    // Reading evidence is itself auditable: every list access is logged.
+    if (rows.length) {
+      await tx.insert(evidenceAccessEvents).values(
+        rows.map(row => ({ assetId: row.id, actorId: principal.userId, purpose: "owner_listing" })),
+      );
+    }
+    return rows;
+  });
 }
 
 /**
@@ -478,31 +488,40 @@ export async function listGarmentEvidence(db: Db, principal: Principal, garmentI
   return rows;
 }
 
+/**
+ * Authorizes a single servable evidence asset at a fixed transactional boundary: for couriers,
+ * `courier_shifts` is locked `FOR SHARE` inside the transaction before checking `state === 'active'`,
+ * so once `completeShift` commits, no new metadata read or content download can be authorized.
+ * (Already-authorized in-flight byte transfers are not retroactively recalled; writes like
+ * `uploadEvidence` hold the shift `FOR SHARE` lock across the entire write+commit boundary.)
+ */
 async function loadServableEvidence(db: Db, principal: Principal, evidenceId: string) {
   assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
-  const [asset] = await db.select({
-    id: evidenceAssets.id,
-    organizationId: evidenceAssets.organizationId,
-    ownerType: evidenceAssets.ownerType,
-    ownerId: evidenceAssets.ownerId,
-    sha256: evidenceAssets.sha256,
-    purpose: evidenceAssets.purpose,
-    mimeType: evidenceAssets.mimeType,
-    sizeBytes: evidenceAssets.sizeBytes,
-    status: evidenceAssets.status,
-    deletedAt: evidenceAssets.deletedAt,
-    capturedAt: evidenceAssets.capturedAt,
-  }).from(evidenceAssets).where(and(
-    eq(evidenceAssets.id, evidenceId),
-    eq(evidenceAssets.organizationId, principal.organizationId),
-  )).limit(1);
-  if (!asset) throw errors.notFound("evidence");
-  await authorizeEvidenceOwner(db, principal, asset);
-  if (asset.deletedAt !== null || asset.status === "expired") throw errors.notFound("evidence");
-  if (!SERVABLE_EVIDENCE_STATES.has(asset.status)) {
-    throw new AppError("FORBIDDEN", "EVIDENCE_NOT_VERIFIED", { status: asset.status });
-  }
-  return asset;
+  return db.transaction(async tx => {
+    const [asset] = await tx.select({
+      id: evidenceAssets.id,
+      organizationId: evidenceAssets.organizationId,
+      ownerType: evidenceAssets.ownerType,
+      ownerId: evidenceAssets.ownerId,
+      sha256: evidenceAssets.sha256,
+      purpose: evidenceAssets.purpose,
+      mimeType: evidenceAssets.mimeType,
+      sizeBytes: evidenceAssets.sizeBytes,
+      status: evidenceAssets.status,
+      deletedAt: evidenceAssets.deletedAt,
+      capturedAt: evidenceAssets.capturedAt,
+    }).from(evidenceAssets).where(and(
+      eq(evidenceAssets.id, evidenceId),
+      eq(evidenceAssets.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!asset) throw errors.notFound("evidence");
+    await authorizeEvidenceOwner(tx, principal, asset, { lockShift: true });
+    if (asset.deletedAt !== null || asset.status === "expired") throw errors.notFound("evidence");
+    if (!SERVABLE_EVIDENCE_STATES.has(asset.status)) {
+      throw new AppError("FORBIDDEN", "EVIDENCE_NOT_VERIFIED", { status: asset.status });
+    }
+    return asset;
+  });
 }
 
 /**
@@ -568,7 +587,7 @@ export async function deleteEvidence(
     )).limit(1);
     if (!asset) throw errors.notFound("evidence");
 
-    await authorizeEvidenceOwner(tx, principal, asset);
+    await authorizeEvidenceOwner(tx, principal, asset, { lockShift: true });
 
     // Customers may only delete evidence they themselves uploaded; staff/partner-captured
     // custody/QC/inspection evidence can only be deleted by support/claims/admin staff.
