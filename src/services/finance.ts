@@ -687,7 +687,18 @@ export async function disputePartnerLine(
 
 export async function financeOverview(db: Db, principal: Principal) {
   assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
-  const [invoices, intents, refundRows, partnerInvoiceRows, pendingCompensations, receiptRows] = await Promise.all([
+  const [
+    invoices,
+    intents,
+    refundRows,
+    partnerInvoiceRows,
+    pendingCompensations,
+    receiptRows,
+    partnerRows,
+    payoutRows,
+    creditNoteRows,
+    deliveredOrders,
+  ] = await Promise.all([
     db.select().from(customerInvoices)
       .where(eq(customerInvoices.organizationId, principal.organizationId))
       .orderBy(desc(customerInvoices.createdAt))
@@ -715,6 +726,33 @@ export async function financeOverview(db: Db, principal: Principal) {
       .where(eq(fiscalReceipts.organizationId, principal.organizationId))
       .orderBy(desc(fiscalReceipts.createdAt))
       .limit(50),
+    db.select({
+      id: partners.id,
+      name: partners.name,
+      status: partners.status,
+    }).from(partners)
+      .where(eq(partners.organizationId, principal.organizationId))
+      .orderBy(asc(partners.name)),
+    db.select().from(partnerPayouts)
+      .where(eq(partnerPayouts.organizationId, principal.organizationId))
+      .orderBy(desc(partnerPayouts.createdAt))
+      .limit(50),
+    db.select().from(partnerCreditNotes)
+      .where(eq(partnerCreditNotes.organizationId, principal.organizationId))
+      .orderBy(desc(partnerCreditNotes.createdAt))
+      .limit(50),
+    db.select({
+      id: orders.id,
+      publicNumber: orders.publicNumber,
+      lifecycleState: orders.lifecycleState,
+      createdAt: orders.createdAt,
+    }).from(orders)
+      .where(and(
+        eq(orders.organizationId, principal.organizationId),
+        eq(orders.lifecycleState, "delivered"),
+      ))
+      .orderBy(desc(orders.createdAt))
+      .limit(50),
   ]);
   return {
     invoices,
@@ -723,6 +761,10 @@ export async function financeOverview(db: Db, principal: Principal) {
     partnerInvoices: partnerInvoiceRows,
     pendingCompensations,
     fiscalReceipts: receiptRows,
+    partners: partnerRows,
+    partnerPayouts: payoutRows,
+    partnerCreditNotes: creditNoteRows,
+    deliveredOrders,
   };
 }
 
