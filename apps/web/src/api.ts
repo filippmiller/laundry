@@ -3,7 +3,12 @@ import type { DemoConfig } from "./types";
 export type { DemoConfig };
 
 export class ApiError extends Error {
-  constructor(readonly code: string, readonly status: number, readonly details?: unknown) {
+  constructor(
+    readonly code: string,
+    readonly status: number,
+    readonly details?: unknown,
+    readonly serverMessage?: string,
+  ) {
     super(code);
   }
 }
@@ -29,7 +34,13 @@ export async function api<T>(
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new ApiError(payload?.error?.code ?? payload?.error?.message ?? "REQUEST_FAILED", response.status, payload?.error?.details);
+    const code = typeof payload?.error?.code === "string"
+      ? payload.error.code
+      : typeof payload?.error?.message === "string"
+        ? payload.error.message
+        : "REQUEST_FAILED";
+    const serverMessage = typeof payload?.error?.message === "string" ? payload.error.message : undefined;
+    throw new ApiError(code, response.status, payload?.error?.details, serverMessage);
   }
   return payload as T;
 }

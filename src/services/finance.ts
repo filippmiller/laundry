@@ -735,11 +735,17 @@ export async function financeOverview(db: Db, principal: Principal) {
       .orderBy(asc(partners.name)),
     db.select().from(partnerPayouts)
       .where(eq(partnerPayouts.organizationId, principal.organizationId))
-      .orderBy(desc(partnerPayouts.createdAt))
+      .orderBy(
+        sql`CASE WHEN ${partnerPayouts.state} IN ('scheduled', 'pending') THEN 0 ELSE 1 END`,
+        desc(partnerPayouts.createdAt),
+      )
       .limit(50),
     db.select().from(partnerCreditNotes)
       .where(eq(partnerCreditNotes.organizationId, principal.organizationId))
-      .orderBy(desc(partnerCreditNotes.createdAt))
+      .orderBy(
+        sql`CASE WHEN ${partnerCreditNotes.state} = 'draft' THEN 0 ELSE 1 END`,
+        desc(partnerCreditNotes.createdAt),
+      )
       .limit(50),
     db.select({
       id: orders.id,

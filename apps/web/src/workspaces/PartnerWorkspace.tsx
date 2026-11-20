@@ -277,7 +277,10 @@ const ACCRUAL_COLUMNS: DataTableColumn<AccrualItemDto>[] = [
   },
 ];
 
-export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
+export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: string[] }) {
+  const canDisputeLines =
+    !roles ||
+    roles.some((r) => r === "partner_finance" || r === "platform_finance" || r === "platform_admin");
   const tabsId = useId();
   const [workspace, setWorkspace] = useState<PartnerWorkspaceResponse | null>(null);
   const [accruals, setAccruals] = useState<PartnerAccrualsResponse | null>(null);
@@ -656,7 +659,8 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
         return (
           <Button
             variant="ghost"
-            disabled={isBusy || isDisputed}
+            disabled={isBusy || isDisputed || !canDisputeLines}
+            title={!canDisputeLines ? "Доступно роли «Финансы партнёра»" : undefined}
             onClick={() => {
               setDisputeLine({ id: line.id, label: invoiceLineLabel(line) });
               setDisputeReason("");
