@@ -913,6 +913,8 @@ export function buildApp(db: Db) {
     params: idSchema,
     body: z.object({
       results: z.array(z.object({ garmentId: z.uuid(), passed: z.boolean(), note: z.string().optional() })),
+      bagPassed: z.boolean().optional(),
+      note: z.string().max(500).optional(),
       key: z.string().optional(),
     }),
     handler: ctx => recordQualityCheck(db, ctx.principal, { orderId: ctx.params.id, ...ctx.body, key: idempotencyKey(ctx) }),

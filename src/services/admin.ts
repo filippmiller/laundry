@@ -117,8 +117,8 @@ async function assertNotLastActiveAdmin(
     ))
     .for("update");
   const targetIsActiveAdmin = activeAdmins.some(row => row.membershipId === targetMembershipId);
-  const remaining = targetIsActiveAdmin ? activeAdmins.length - 1 : activeAdmins.length;
-  if (remaining < 1) {
+  if (!targetIsActiveAdmin) return;
+  if (activeAdmins.length - 1 < 1) {
     throw new AppError("FORBIDDEN", "LAST_ADMIN");
   }
 }
