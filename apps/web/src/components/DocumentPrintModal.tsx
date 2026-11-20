@@ -30,7 +30,11 @@ export function DocumentPrintModal({ open, kind, id, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open || !id) return;
+    if (!open || !id) {
+      setDoc(null);
+      setError(null);
+      return;
+    }
     let cancelled = false;
     setError(null);
     setDoc(null);
@@ -54,7 +58,7 @@ export function DocumentPrintModal({ open, kind, id, onClose }: Props) {
               <div>
                 <div style={{ fontWeight: 700, fontSize: "1.05rem" }}>
                   <FileText size={16} aria-hidden="true" style={{ verticalAlign: "text-bottom", marginInlineEnd: 6 }} />
-                  {doc.title} № <span className="mono">{doc.number}</span>
+                  {doc.title.includes(doc.number) ? doc.title : <>{doc.title} № <span className="mono">{doc.number}</span></>}
                 </div>
                 {doc.orderPublicNumber && (
                   <div className="muted">Заказ: <span className="mono">{doc.orderPublicNumber}</span></div>

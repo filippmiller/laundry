@@ -12,6 +12,7 @@ import {
   MapPin,
   MessageSquare,
   Plus,
+  Printer,
   RefreshCw,
   Send,
   ShoppingBag,
@@ -19,6 +20,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { api, dt, money } from "../api";
+import { DocumentPrintModal, type DocumentKind } from "../components/DocumentPrintModal";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { findSubtype } from "@shared/garment-taxonomy";
 import { ModalDialog } from "../components/ModalDialog";
@@ -1052,6 +1054,22 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   const [rescheduleDeliveryWindows, setRescheduleDeliveryWindows] = useState<WindowDto[]>([]);
   const [reschedulePickupId, setReschedulePickupId] = useState("");
   const [rescheduleDeliveryId, setRescheduleDeliveryId] = useState("");
+  const [printDoc, setPrintDoc] = useState<{ kind: DocumentKind; id: string } | null>(null);
+
+  const rescheduleBuildings = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const address of addresses) {
+      if (!map.has(address.buildingId)) {
+        map.set(address.buildingId, `${address.buildingAddress} · ${address.city}`);
+      }
+    }
+    for (const b of demo?.buildings ?? []) {
+      if (!map.has(b.id)) {
+        map.set(b.id, b.address);
+      }
+    }
+    return Array.from(map.entries()).map(([id, label]) => ({ id, label }));
+  }, [addresses, demo?.buildings]);
 
   const invoice = finance?.invoice ?? null;
   const hasPayableInvoice = Boolean(invoice && invoice.state === "open" && invoice.totalKopeks > 0);
@@ -1404,7 +1422,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
               <button
                 type="button"
                 className="secondary"
-                disabled={isBusy || !canCancel}
+                disabled={isBusy || ["cancelled", "closed"].includes(detail.lifecycleState)}
                 onClick={() => void handleInvoice()}
               >
                 <FileText size={16} aria-hidden="true" />
@@ -1414,6 +1432,28 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 <CreditCard size={16} aria-hidden="true" />
                 <span>Оплатить (тестовый платёж)</span>
               </button>
+              {invoice?.id && (
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={isBusy}
+                  onClick={() => setPrintDoc({ kind: "customer_invoice", id: invoice.id })}
+                >
+                  <Printer size={16} aria-hidden="true" />
+                  <span>Печать счёта</span>
+                </button>
+              )}
+              {detail.containers.length > 0 && (
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={isBusy}
+                  onClick={() => setPrintDoc({ kind: "intake_receipt", id: detail.id })}
+                >
+                  <Printer size={16} aria-hidden="true" />
+                  <span>Квитанция приёмки</span>
+                </button>
+              )}
               <button
                 type="button"
                 className="secondary"
@@ -1545,7 +1585,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                         </Button>
                         <Button
                           variant="danger"
-                          disabled={busy !== null}
+                          disabled={busy !== null || !detail.acceptedQuoteHash}
                           onClick={() => void handleAdjustmentDecision(adjustment.id, false)}
                         >
                           Отказаться от доплаты
@@ -1745,9 +1785,9 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             }}
           >
             <option value="">Выберите дом</option>
-            {addresses.map((address) => (
-              <option key={address.buildingId} value={address.buildingId}>
-                {address.buildingAddress} · {address.city}
+            {rescheduleBuildings.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.label}
               </option>
             ))}
           </select>
@@ -1786,6 +1826,13 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           </button>
         </div>
       </ModalDialog>
+
+      <DocumentPrintModal
+        open={printDoc !== null}
+        kind={printDoc?.kind ?? "customer_invoice"}
+        id={printDoc?.id ?? null}
+        onClose={() => setPrintDoc(null)}
+      />
     </div>
   );
 }

@@ -23,6 +23,14 @@ export function QrScannerDialog({
   const [cameraActive, setCameraActive] = useState(false);
 
   useEffect(() => {
+    if (!open) {
+      setCameraActive(false);
+      setCameraError(null);
+      setManual("");
+    }
+  }, [open]);
+
+  useEffect(() => {
     if (!open || !cameraActive) return;
     let cancelled = false;
     let controls: { stop: () => void } | undefined;
@@ -35,7 +43,7 @@ export function QrScannerDialog({
       }
       try {
         const reader = new BrowserMultiFormatReader();
-        controls = await reader.decodeFromVideoDevice(undefined, videoRef.current, result => {
+        const handleResult = (result: { getText: () => string } | undefined) => {
           if (cancelled || !result) return;
           const text = result.getText().trim();
           if (text) {
@@ -44,7 +52,23 @@ export function QrScannerDialog({
             onDetected(text);
             onClose();
           }
-        });
+        };
+        let nextControls: { stop: () => void };
+        try {
+          nextControls = await reader.decodeFromConstraints(
+            { video: { facingMode: { ideal: "environment" } } },
+            videoRef.current,
+            handleResult,
+          );
+        } catch {
+          if (cancelled || !videoRef.current) return;
+          nextControls = await reader.decodeFromVideoDevice(undefined, videoRef.current, handleResult);
+        }
+        if (cancelled) {
+          nextControls.stop();
+          return;
+        }
+        controls = nextControls;
       } catch {
         if (!cancelled) {
           setCameraError("Не удалось получить доступ к камере. Введите код пломбы/заказа вручную.");

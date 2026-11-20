@@ -18,7 +18,7 @@ export async function api<T>(
   // Auto-attach idempotency key on mutating calls unless explicitly suppressed.
   if (options.key) {
     headers["Idempotency-Key"] = options.key;
-  } else if (method === "POST" || method === "PUT" || method === "PATCH") {
+  } else if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
     headers["Idempotency-Key"] = newKey();
   }
   const response = await fetch(`/api/v1${path}`, {

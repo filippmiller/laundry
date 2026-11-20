@@ -168,7 +168,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
         method: "POST",
         body: {
           phone: targetPhone.trim(),
-          role: targetRole,
+          roles: [targetRole],
           ...(demo?.organizationId ? { organizationId: demo.organizationId } : {}),
         },
       });

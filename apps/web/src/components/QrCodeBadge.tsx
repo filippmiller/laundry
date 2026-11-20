@@ -5,12 +5,18 @@ export function QrCodeBadge({ value, label = "QR-код заказа", size = 12
   const [src, setSrc] = useState<string>("");
 
   useEffect(() => {
+    if (!value) {
+      setSrc("");
+      return;
+    }
     let cancelled = false;
     QRCode.toDataURL(value, { width: size * 2, margin: 1, color: { dark: "#141920", light: "#ffffff" } })
       .then(url => {
         if (!cancelled) setSrc(url);
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!cancelled) setSrc("");
+      });
     return () => { cancelled = true; };
   }, [value, size]);
 

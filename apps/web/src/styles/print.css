@@ -66,6 +66,10 @@
       display: none !important;
     }
 
+    body:has(dialog.modal-dialog[open]) .app-frame *:not(dialog.modal-dialog[open]):not(:has(dialog.modal-dialog[open])):not(dialog.modal-dialog[open] *) {
+      display: none !important;
+    }
+
     .dialog-body {
       padding: 0 !important;
     }
