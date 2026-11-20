@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { courierShifts, routeStops, routes, scanEvents } from "../db/schema.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -28,12 +28,40 @@ export async function openShift(
     organizationId: principal.organizationId, scope: "shift:open", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    const [running] = await tx.select().from(courierShifts).where(and(
+    const [active] = await tx.select().from(courierShifts).where(and(
       eq(courierShifts.organizationId, principal.organizationId),
       eq(courierShifts.courierId, principal.userId),
-      inArray(courierShifts.state, ["planned", "active"]),
+      eq(courierShifts.state, "active"),
     )).limit(1);
-    if (running) return { shiftId: running.id, state: running.state, reused: true as const };
+    if (active) return { shiftId: active.id, state: active.state, reused: true as const };
+
+    const [planned] = await tx.select().from(courierShifts).where(and(
+      eq(courierShifts.organizationId, principal.organizationId),
+      eq(courierShifts.courierId, principal.userId),
+      eq(courierShifts.state, "planned"),
+    )).orderBy(asc(courierShifts.startsAt)).limit(1);
+    if (planned) {
+      const nextStartsAt = input.startsAt ? startsAt : now;
+      const nextEndsAt = input.endsAt
+        ? endsAt
+        : planned.endsAt > nextStartsAt
+          ? planned.endsAt
+          : new Date(nextStartsAt.getTime() + 8 * 60 * 60 * 1000);
+      const [activated] = await tx.update(courierShifts).set({
+        state: "active",
+        startsAt: nextStartsAt,
+        endsAt: nextEndsAt,
+      }).where(and(
+        eq(courierShifts.id, planned.id),
+        eq(courierShifts.state, "planned"),
+      )).returning();
+      if (!activated) throw new AppError("CONFLICT_VERSION", "CONFLICT_VERSION");
+      await appendEvent(tx, {
+        principal, aggregateType: "courier_shift", aggregateId: activated.id,
+        eventType: "shift.opened", payload: { startsAt: nextStartsAt, endsAt: nextEndsAt, fromPlanned: true },
+      });
+      return { shiftId: activated.id, state: activated.state, reused: false as const };
+    }
     const [shift] = await tx.insert(courierShifts).values({
       organizationId: principal.organizationId,
       courierId: principal.userId,
@@ -55,7 +83,7 @@ export async function currentShift(db: Db, principal: Principal) {
     eq(courierShifts.organizationId, principal.organizationId),
     eq(courierShifts.courierId, principal.userId),
     inArray(courierShifts.state, ["planned", "active"]),
-  )).limit(1);
+  )).orderBy(sql`case when ${courierShifts.state} = 'active' then 0 else 1 end`, asc(courierShifts.startsAt)).limit(1);
   return shift ? { shiftId: shift.id, state: shift.state, startsAt: shift.startsAt, endsAt: shift.endsAt } : null;
 }
 
@@ -88,9 +116,15 @@ export async function completeShift(db: Db, principal: Principal, input: { shift
       : [];
     const byState: Record<string, number> = {};
     for (const stop of stops) byState[stop.state] = (byState[stop.state] ?? 0) + 1;
+    const completedAt = new Date();
     const scanRows = await tx.select({ state: scanEvents.syncStatus, count: sql<number>`count(*)::int` })
       .from(scanEvents)
-      .where(and(eq(scanEvents.organizationId, principal.organizationId), eq(scanEvents.actorId, shift.courierId)))
+      .where(and(
+        eq(scanEvents.organizationId, principal.organizationId),
+        eq(scanEvents.actorId, shift.courierId),
+        gte(scanEvents.capturedAt, shift.startsAt),
+        lte(scanEvents.capturedAt, completedAt),
+      ))
       .groupBy(scanEvents.syncStatus);
     const scans = { accepted: 0, rejected: 0 };
     for (const row of scanRows) {
