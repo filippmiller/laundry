@@ -184,6 +184,8 @@ export async function measureOrderWeightVariance(db: Db, orderId: string, organi
       eq(partnerReceipts.orderId, orderId),
     ));
 
+  if (!receipts.length) return null;
+
   const receivedGrams = receipts.reduce((sum, row) => sum + (row.actualWeightGrams ?? 0), 0);
   const quotedGrams = lines.reduce((sum, line) => sum + line.quotedQuantity, 0);
 

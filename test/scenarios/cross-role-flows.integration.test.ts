@@ -301,7 +301,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: `/api/v1/partner/orders/${booked.order.id}/quality-check`,
       headers: cookieHeader(partner.cookie, { "idempotency-key": `qc-${randomUUID()}` }),
-      payload: { results: [] },
+      payload: { results: [], bagPassed: true },
     });
     expect(qcRes.statusCode, qcRes.body).toBe(200);
     expect(qcRes.json()).toMatchObject({ state: "ready" });

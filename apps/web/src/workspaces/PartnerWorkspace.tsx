@@ -59,7 +59,7 @@ type GarmentDto = {
   description: string;
   status: string;
   brandMark: string | null;
-  declaredValueKopeks: number;
+  declaredValueKopeks?: number | null;
 };
 
 type AdjustmentDto = {
@@ -243,6 +243,17 @@ const GARMENT_COLUMNS: DataTableColumn<GarmentDto>[] = [
     ),
   },
   {
+    key: "declaredValue",
+    header: "Оценка",
+    render: (g) =>
+      g.declaredValueKopeks != null ? (
+        <span className="mono">{money(g.declaredValueKopeks)}</span>
+      ) : (
+        <span className="muted">Не указана</span>
+      ),
+    numeric: true,
+  },
+  {
     key: "status",
     header: "Статус",
     render: (g) => <Badge tone={garmentStateTone(g.status)}>{garmentStateLabel(g.status)}</Badge>,
@@ -304,6 +315,7 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
 
   // Stage 3: Quality check drafts
   const [qcDrafts, setQcDrafts] = useState<Record<string, QcDraft>>({});
+  const [economyQcNote, setEconomyQcNote] = useState("");
 
   // Stage 4: Partner act print & invoice line dispute modal
   const [printActId, setPrintActId] = useState<string | null>(null);
@@ -364,6 +376,7 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
     }
     setActualContainers(buildContainerDrafts(selectedOrder.containers));
     setQcDrafts(buildQcDrafts(selectedOrder.garments));
+    setEconomyQcNote("");
     setAdjustmentRub("");
     setAdjustmentReason("");
     setReturnReason("");
@@ -570,20 +583,48 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
     });
   };
 
-  const handleCompleteQc = async () => {
+  const handleCompleteQc = async (economyBagPassed?: boolean) => {
     if (!selectedOrder) return;
     const isEconomy = selectedOrder.garments.length === 0;
-    const results = isEconomy
-      ? []
-      : selectedOrder.garments.map((g) => {
-          const draft = qcDrafts[g.id] ?? { passed: true, note: "" };
-          const trimmedNote = draft.note.trim();
-          return {
-            garmentId: g.id,
-            passed: draft.passed,
-            ...(trimmedNote ? { note: trimmedNote } : {}),
-          };
-        });
+    if (isEconomy) {
+      if (typeof economyBagPassed !== "boolean") {
+        notify({ kind: "error", text: "Выберите явное решение ОТК: «Пройден» или «Брак — на доработку»" });
+        return;
+      }
+      const trimmedNote = economyQcNote.trim();
+      if (!economyBagPassed && !trimmedNote) {
+        notify({ kind: "error", text: "Укажите причину брака / замечание для повторной обработки" });
+        return;
+      }
+      await runAction(
+        economyBagPassed ? "quality_check_pass" : "quality_check_fail",
+        async () => {
+          await api(`/partner/orders/${selectedOrder.orderId}/quality-check`, {
+            method: "POST",
+            body: {
+              results: [],
+              bagPassed: economyBagPassed,
+              ...(trimmedNote ? { note: trimmedNote } : {}),
+            },
+          });
+          setEconomyQcNote("");
+        },
+        economyBagPassed
+          ? `ОТК заказа ${selectedOrder.publicNumber} пройден — готово к выдаче`
+          : `ОТК заказа ${selectedOrder.publicNumber}: зафиксирован брак, отправлено на доработку`,
+      );
+      return;
+    }
+
+    const results = selectedOrder.garments.map((g) => {
+      const draft = qcDrafts[g.id] ?? { passed: true, note: "" };
+      const trimmedNote = draft.note.trim();
+      return {
+        garmentId: g.id,
+        passed: draft.passed,
+        ...(trimmedNote ? { note: trimmedNote } : {}),
+      };
+    });
 
     await runAction(
       "quality_check",
@@ -592,9 +633,7 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
           method: "POST",
           body: { results },
         }),
-      isEconomy
-        ? `ОТК заказа ${selectedOrder.publicNumber} завершён — готово к выдаче`
-        : `Результаты ОТК по заказу ${selectedOrder.publicNumber} сохранены`,
+      `Результаты ОТК по заказу ${selectedOrder.publicNumber} сохранены`,
     );
   };
 
@@ -1084,17 +1123,32 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                   {selectedOrder.garments.length === 0 ? (
                     <div className="stack">
                       <p className="muted">
-                        Тариф «Эконом» без поштучной описи вещей. Подтвердите прохождение общего контроля
-                        качества и готовность партии к выдаче курьеру.
+                        Тариф «Эконом» без поштучной описи вещей. Примите явное решение по партии:
+                        подтвердите прохождение ОТК либо отправьте заказ на доработку с указанием замечания.
                       </p>
+                      <Input
+                        label="Комментарий ОТК / причина доработки"
+                        type="text"
+                        placeholder="Например, пятно не отошло — требуется повторная стирка (обязательно при браке)"
+                        value={economyQcNote}
+                        onChange={(e) => setEconomyQcNote(e.target.value)}
+                      />
                       <div className="button-row">
                         <Button
                           variant="primary"
                           disabled={isBusy}
-                          onClick={() => void handleCompleteQc()}
+                          onClick={() => void handleCompleteQc(true)}
                           leadingIcon={<CheckCircle2 size={16} aria-hidden="true" />}
                         >
                           ОТК пройден — готово к выдаче
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          disabled={isBusy}
+                          onClick={() => void handleCompleteQc(false)}
+                          leadingIcon={<XCircle size={16} aria-hidden="true" />}
+                        >
+                          Брак — на доработку
                         </Button>
                       </div>
                     </div>
@@ -1115,7 +1169,11 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                                   {g.brandMark ? ` (${g.brandMark})` : ""}
                                   <div className="muted">
                                     {g.description} · Оценочная стоимость:{" "}
-                                    <span className="mono">{money(g.declaredValueKopeks)}</span>
+                                    {g.declaredValueKopeks != null ? (
+                                      <span className="mono">{money(g.declaredValueKopeks)}</span>
+                                    ) : (
+                                      <span>Не указана</span>
+                                    )}
                                   </div>
                                 </div>
                                 <Badge

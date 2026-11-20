@@ -24,8 +24,10 @@ export type CustomerOrderLedgerRow = {
   chargedKopeks: number;
   capturedKopeks: number;
   refundedKopeks: number;
+  pendingRefundKopeks: number;
   netPaidKopeks: number;
   outstandingKopeks: number;
+  creditKopeks: number;
   sharedWindowSavingsKopeks: number;
 };
 
@@ -36,6 +38,7 @@ export type CustomerFinance = {
     chargedKopeks: number;
     netPaidKopeks: number;
     refundedKopeks: number;
+    pendingRefundKopeks: number;
     outstandingKopeks: number;
     creditKopeks: number;
     averageOrderKopeks: number;
@@ -57,6 +60,7 @@ type OrderRow = {
   invoice_state: string | null;
   captured_kopeks: string | null;
   refunded_kopeks: string | null;
+  pending_refund_kopeks: string | null;
   off_pickup_kopeks: string | null;
   off_delivery_kopeks: string | null;
   fee_lines: Array<{ kind: string; source: string; amount_kopeks: string }> | null;
@@ -96,6 +100,7 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
         i.state                  AS invoice_state,
         COALESCE(p.captured, 0)  AS captured_kopeks,
         COALESCE(r.refunded, 0)  AS refunded_kopeks,
+        COALESCE(r.pending_refund, 0) AS pending_refund_kopeks,
         COALESCE(tv.off_schedule_pickup_kopeks, 0)   AS off_pickup_kopeks,
         COALESCE(tv.off_schedule_delivery_kopeks, 0) AS off_delivery_kopeks,
         (
@@ -131,12 +136,13 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
           AND pi.state IN ('captured', 'partially_refunded', 'refunded')
       ) p ON TRUE
       LEFT JOIN LATERAL (
-        SELECT SUM(rf.amount_kopeks) AS refunded
+        SELECT
+          SUM(CASE WHEN rf.state = 'completed' THEN rf.amount_kopeks ELSE 0 END) AS refunded,
+          SUM(CASE WHEN rf.state IN ('pending', 'error') THEN rf.amount_kopeks ELSE 0 END) AS pending_refund
         FROM refunds rf
         JOIN payment_intents pi ON pi.id = rf.payment_intent_id
         WHERE pi.order_id = o.id
           AND rf.organization_id = o.organization_id
-          AND rf.state = 'completed'
       ) r ON TRUE
       WHERE o.organization_id = ${organizationId}
         AND o.customer_id = ${customerId}
@@ -179,6 +185,7 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
   let chargedKopeks = 0;
   let netPaidKopeks = 0;
   let refundedKopeks = 0;
+  let pendingRefundKopeks = 0;
   let outstandingKopeks = 0;
   let creditKopeks = 0;
   let sharedWindowSavingsKopeks = 0;
@@ -187,6 +194,7 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
     const total = Number(row.invoice_total_kopeks ?? 0);
     const captured = Number(row.captured_kopeks ?? 0);
     const refunded = Number(row.refunded_kopeks ?? 0);
+    const pendingRefund = Number(row.pending_refund_kopeks ?? 0);
     const net = captured - refunded;
     const outstanding = Math.max(0, total - net);
     const credit = Math.max(0, net - total);
@@ -194,6 +202,7 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
     chargedKopeks += total;
     netPaidKopeks += net;
     refundedKopeks += refunded;
+    pendingRefundKopeks += pendingRefund;
     outstandingKopeks += outstanding;
     creditKopeks += credit;
 
@@ -217,8 +226,10 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
       chargedKopeks: total,
       capturedKopeks: captured,
       refundedKopeks: refunded,
+      pendingRefundKopeks: pendingRefund,
       netPaidKopeks: net,
       outstandingKopeks: outstanding,
+      creditKopeks: credit,
       sharedWindowSavingsKopeks: savings,
     };
   });
@@ -241,6 +252,7 @@ export async function customerFinance(db: Db, principal: Principal): Promise<Cus
       chargedKopeks,
       netPaidKopeks,
       refundedKopeks,
+      pendingRefundKopeks,
       outstandingKopeks,
       creditKopeks,
       averageOrderKopeks: paidOrderCount > 0 ? Math.round(chargedKopeks / paidOrderCount) : 0,

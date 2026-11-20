@@ -67,7 +67,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 1 courier & delivery fixes
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-${randomUUID()}` });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `proc-${randomUUID()}` });
-    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: `qc-${randomUUID()}` });
+    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: `qc-${randomUUID()}` });
 
     const [shift] = await db.select().from(courierShifts).where(eq(courierShifts.id, f.shiftId)).limit(1);
     const assigned = await assignDelivery(db, f.dispatcher, {

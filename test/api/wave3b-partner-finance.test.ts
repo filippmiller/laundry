@@ -291,6 +291,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 3B partner, finance & orde
     const qc = await recordQualityCheck(db, partner.principal, {
       orderId: f.orderId,
       results: [],
+      bagPassed: true,
       key: `qc-eco-${rid()}`,
     });
     expect(qc.state).toBe("ready");

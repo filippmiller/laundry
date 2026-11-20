@@ -1,10 +1,10 @@
 import { randomBytes, randomInt } from "node:crypto";
-import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  containerAssignments, containers, customerAddresses, customerInvoices, documentVersions, evidenceAssets,
+  containerAssignments, containers, customerAddresses, customerInvoiceLines, customerInvoices, documentVersions, evidenceAssets,
   garmentEvidence, garments, intakeManifestLines, intakeManifests, orderAdjustments, orderLines,
-  orders, quotes, routeStops, seals, serviceWindows, slotReservations,
+  orders, paymentIntents, quotes, refunds, routeStops, seals, serviceWindows, slotReservations,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -13,6 +13,7 @@ import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idemp
 import { nextState, type OrderState } from "../domain/order-state.js";
 import { confirmSlot, releaseSlot } from "../domain/slot-reservation.js";
 import { assertAcceptableQuote } from "./quotes.js";
+import { settlePendingRefundTx } from "./finance.js";
 import type { DeclaredItem } from "../../shared/garment-taxonomy.js";
 
 type QuoteSnapshot = {
@@ -207,17 +208,43 @@ async function releaseOrderReservations(tx: Db, principal: Principal, orderId: s
 export async function cancelOrder(
   db: Db,
   principal: Principal,
-  input: { orderId: string; reason: string; key: string },
+  input: {
+    orderId: string;
+    reason: string;
+    key: string;
+    /** Optional earned/agreed amount to retain for partially rendered services (staff only; defaults to 0). */
+    retainedKopeks?: number;
+    /** When true, creates `pending` refund obligation(s) without immediate settlement so a worker/retry settles them. */
+    deferRefundSettlement?: boolean;
+  },
 ) {
-  assertRole(principal, "customer", ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.admin);
+  assertRole(principal, "customer", ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.finance);
+  const retainedKopeks = input.retainedKopeks ?? 0;
+  if (!Number.isInteger(retainedKopeks) || retainedKopeks < 0) {
+    throw new AppError("VALIDATION_ERROR", "RETAINED_AMOUNT_INVALID");
+  }
+  if (retainedKopeks > 0 && !hasRole(principal, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.finance)) {
+    throw errors.forbidden("only staff may specify a retained cancellation amount");
+  }
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "order:cancel", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
     replayGuard: async tx => { await loadOrder(tx as Db, principal, input.orderId); },
   }, async tx => {
+    // Consistent lock order across order/finance flows: `orders` FOR UPDATE -> `payment_intents` FOR UPDATE.
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const order = await loadOrder(tx, principal, input.orderId);
     if (order.lifecycleState === "cancelled") {
-      return { orderId: order.id, state: "cancelled" as const, releasedReservations: 0 };
+      return {
+        orderId: order.id,
+        state: "cancelled" as const,
+        releasedReservations: 0,
+        owedRefundKopeks: 0,
+        refundIds: [] as string[],
+        refundSettlementState: "none" as const,
+      };
     }
     // nextState enforces both the lifecycle edge and the role allowed to take it.
     nextState(order.lifecycleState as OrderState, "cancel", principal);
@@ -227,24 +254,150 @@ export async function cancelOrder(
     }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
       .returning({ id: orders.id });
     if (!updated.length) throw errors.version(order.version);
-    // Cancel any open unpaid customer invoices in the same tx so a cancelled order can never be captured.
-    const cancelledInvoices = await tx.update(customerInvoices).set({
-      state: "cancelled",
-    }).where(and(
+
+    const activeInvoices = await tx.select().from(customerInvoices).where(and(
       eq(customerInvoices.organizationId, principal.organizationId),
       eq(customerInvoices.orderId, order.id),
-      eq(customerInvoices.state, "open"),
-    )).returning({ id: customerInvoices.id });
+      ne(customerInvoices.state, "cancelled"),
+    )).orderBy(asc(customerInvoices.createdAt), asc(customerInvoices.id));
+
+    // Lock all payment intents of this order in deterministic order before reading/creating refunds.
+    await tx.execute(sql`
+      SELECT id FROM payment_intents
+      WHERE order_id = ${order.id} AND organization_id = ${principal.organizationId}
+      ORDER BY created_at ASC, id ASC
+      FOR UPDATE
+    `);
+    const intents = await tx.select().from(paymentIntents).where(and(
+      eq(paymentIntents.organizationId, principal.organizationId),
+      eq(paymentIntents.orderId, order.id),
+      inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
+    )).orderBy(asc(paymentIntents.createdAt), asc(paymentIntents.id));
+
+    const totalInvoiced = activeInvoices.reduce((acc, inv) => acc + inv.totalKopeks, 0);
+    if (retainedKopeks > 0 && activeInvoices.length > 0 && retainedKopeks > totalInvoiced) {
+      throw new AppError("VALIDATION_ERROR", "RETAINED_EXCEEDS_INVOICE", {
+        retainedKopeks, totalInvoiced,
+      });
+    }
+
+    let capturedTotal = 0;
+    let alreadyCommittedRefunds = 0;
+    const intentRefundable = new Map<string, number>();
+    for (const intent of intents) {
+      capturedTotal += intent.amountKopeks;
+      const [refundSumRow] = await tx.select({ total: sum(refunds.amountKopeks) }).from(refunds).where(and(
+        eq(refunds.organizationId, principal.organizationId),
+        eq(refunds.paymentIntentId, intent.id),
+        inArray(refunds.state, ["completed", "pending", "error"]),
+      ));
+      const committed = Number(refundSumRow?.total ?? 0);
+      alreadyCommittedRefunds += committed;
+      intentRefundable.set(intent.id, Math.max(0, intent.amountKopeks - committed));
+    }
+    const netCaptured = Math.max(0, capturedTotal - alreadyCommittedRefunds);
+    const owedRefundKopeks = Math.max(0, netCaptured - retainedKopeks);
+
+    // Separate money movement from service obligation:
+    // - Full cancellation (retainedKopeks === 0): void/cancel ALL non-cancelled customer invoices.
+    // - Partial retention (retainedKopeks > 0): reduce the obligation to exactly `retainedKopeks`
+    //   via a credit line on the primary invoice and cancel any extra invoices.
+    let cancelledInvoices = 0;
+    if (retainedKopeks === 0) {
+      for (const inv of activeInvoices) {
+        await tx.update(customerInvoices).set({ state: "cancelled" }).where(eq(customerInvoices.id, inv.id));
+        cancelledInvoices += 1;
+      }
+    } else if (activeInvoices.length > 0) {
+      const [primary, ...extras] = activeInvoices;
+      for (const extra of extras) {
+        await tx.update(customerInvoices).set({ state: "cancelled" }).where(eq(customerInvoices.id, extra.id));
+        cancelledInvoices += 1;
+      }
+      const creditDelta = primary.totalKopeks - retainedKopeks;
+      if (creditDelta !== 0) {
+        await tx.insert(customerInvoiceLines).values({
+          invoiceId: primary.id,
+          kind: "credit",
+          description: `Корректировка обязательства при отмене: ${input.reason}`,
+          quantity: 1,
+          amountKopeks: -creditDelta,
+          tariffVersionId: null,
+          taxMode: "none",
+          source: "cancellation",
+          actorId: principal.userId,
+          consentId: null,
+        });
+      }
+      const netPaidAfterRefund = Math.max(0, netCaptured - owedRefundKopeks);
+      await tx.update(customerInvoices).set({
+        totalKopeks: retainedKopeks,
+        state: netPaidAfterRefund >= retainedKopeks ? "paid" : "open",
+      }).where(eq(customerInvoices.id, primary.id));
+    }
+
+    // Create idempotent refund obligation(s) for any captured funds above `retainedKopeks`.
+    const refundIds: string[] = [];
+    let remainingOwed = owedRefundKopeks;
+    for (const intent of intents) {
+      if (remainingOwed <= 0) break;
+      const refundable = intentRefundable.get(intent.id) ?? 0;
+      const refundAmount = Math.min(remainingOwed, refundable);
+      if (refundAmount <= 0) continue;
+      const refundKey = `cancel-refund:${order.id}:${intent.id}`;
+      const inserted = await tx.insert(refunds).values({
+        organizationId: principal.organizationId,
+        paymentIntentId: intent.id,
+        amountKopeks: refundAmount,
+        state: "pending",
+        reason: `Отмена заказа: ${input.reason}`,
+        idempotencyKey: refundKey,
+      }).onConflictDoNothing().returning({ id: refunds.id });
+      let refundId = inserted[0]?.id;
+      if (!refundId) {
+        const [existingRefund] = await tx.select({ id: refunds.id }).from(refunds).where(and(
+          eq(refunds.organizationId, principal.organizationId),
+          eq(refunds.idempotencyKey, refundKey),
+        )).limit(1);
+        refundId = existingRefund?.id;
+      }
+      if (refundId) {
+        refundIds.push(refundId);
+        if (!input.deferRefundSettlement) {
+          await settlePendingRefundTx(tx, principal, refundId);
+        }
+      }
+      remainingOwed -= refundAmount;
+    }
+
+    const refundSettlementState = refundIds.length === 0
+      ? ("none" as const)
+      : input.deferRefundSettlement
+        ? ("pending" as const)
+        : ("completed" as const);
+
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.cancelled",
       payload: {
         from: order.lifecycleState,
         releasedReservations: released,
-        cancelledInvoices: cancelledInvoices.length,
+        cancelledInvoices,
+        retainedKopeks,
+        owedRefundKopeks,
+        refundIds,
+        refundSettlementState,
       },
       reason: input.reason,
     });
-    return { orderId: order.id, state: "cancelled" as const, releasedReservations: released };
+    return {
+      orderId: order.id,
+      state: "cancelled" as const,
+      releasedReservations: released,
+      retainedKopeks,
+      owedRefundKopeks,
+      refundIds,
+      refundSettlementState,
+    };
   });
 }
 
@@ -456,6 +609,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
   });
 
   const canSeeRetailFinancials = isOwnerCustomer || staff;
+  const canSeeDeclaredValue = canSeeRetailFinancials || isAssignedPartner;
   const canSeeEvidenceLinks = isOwnerCustomer || staff || isAssignedPartner;
 
   const garmentIds = garmentRows.map(g => g.id);
@@ -483,7 +637,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     const { declaredValueKopeks, ...rest } = garment;
     return {
       ...rest,
-      ...(canSeeRetailFinancials ? { declaredValueKopeks } : {}),
+      ...(canSeeDeclaredValue ? { declaredValueKopeks } : {}),
       ...(canSeeEvidenceLinks ? { evidenceAssetIds: evidenceByGarment.get(garment.id) ?? [] } : {}),
     };
   });
