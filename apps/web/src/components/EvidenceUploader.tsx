@@ -496,17 +496,29 @@ export function EvidenceUploader({
                     </span>
                   </div>
 
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    leadingIcon={<Trash2 size={14} aria-hidden="true" />}
-                    disabled={isDeleting || uploading || isLegalHold}
-                    title={isLegalHold ? "Удаление запрещено: юридическое удержание" : "Удалить файл"}
-                    onClick={() => void handleDelete(asset)}
-                  >
-                    {isDeleting ? "Удаление..." : "Удалить"}
-                  </Button>
+                  <div className="button-row">
+                    {(asset.status === "verified" || asset.status === "legal_hold" || asset.status === "retained") && (
+                      <a
+                        className="ghost btn--sm"
+                        href={`/api/v1/evidence/${asset.id}/content`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Открыть
+                      </a>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      leadingIcon={<Trash2 size={14} aria-hidden="true" />}
+                      disabled={isDeleting || uploading || isLegalHold}
+                      title={isLegalHold ? "Удаление запрещено: юридическое удержание" : "Удалить файл"}
+                      onClick={() => void handleDelete(asset)}
+                    >
+                      {isDeleting ? "Удаление..." : "Удалить"}
+                    </Button>
+                  </div>
                 </li>
               );
             })}

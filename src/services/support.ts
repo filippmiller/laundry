@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { orders, supportMessages, supportThreads } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -12,11 +12,12 @@ function isSupport(principal: Principal) {
   return hasRole(principal, ...SUPPORT_ROLES);
 }
 
-async function loadThread(db: Db, principal: Principal, threadId: string) {
-  const [thread] = await db.select().from(supportThreads).where(and(
+async function loadThread(db: Db, principal: Principal, threadId: string, options: { lock?: boolean } = {}) {
+  const query = db.select().from(supportThreads).where(and(
     eq(supportThreads.id, threadId),
     eq(supportThreads.organizationId, principal.organizationId),
   )).limit(1);
+  const [thread] = options.lock ? await query.for("update") : await query;
   if (!thread) throw errors.notFound("thread");
   let customerId: string | null = null;
   if (thread.orderId) {
@@ -87,7 +88,7 @@ export async function postMessage(
     organizationId: principal.organizationId, scope: "support:message", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    const { thread, support } = await loadThread(tx, principal, input.threadId);
+    const { thread, support } = await loadThread(tx, principal, input.threadId, { lock: true });
     if (thread.state !== "open") throw new AppError("INVALID_TRANSITION", "THREAD_CLOSED", { state: thread.state });
     const [message] = await tx.insert(supportMessages).values({
       threadId: thread.id, authorId: principal.userId, body: input.body,
@@ -126,15 +127,16 @@ export async function listThreads(db: Db, principal: Principal, input: { limit?:
 export async function getThread(db: Db, principal: Principal, threadId: string) {
   assertRole(principal, "customer", ...SUPPORT_ROLES);
   const { thread, support, customerId } = await loadThread(db, principal, threadId);
-  const messages = await db.select({
+  const latestMessages = await db.select({
     id: supportMessages.id,
     body: supportMessages.body,
     createdAt: supportMessages.createdAt,
     authorId: supportMessages.authorId,
   }).from(supportMessages)
     .where(eq(supportMessages.threadId, thread.id))
-    .orderBy(asc(supportMessages.createdAt))
+    .orderBy(desc(supportMessages.createdAt), desc(supportMessages.id))
     .limit(500);
+  const messages = latestMessages.reverse();
   return {
     thread,
     messages: messages.map(message => ({
@@ -158,7 +160,7 @@ export async function closeThread(
     organizationId: principal.organizationId, scope: "support:close", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    const { thread } = await loadThread(tx, principal, input.threadId);
+    const { thread } = await loadThread(tx, principal, input.threadId, { lock: true });
     if (thread.state === "closed") return { threadId: thread.id, state: "closed" as const };
     await tx.update(supportThreads).set({ state: "closed" }).where(eq(supportThreads.id, thread.id));
     await appendEvent(tx, {

@@ -44,7 +44,7 @@ import {
 import { completeShift, currentShift, openShift } from "../services/courier-shift.js";
 import {
   decideCompensation, deleteEvidence, exportMyPrivacyData, listEvidence, listMySessions, opsMetrics,
-  proposeCompensation, readEvidence, registerEvidence, revokeOwnSession, searchOrders, uploadEvidence,
+  proposeCompensation, readEvidence, readEvidenceContent, registerEvidence, revokeOwnSession, searchOrders, uploadEvidence,
 } from "../services/workspace.js";
 import { seedDemo } from "../services/seed.js";
 import { apiFinanceOverview } from "../services/api-overview.js";
@@ -55,7 +55,7 @@ import { chronometry } from "../services/chronometry.js";
 import { churnSignal } from "../services/churn.js";
 import { renderDocument, type DocumentKind } from "../services/documents.js";
 import { requestOtpChallenge, unlockPreviewAccess, verifyOtpChallenge } from "../services/otp.js";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
 
 const SESSION_COOKIE = "laundry_session";
@@ -572,7 +572,7 @@ export function buildApp(db: Db) {
   add({
     method: "POST", path: "/quotes", summary: "Create immutable quote", tags: ["Customer"],
     body: z.object({
-      buildingId: z.uuid(), tariffVersionId: z.uuid().optional(),
+      buildingId: z.uuid(), addressId: z.uuid().optional(), tariffVersionId: z.uuid().optional(),
       pickupWindowId: z.uuid(), deliveryWindowId: z.uuid(),
       offSchedulePickup: z.boolean().optional(), offScheduleDelivery: z.boolean().optional(),
       lines: z.array(z.object({
@@ -651,10 +651,34 @@ export function buildApp(db: Db) {
     handler: async ctx => {
       const customerOnly = hasRole(ctx.principal, "customer")
         && !hasRole(ctx.principal, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
-      const scope = customerOnly
-        ? and(eq(claims.organizationId, ctx.principal.organizationId), eq(claims.openedBy, ctx.principal.userId))
-        : eq(claims.organizationId, ctx.principal.organizationId);
-      return db.select().from(claims).where(scope).limit(100);
+      if (customerOnly) {
+        return db.select({
+          id: claims.id,
+          organizationId: claims.organizationId,
+          orderId: claims.orderId,
+          openedBy: claims.openedBy,
+          claimType: claims.claimType,
+          state: claims.state,
+          description: claims.description,
+          version: claims.version,
+          dueAt: claims.dueAt,
+          openedAt: claims.openedAt,
+        }).from(claims)
+          .innerJoin(orders, and(eq(orders.id, claims.orderId), eq(orders.organizationId, claims.organizationId)))
+          .where(and(
+            eq(claims.organizationId, ctx.principal.organizationId),
+            or(
+              eq(claims.openedBy, ctx.principal.userId),
+              eq(orders.customerId, ctx.principal.userId),
+            ),
+          ))
+          .orderBy(desc(claims.openedAt))
+          .limit(100);
+      }
+      return db.select().from(claims)
+        .where(eq(claims.organizationId, ctx.principal.organizationId))
+        .orderBy(desc(claims.openedAt))
+        .limit(100);
     },
   });
   add({
@@ -978,6 +1002,18 @@ export function buildApp(db: Db) {
     method: "GET", path: "/evidence/:id", summary: "Read single evidence metadata by id", tags: ["Customer"],
     params: idSchema,
     handler: ctx => readEvidence(db, ctx.principal, ctx.params.id),
+  });
+  add({
+    method: "GET", path: "/evidence/:id/content", summary: "Download verified evidence content bytes", tags: ["Customer"],
+    params: idSchema,
+    handler: async ctx => {
+      const result = await readEvidenceContent(db, ctx.principal, ctx.params.id);
+      return ctx.reply
+        .type(result.mimeType)
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "private, no-store")
+        .send(result.bytes);
+    },
   });
   add({
     method: "POST", path: "/evidence/:id/upload", summary: "Upload and verify evidence bytes against SHA-256, MIME allowlist and size ceiling", tags: ["Customer", "Support"],
