@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   claims, containerAssignments, containers, courierDevices, custodyEvents, evidenceAssets,
@@ -390,7 +390,10 @@ async function evaluateScanEvent(
         eq(containerAssignments.organizationId, principal.organizationId),
         eq(containers.organizationId, principal.organizationId),
         eq(containers.code, event.scannedId),
-      )).limit(1);
+        isNull(containerAssignments.unassignedAt),
+      ))
+      .orderBy(desc(containerAssignments.assignedAt))
+      .limit(1);
     orderId = row?.orderId;
   } else {
     notAssignedReason = "SEAL_NOT_ASSIGNED";
@@ -537,6 +540,12 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
       }
 
       const evaluation = await evaluateScanEvent(tx, principal, event);
+      if (!evaluation.ok && evaluation.reason === "DEVICE_NOT_OWNED") {
+        // Never persist a scan_events row for an unowned/foreign device so a cross-actor or
+        // cross-tenant caller cannot poison the global (device_id, client_event_id) unique index
+        // and block the rightful owner's subsequent legitimate sync.
+        return { kind: "rejected" as const, reason: evaluation.reason };
+      }
       const receivedAt = new Date();
       const inserted = await tx.insert(scanEvents).values({
         organizationId: principal.organizationId,

@@ -1,4 +1,4 @@
-import { and, eq, gt, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import { buildings, orders, serviceWindows, slotReservations } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -270,6 +270,24 @@ export async function holdSlotPair(db: Db, input: HoldPairRequest): Promise<Hold
     actorId: input.principal.userId,
     requestHash,
   }, async tx => {
+    // Lock ALL involved service_windows (prior holds being released + new pickup & delivery
+    // windows) in a single sorted ORDER BY id FOR UPDATE query before mutating any window
+    // counters, preventing AB-BA lock inversion between concurrent paired holds.
+    const releaseWindowIds = releaseIds.length > 0
+      ? (await tx.select({ windowId: slotReservations.windowId })
+        .from(slotReservations)
+        .where(and(
+          inArray(slotReservations.id, releaseIds),
+          eq(slotReservations.organizationId, input.principal.organizationId),
+        ))).map(row => row.windowId)
+      : [];
+    const allWindowIds = [...new Set([...releaseWindowIds, input.pickupWindowId, input.deliveryWindowId])].sort();
+    await tx.select({ id: serviceWindows.id })
+      .from(serviceWindows)
+      .where(inArray(serviceWindows.id, allWindowIds))
+      .orderBy(asc(serviceWindows.id))
+      .for("update");
+
     const releasedReservationIds = releaseIds.length > 0
       ? await releaseHeldReservationsInTx(tx, {
         principal: input.principal,

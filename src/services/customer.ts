@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { buildings, cities, customerAddresses, entrances, notifications, orders, outboxEvents } from "../db/schema.js";
 import { assertRole, type Principal } from "../core/context.js";
-import { decodeKeysetCursor, encodeKeysetCursor } from "../core/cursor.js";
+import { decodeKeysetCursor, encodeKeysetCursor, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 
@@ -117,12 +117,13 @@ export async function listNotificationsPage(
     payloadJson: notifications.payloadJson,
     readAt: notifications.readAt,
     createdAt: notifications.createdAt,
+    cursorTs: pgCursorTimestampSql(notifications.createdAt),
   }).from(notifications)
     .where(and(
       eq(notifications.organizationId, principal.organizationId),
       eq(notifications.recipientId, principal.userId),
       decoded
-        ? sql`(${notifications.createdAt}, ${notifications.id}) < (${decoded.ts}, ${decoded.id})`
+        ? sql`(${notifications.createdAt}, ${notifications.id}) < (${decoded.ts}::timestamptz, ${decoded.id})`
         : undefined,
     ))
     .orderBy(desc(notifications.createdAt), desc(notifications.id))
@@ -132,10 +133,10 @@ export async function listNotificationsPage(
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const last = pageRows[pageRows.length - 1];
-  const nextCursor = hasMore && last ? encodeKeysetCursor(last.createdAt, last.id) : null;
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.cursorTs, last.id) : null;
 
   return {
-    items: pageRows.map(row => ({
+    items: pageRows.map(({ cursorTs: _cursorTs, ...row }) => ({
       ...row,
       payloadJson: row.payloadJson as Record<string, unknown>,
       read: row.readAt !== null,

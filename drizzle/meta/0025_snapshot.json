@@ -5429,6 +5429,19 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "scan_events_shift_id_courier_shifts_id_fk": {
+          "name": "scan_events_shift_id_courier_shifts_id_fk",
+          "tableFrom": "scan_events",
+          "tableTo": "courier_shifts",
+          "columnsFrom": [
+            "shift_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},

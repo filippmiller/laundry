@@ -213,7 +213,13 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
     organizationId: principal.organizationId, scope: "delivery:attempt", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    const { stop } = await assertCourierStopEntitlement(tx, principal, input.stopId);
+    const { stop: entitledStop } = await assertCourierStopEntitlement(tx, principal, input.stopId);
+    // Canonical lock order: courier_shifts (FOR SHARE) -> route_stops (FOR UPDATE) -> orders.
+    const [stop] = await tx.select().from(routeStops).where(and(
+      eq(routeStops.id, entitledStop.id),
+      eq(routeStops.organizationId, principal.organizationId),
+    )).for("update").limit(1);
+    if (!stop) throw errors.notFound("stop");
     if (stop.state !== "arrived") throw errors.transition(stop.state, "attempt");
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, stop.orderId), eq(orders.organizationId, principal.organizationId),

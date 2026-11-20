@@ -2,6 +2,7 @@ import { pgTable, uuid, text, integer, timestamp, jsonb, uniqueIndex, index } fr
 import { organizations, users } from "./01-identity.js";
 import { orders } from "./04-orders.js";
 import { containers, garments } from "./06-items.js";
+import { courierShifts } from "./09-routes.js";
 import { scanSyncState, evidenceState, disputeState } from "./enums.js";
 
 export const scanEvents = pgTable("scan_events", {
@@ -17,7 +18,7 @@ export const scanEvents = pgTable("scan_events", {
   receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   payloadHash: text("payload_hash").notNull(),
   syncStatus: scanSyncState("sync_status").notNull().default("pending"),
-  shiftId: uuid("shift_id"),
+  shiftId: uuid("shift_id").references(() => courierShifts.id),
 }, t => [
   uniqueIndex("scan_events_device_client_unique").on(t.deviceId, t.clientEventId),
   index("scan_events_actor_idx").on(t.organizationId, t.actorId, t.capturedAt),

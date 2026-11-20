@@ -4,7 +4,7 @@ import {
   auditEvents, memberships, membershipRoles, partners, sessions, users,
 } from "../db/schema.js";
 import { assertRole, type Principal, type Role } from "../core/context.js";
-import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern } from "../core/cursor.js";
+import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 
@@ -55,7 +55,7 @@ export async function listMembersPage(
   const pageWhere = and(
     baseWhere,
     decoded
-      ? sql`(${memberships.createdAt}, ${memberships.id}) < (${decoded.ts}, ${decoded.id})`
+      ? sql`(${memberships.createdAt}, ${memberships.id}) < (${decoded.ts}::timestamptz, ${decoded.id})`
       : undefined,
   );
 
@@ -74,6 +74,7 @@ export async function listMembersPage(
       partnerId: memberships.partnerId,
       partnerName: partners.name,
       createdAt: memberships.createdAt,
+      cursorTs: pgCursorTimestampSql(memberships.createdAt),
     }).from(memberships)
       .innerJoin(users, eq(users.id, memberships.userId))
       .leftJoin(partners, eq(partners.id, memberships.partnerId))
@@ -97,9 +98,9 @@ export async function listMembersPage(
     byMembership.set(row.membershipId, [...(byMembership.get(row.membershipId) ?? []), row.role]);
   }
   const last = pageRows[pageRows.length - 1];
-  const nextCursor = hasMore && last ? encodeKeysetCursor(last.createdAt, last.membershipId) : null;
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.cursorTs, last.membershipId) : null;
   return {
-    items: pageRows.map(row => ({ ...row, roles: byMembership.get(row.membershipId) ?? [] })),
+    items: pageRows.map(({ cursorTs: _cursorTs, ...row }) => ({ ...row, roles: byMembership.get(row.membershipId) ?? [] })),
     totalCount: countRow?.count ?? 0,
     hasMore,
     nextCursor,
