@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Banknote,
@@ -99,6 +99,8 @@ type QuoteDto = {
   totalKopeks: number;
   expiresAt: string;
   tariffVersionId: string;
+  addressId?: string;
+  termsVersion?: string;
   lines: QuoteLineDto[];
   replayed?: boolean;
 };
@@ -453,6 +455,7 @@ function NewOrderTab({
     return fromAddresses;
   }, [demo?.buildings, addresses]);
   const [buildingId, setBuildingId] = useState<string>(demo?.buildings?.[0]?.id ?? "");
+  const [addressId, setAddressId] = useState<string>("");
 
   const [pickupWindows, setPickupWindows] = useState<WindowDto[]>([]);
   const [deliveryWindows, setDeliveryWindows] = useState<WindowDto[]>([]);
@@ -467,6 +470,8 @@ function NewOrderTab({
   const [declared, setDeclared] = useState<PickedGarment[]>([]);
 
   const [quote, setQuote] = useState<QuoteDto | null>(null);
+  const [quoteFingerprint, setQuoteFingerprint] = useState<string | null>(null);
+  const quoteReqRef = useRef(0);
   const [pickupHold, setPickupHold] = useState<HoldDto | null>(null);
   const [deliveryHold, setDeliveryHold] = useState<HoldDto | null>(null);
   const [order, setOrder] = useState<OrderDetailDto | null>(null);
@@ -482,7 +487,25 @@ function NewOrderTab({
   );
   const unit: "piece" | "gram" = selectedService?.unit === "gram" ? "gram" : "piece";
   const building = useMemo(() => buildings.find((item) => item.id === buildingId) ?? null, [buildings, buildingId]);
-  const hasAddressInBuilding = addresses.some((address) => address.buildingId === buildingId);
+  const buildingAddresses = useMemo(
+    () => addresses.filter((address) => address.buildingId === buildingId),
+    [addresses, buildingId],
+  );
+  const hasAddressInBuilding = buildingAddresses.length > 0;
+  const formFingerprint = useMemo(
+    () => JSON.stringify({
+      buildingId,
+      addressId,
+      pickupWindowId,
+      deliveryWindowId,
+      serviceId,
+      tier,
+      quantity,
+      declared: tier === "protected" ? declared.map((d) => [d.subtypeId, d.quantity]) : [],
+    }),
+    [buildingId, addressId, pickupWindowId, deliveryWindowId, serviceId, tier, quantity, declared],
+  );
+  const quoteStale = Boolean(quote && quoteFingerprint !== formFingerprint);
   const quoteExpired = quote ? new Date(quote.expiresAt).getTime() <= now : false;
   const holdExpired = [pickupHold, deliveryHold].some((hold) => hold && new Date(hold.expiresAt).getTime() <= now);
   const invoice = finance?.invoice ?? null;
@@ -529,6 +552,16 @@ function NewOrderTab({
     const match = addresses.find((address) => buildings.some((item) => item.id === address.buildingId));
     if (match && match.buildingId !== buildingId) setBuildingId(match.buildingId);
   }, [addresses, buildings, buildingId, hasAddressInBuilding]);
+
+  useEffect(() => {
+    if (buildingAddresses.length === 0) {
+      if (addressId !== "") setAddressId("");
+      return;
+    }
+    if (!buildingAddresses.some((address) => address.id === addressId)) {
+      setAddressId(buildingAddresses[0].id);
+    }
+  }, [buildingAddresses, addressId]);
 
   const loadWindows = useCallback(async (targetBuildingId: string) => {
     if (!targetBuildingId) {
@@ -601,6 +634,8 @@ function NewOrderTab({
       notify({ kind: "error", text: "Выберите дом, окна забора и доставки и услугу" });
       return;
     }
+    const reqId = ++quoteReqRef.current;
+    const requestFingerprint = formFingerprint;
     setBusy("quote");
     notify(null);
     try {
@@ -608,6 +643,7 @@ function NewOrderTab({
         method: "POST",
         body: {
           buildingId,
+          ...(addressId ? { addressId } : {}),
           ...(demo?.tariffVersionId ? { tariffVersionId: demo.tariffVersionId } : {}),
           pickupWindowId,
           deliveryWindowId,
@@ -619,16 +655,21 @@ function NewOrderTab({
             : {}),
         },
       });
+      if (quoteReqRef.current !== reqId) return;
       setQuote(created);
+      setQuoteFingerprint(requestFingerprint);
       setPickupHold(null);
       setDeliveryHold(null);
       setOrder(null);
       setFinance(null);
       notify({ kind: "ok", text: `Расчёт готов: ${money(created.totalKopeks)} · действует до ${dt(created.expiresAt)}` });
     } catch (err) {
+      if (quoteReqRef.current !== reqId) return;
       notify({ kind: "error", text: errorText(err) });
     } finally {
-      setBusy(null);
+      if (quoteReqRef.current === reqId) {
+        setBusy(null);
+      }
     }
   };
 
@@ -653,7 +694,9 @@ function NewOrderTab({
         icon: subtype?.icon ?? "tshirt",
       };
     }));
+    quoteReqRef.current += 1;
     setQuote(null);
+    setQuoteFingerprint(null);
     setRepeatPending(true);
   }, [repeat]);
 
@@ -662,13 +705,18 @@ function NewOrderTab({
   useEffect(() => {
     if (!repeatPending || !repeat) return;
     if (!buildingId || !pickupWindowId || !deliveryWindowId || !serviceId) return;
+    if (buildingAddresses.length > 0 && !buildingAddresses.some((address) => address.id === addressId)) return;
     setRepeatPending(false);
     void handleQuote();
-  }, [repeatPending, repeat, buildingId, pickupWindowId, deliveryWindowId, serviceId]);
+  }, [repeatPending, repeat, buildingId, buildingAddresses, addressId, pickupWindowId, deliveryWindowId, serviceId]);
 
   const handleHold = async () => {
     if (!quote) {
       notify({ kind: "error", text: "Сначала запросите расчёт стоимости" });
+      return;
+    }
+    if (quoteStale) {
+      notify({ kind: "error", text: "Параметры заказа изменились — нажмите «Рассчитать стоимость» заново, чтобы обновить расчёт." });
       return;
     }
     if (!pickupWindowId || !deliveryWindowId) {
@@ -703,6 +751,10 @@ function NewOrderTab({
       notify({ kind: "error", text: "Нужны расчёт стоимости и забронированные слоты" });
       return;
     }
+    if (quoteStale) {
+      notify({ kind: "error", text: "Параметры заказа изменились — нажмите «Рассчитать стоимость» заново, чтобы обновить расчёт." });
+      return;
+    }
     if (quoteExpired) {
       notify({ kind: "error", text: "Срок действия расчёта истёк — запросите новый расчёт" });
       return;
@@ -719,7 +771,7 @@ function NewOrderTab({
         body: {
           quoteId: quote.id,
           acceptedQuoteHash: quote.quoteHash,
-          termsVersion: demo?.termsVersion ?? "v1",
+          termsVersion: quote.termsVersion ?? demo?.termsVersion ?? "v1",
         },
       });
       // The order exists from this moment on: keep it on screen even if attaching slots fails.
@@ -825,6 +877,24 @@ function NewOrderTab({
               ))}
             </select>
           </div>
+
+          {buildingAddresses.length > 0 && (
+            <div className="field">
+              <label htmlFor={`${uid}-address`}>Квартира / адрес</label>
+              <select
+                id={`${uid}-address`}
+                value={addressId}
+                onChange={(event) => setAddressId(event.target.value)}
+              >
+                {buildingAddresses.map((address) => (
+                  <option key={address.id} value={address.id}>
+                    {address.apartment ? `кв. ${address.apartment}` : address.buildingAddress}
+                    {address.notes ? ` · ${address.notes}` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="field">
             <label htmlFor={`${uid}-service`}>Услуга</label>
@@ -947,6 +1017,13 @@ function NewOrderTab({
           </div>
         )}
 
+        {quoteStale && (
+          <div className="alert-banner" role="status">
+            <AlertCircle size={16} aria-hidden="true" />
+            <span>Параметры заказа изменились — нажмите «Рассчитать стоимость» заново, чтобы обновить расчёт.</span>
+          </div>
+        )}
+
         <div className="button-row">
           <Button
             variant="primary"
@@ -958,7 +1035,7 @@ function NewOrderTab({
           </Button>
           <Button
             variant="secondary"
-            disabled={isBusy || !quote}
+            disabled={isBusy || !quote || quoteStale}
             leadingIcon={<Calendar size={16} aria-hidden="true" />}
             onClick={() => void handleHold()}
           >
@@ -966,7 +1043,7 @@ function NewOrderTab({
           </Button>
           <Button
             variant="primary"
-            disabled={isBusy || !quote || !pickupHold || !deliveryHold}
+            disabled={isBusy || !quote || quoteStale || !pickupHold || !deliveryHold}
             leadingIcon={<Check size={16} aria-hidden="true" />}
             onClick={() => void handleBook()}
           >

@@ -19,6 +19,7 @@ export type CreateQuoteInput = {
   organizationId?: string;
   customerId?: string;
   buildingId: string;
+  addressId?: string;
   tariffVersionId?: string;
   lines: QuoteLineInput[];
   pickupWindowId: string;
@@ -62,12 +63,23 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
     requestHash,
   }, async tx => {
     await resolveAddress(tx as Db, principal, input.buildingId);
-    const [address] = await tx.select({ id: customerAddresses.id }).from(customerAddresses).where(and(
-      eq(customerAddresses.organizationId, principal.organizationId),
-      eq(customerAddresses.customerId, customerId),
-      eq(customerAddresses.buildingId, input.buildingId),
-    )).limit(1);
-    if (!address) throw new AppError("VALIDATION_ERROR", "CUSTOMER_ADDRESS_REQUIRED");
+    let address: { id: string } | undefined;
+    if (input.addressId) {
+      [address] = await tx.select({ id: customerAddresses.id }).from(customerAddresses).where(and(
+        eq(customerAddresses.id, input.addressId),
+        eq(customerAddresses.organizationId, principal.organizationId),
+        eq(customerAddresses.customerId, customerId),
+        eq(customerAddresses.buildingId, input.buildingId),
+      )).limit(1);
+      if (!address) throw errors.notFound("address");
+    } else {
+      [address] = await tx.select({ id: customerAddresses.id }).from(customerAddresses).where(and(
+        eq(customerAddresses.organizationId, principal.organizationId),
+        eq(customerAddresses.customerId, customerId),
+        eq(customerAddresses.buildingId, input.buildingId),
+      )).limit(1);
+      if (!address) throw new AppError("VALIDATION_ERROR", "CUSTOMER_ADDRESS_REQUIRED");
+    }
     const tariff = await activeTariff(tx as Db, principal, input.tariffVersionId, now);
     const [pickupWindow] = await tx.select().from(serviceWindows).where(and(
       eq(serviceWindows.id, input.pickupWindowId),
@@ -166,7 +178,9 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       id: quote.id,
       organizationId: quote.organizationId,
       customerId: quote.customerId,
+      addressId: address.id,
       tariffVersionId: tariff.id,
+      termsVersion: tariff.termsVersion,
       expiresAt: quote.expiresAt.toISOString(),
       quoteHash: quote.quoteHash,
       totalKopeks: quote.totalKopeks,
@@ -186,7 +200,12 @@ export async function getQuote(db: Db, principal: Principal, quoteId: string) {
   )).limit(1);
   if (!quote) throw errors.notFound("quote");
   if (hasRole(principal, "customer") && quote.customerId !== principal.userId) throw errors.notFound("quote");
-  return quote;
+  const snapshot = (quote.snapshotJson ?? {}) as { addressId?: string; termsVersion?: string };
+  return {
+    ...quote,
+    addressId: snapshot.addressId ?? null,
+    termsVersion: snapshot.termsVersion ?? null,
+  };
 }
 
 export async function assertAcceptableQuote(
