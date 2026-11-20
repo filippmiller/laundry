@@ -407,6 +407,34 @@ async function scanRejection(
   return sealStop ? undefined : "SEAL_NOT_ASSIGNED";
 }
 
+function rejectedRetryMismatchReason(
+  existing: typeof scanEvents.$inferSelect,
+  principal: Principal,
+  event: ScanEventInput,
+): string | undefined {
+  if (existing.organizationId !== principal.organizationId || existing.actorId !== principal.userId) {
+    return "DEVICE_NOT_OWNED";
+  }
+  const eventCapturedMs = new Date(event.capturedAt).getTime();
+  const capturedAtMatches = !Number.isNaN(eventCapturedMs)
+    && existing.capturedAt.toISOString() === new Date(eventCapturedMs).toISOString();
+  const storedContext = existing.contextJson && typeof existing.contextJson === "object" && !Array.isArray(existing.contextJson)
+    ? (existing.contextJson as Record<string, unknown>)
+    : null;
+  if (
+    existing.payloadHash !== event.payloadHash
+    || canonicalScanHash(event) !== event.payloadHash
+    || existing.scannedType !== event.scannedType
+    || existing.scannedId !== event.scannedId
+    || !capturedAtMatches
+    || !storedContext
+    || canonicalScanHash({ ...event, context: storedContext }) !== event.payloadHash
+  ) {
+    return "HASH_MISMATCH";
+  }
+  return undefined;
+}
+
 export async function syncScanEvents(db: Db, principal: Principal, events: ScanEventInput[]) {
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   const accepted: string[] = [];
@@ -420,12 +448,9 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
     if (existing) {
       if (existing.syncStatus === "rejected") {
         // Re-evaluate previously rejected scans (e.g., courier opened shift or registered device since then).
-        // Verify payloadHash matches the original rejected event so a client cannot tamper with fields.
-        const reason = existing.organizationId !== principal.organizationId || existing.actorId !== principal.userId
-          ? "DEVICE_NOT_OWNED"
-          : existing.payloadHash !== event.payloadHash
-            ? "HASH_MISMATCH"
-            : await scanRejection(db, principal, event);
+        // Verify payloadHash and all stored canonical fields match so an inconsistent row can never be promoted.
+        const reason = rejectedRetryMismatchReason(existing, principal, event)
+          ?? await scanRejection(db, principal, event);
         if (reason) {
           rejected.push({ clientEventId: event.clientEventId, reason });
         } else {

@@ -62,7 +62,7 @@ type Discrepancy = {
   publicNumber: string;
   orderState: string;
   kind: string;
-  detailsJson: string;
+  detailsJson: unknown;
   openedAt: string;
 };
 type Metric = {
@@ -142,19 +142,50 @@ const SHIFT_COLUMNS: DataTableColumn<Shift>[] = [
   },
 ];
 
-function formatDiscrepancyDetails(detailsJson: string): string {
-  if (!detailsJson) return "—";
-  try {
-    const parsed = JSON.parse(detailsJson) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const entries = Object.entries(parsed as Record<string, unknown>);
-      if (entries.length === 0) return "—";
-      return entries.map(([k, v]) => `${k}: ${String(v)}`).join(", ");
-    }
-    return String(parsed);
-  } catch {
-    return detailsJson;
+function formatDetailValue(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "string") return value || "—";
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
   }
+  try {
+    return JSON.stringify(value) ?? "—";
+  } catch {
+    return String(value);
+  }
+}
+
+function formatDiscrepancyDetails(details: unknown): string {
+  if (details === null || details === undefined) return "—";
+  if (typeof details === "string") {
+    const trimmed = details.trim();
+    if (!trimmed) return "—";
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed !== null && typeof parsed === "object") {
+          return formatDiscrepancyDetails(parsed);
+        }
+        return formatDetailValue(parsed);
+      } catch {
+        return details;
+      }
+    }
+    return details;
+  }
+  if (typeof details === "number" || typeof details === "boolean" || typeof details === "bigint") {
+    return String(details);
+  }
+  if (Array.isArray(details)) {
+    if (details.length === 0) return "—";
+    return details.map(item => formatDetailValue(item)).join(", ");
+  }
+  if (typeof details === "object") {
+    const entries = Object.entries(details as Record<string, unknown>);
+    if (entries.length === 0) return "—";
+    return entries.map(([k, v]) => `${k}: ${formatDetailValue(v)}`).join(", ");
+  }
+  return String(details);
 }
 
 const DISCREPANCY_COLUMNS: DataTableColumn<Discrepancy>[] = [
