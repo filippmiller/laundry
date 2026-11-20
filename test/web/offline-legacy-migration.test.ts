@@ -7,6 +7,7 @@ import {
   inspectLegacyQueue,
   localDeviceId,
   migrateLegacyQueueForActor,
+  peekLocalDeviceId,
   queuedScans,
   readLegacyMigrationMarker,
   scanHash,
@@ -161,16 +162,67 @@ describe("W3-CD-01 / N-CD-03: legacy courier IndexedDB migration & per-actor nam
     expect(migratedA.find(s => s.clientEventId === scan1.clientEventId)).toEqual(scan1);
     expect(migratedA.find(s => s.clientEventId === scan2.clientEventId)).toEqual(scan2);
 
-    // Legacy queue is now empty and migration marker is completed.
+    // Legacy queue is now empty, LEGACY_DEVICE_KEY is cleaned up, and migration marker is completed.
     expect((await inspectLegacyQueue()).scans).toHaveLength(0);
+    expect(localStorage.getItem(LEGACY_DEVICE_KEY)).toBeNull();
     expect(readLegacyMigrationMarker()?.status).toBe("completed");
 
-    // Re-running migration for A is a safe no-op (migrated strictly once).
+    // Re-running migration for A (or another login) is a safe no-op and does NOT invoke verifyDeviceOwner.
+    let staleChecks = 0;
     const resA2 = await migrateLegacyQueueForActor(scopeA, {
+      verifyDeviceOwner: async () => {
+        staleChecks += 1;
+        return true;
+      },
+    });
+    expect(resA2.status).toBe("already_completed");
+    expect(resA2.migratedCount).toBe(0);
+    expect(staleChecks).toBe(0);
+    expect(await queuedScans(scopeA)).toHaveLength(2);
+  });
+
+  it("defers scoped UUID generation via peekLocalDeviceId so verified legacy device is adopted, then removes LEGACY_DEVICE_KEY", async () => {
+    const scopeA = "org-1:courier-A";
+    const scopeC = "org-1:courier-C";
+    const legacyDeviceA = "44444444-4444-4444-8444-444444444444";
+    localStorage.setItem(LEGACY_DEVICE_KEY, legacyDeviceA);
+
+    // Before migration, peekLocalDeviceId does NOT eagerly persist a fresh scoped UUID.
+    expect(peekLocalDeviceId(scopeA)).toBeNull();
+    expect(localStorage.getItem(`${LEGACY_DEVICE_KEY}.${scopeA}`)).toBeNull();
+
+    // Migration adopts legacyDeviceA directly into scopeA and removes LEGACY_DEVICE_KEY.
+    const resA = await migrateLegacyQueueForActor(scopeA, {
       verifyDeviceOwner: async devId => devId === legacyDeviceA,
     });
-    expect(resA2.migratedCount).toBe(0);
-    expect(await queuedScans(scopeA)).toHaveLength(2);
+    expect(resA).toMatchObject({
+      status: "migrated",
+      migratedCount: 0,
+      unverifiedCount: 0,
+      remainingLegacyCount: 0,
+      adoptedDeviceId: legacyDeviceA,
+    });
+    expect(peekLocalDeviceId(scopeA)).toBe(legacyDeviceA);
+    expect(localDeviceId(scopeA)).toBe(legacyDeviceA);
+    expect(localStorage.getItem(LEGACY_DEVICE_KEY)).toBeNull();
+    expect(readLegacyMigrationMarker()?.status).toBe("completed");
+
+    // Future login by another courier C does not trigger any stale device ownership check
+    // and generates its own fresh scoped device ID after migration finishes.
+    let verifyCallsForC = 0;
+    const resC = await migrateLegacyQueueForActor(scopeC, {
+      verifyDeviceOwner: async () => {
+        verifyCallsForC += 1;
+        return false;
+      },
+    });
+    expect(resC.status).toBe("already_completed");
+    expect(resC.adoptedDeviceId).toBeNull();
+    expect(verifyCallsForC).toBe(0);
+    expect(peekLocalDeviceId(scopeC)).toBeNull();
+    const freshC = localDeviceId(scopeC);
+    expect(freshC).not.toBe(legacyDeviceA);
+    expect(peekLocalDeviceId(scopeC)).toBe(freshC);
   });
 
   it("recovers cleanly from an interrupted migration with zero lost rows and zero duplicates", async () => {

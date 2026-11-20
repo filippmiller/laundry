@@ -123,6 +123,8 @@ type OrderListItemDto = {
   state: string;
   version: number;
   customerId: string;
+  addressId?: string | null;
+  buildingId?: string | null;
   assignedPartnerId: string | null;
   createdAt: string;
 };
@@ -133,6 +135,8 @@ type OrderDetailDto = {
   lifecycleState: string;
   version: number;
   customerId: string;
+  addressId?: string | null;
+  buildingId?: string | null;
   assignedPartnerId: string | null;
   termsVersion: string;
   returnReason: string | null;
@@ -487,10 +491,12 @@ function NewOrderTab({
 
   const [pickupWindows, setPickupWindows] = useState<WindowDto[]>([]);
   const [deliveryWindows, setDeliveryWindows] = useState<WindowDto[]>([]);
+  const [windowsBuildingId, setWindowsBuildingId] = useState<string>("");
   const [windowsLoading, setWindowsLoading] = useState(false);
   const [windowsError, setWindowsError] = useState<string | null>(null);
   const [pickupWindowId, setPickupWindowId] = useState("");
   const [deliveryWindowId, setDeliveryWindowId] = useState("");
+  const windowsReqRef = useRef(0);
 
   const [serviceId, setServiceId] = useState<string>(demo?.services?.[0]?.id ?? "");
   const [tier, setTier] = useState<"economy" | "protected">("economy");
@@ -613,28 +619,38 @@ function NewOrderTab({
   }, [addresses.length, buildingAddresses, addressId, repeatAddressRequired]);
 
   const loadWindows = useCallback(async (targetBuildingId: string) => {
+    const reqId = ++windowsReqRef.current;
     if (!targetBuildingId) {
       setPickupWindows([]);
       setDeliveryWindows([]);
+      setWindowsBuildingId("");
+      setWindowsLoading(false);
       return;
     }
     setWindowsLoading(true);
     setWindowsError(null);
+    setWindowsBuildingId((prev) => (prev === targetBuildingId ? prev : ""));
     try {
       const [pickup, delivery] = await Promise.all([
         api<WindowDto[]>(`/windows?buildingId=${encodeURIComponent(targetBuildingId)}&kind=pickup`),
         api<WindowDto[]>(`/windows?buildingId=${encodeURIComponent(targetBuildingId)}&kind=delivery`),
       ]);
+      if (windowsReqRef.current !== reqId) return;
       setPickupWindows(pickup);
       setDeliveryWindows(delivery);
       setPickupWindowId(pickup[0]?.id ?? "");
       setDeliveryWindowId(delivery[0]?.id ?? "");
+      setWindowsBuildingId(targetBuildingId);
     } catch (err) {
+      if (windowsReqRef.current !== reqId) return;
       setWindowsError(errorText(err));
       setPickupWindows([]);
       setDeliveryWindows([]);
+      setWindowsBuildingId("");
     } finally {
-      setWindowsLoading(false);
+      if (windowsReqRef.current === reqId) {
+        setWindowsLoading(false);
+      }
     }
   }, []);
 
@@ -774,12 +790,31 @@ function NewOrderTab({
   // remembered building and the exact repeated address are known — one tap, no re-typing of the order.
   useEffect(() => {
     if (!repeatPending || !repeat || repeatAddressRequired) return;
-    if (!buildingId || !pickupWindowId || !deliveryWindowId || !serviceId) return;
+    if (windowsLoading) return;
+    if (repeat.buildingId && buildingId !== repeat.buildingId) return;
+    if (!buildingId || windowsBuildingId !== buildingId) return;
+    if (!pickupWindowId || !deliveryWindowId || !serviceId) return;
+    if (!openPickupWindows.some((w) => w.id === pickupWindowId && w.buildingId === buildingId)) return;
+    if (!openDeliveryWindows.some((w) => w.id === deliveryWindowId && w.buildingId === buildingId)) return;
     if (repeat.addressId && addressId !== repeat.addressId) return;
     if (buildingAddresses.length > 0 && !buildingAddresses.some((address) => address.id === addressId)) return;
     setRepeatPending(false);
     void handleQuote();
-  }, [repeatPending, repeat, repeatAddressRequired, buildingId, buildingAddresses, addressId, pickupWindowId, deliveryWindowId, serviceId]);
+  }, [
+    repeatPending,
+    repeat,
+    repeatAddressRequired,
+    windowsLoading,
+    windowsBuildingId,
+    buildingId,
+    buildingAddresses,
+    addressId,
+    pickupWindowId,
+    deliveryWindowId,
+    openPickupWindows,
+    openDeliveryWindows,
+    serviceId,
+  ]);
 
   const handleHold = async () => {
     if (!quote) {
@@ -1427,7 +1462,10 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
     void loadAddresses();
   }, [loadOrders, loadClaims, loadAddresses]);
 
+  const detailReqRef = useRef(0);
+
   const loadDetail = useCallback(async (orderId: string) => {
+    const reqId = ++detailReqRef.current;
     setDetailError(null);
     try {
       const [orderDetail, orderFinance, events] = await Promise.all([
@@ -1435,10 +1473,12 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
         api<FinanceDto>(`/orders/${orderId}/finance`).catch(() => null),
         api<TimelineEventDto[]>(`/orders/${orderId}/timeline`).catch(() => [] as TimelineEventDto[]),
       ]);
+      if (detailReqRef.current !== reqId) return;
       setDetail(orderDetail);
       setFinance(orderFinance);
       setTimeline(events);
     } catch (err) {
+      if (detailReqRef.current !== reqId) return;
       setDetail(null);
       setFinance(null);
       setTimeline([]);
@@ -1447,10 +1487,12 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   }, []);
 
   useEffect(() => {
+    detailReqRef.current += 1;
+    setDetail(null);
+    setFinance(null);
+    setTimeline([]);
+    setDetailError(null);
     if (!selectedId) {
-      setDetail(null);
-      setFinance(null);
-      setTimeline([]);
       return;
     }
     void loadDetail(selectedId);
@@ -1541,13 +1583,27 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             ttlMinutes: HOLD_TTL_MINUTES,
           },
         });
-        await api(`/orders/${detail.id}/${isSchedule ? "schedule" : "reschedule"}`, {
-          method: "POST",
-          body: {
-            pickupReservationId: pair.pickup.reservationId,
-            deliveryReservationId: pair.delivery.reservationId,
-          },
-        });
+        try {
+          await api(`/orders/${detail.id}/${isSchedule ? "schedule" : "reschedule"}`, {
+            method: "POST",
+            body: {
+              pickupReservationId: pair.pickup.reservationId,
+              deliveryReservationId: pair.delivery.reservationId,
+            },
+          });
+        } catch (err) {
+          await Promise.allSettled([
+            api(`/slots/holds/${pair.pickup.reservationId}/release`, {
+              method: "POST",
+              body: { reason: "Reschedule failed; releasing held pickup slot" },
+            }),
+            api(`/slots/holds/${pair.delivery.reservationId}/release`, {
+              method: "POST",
+              body: { reason: "Reschedule failed; releasing held delivery slot" },
+            }),
+          ]);
+          throw err;
+        }
         setRescheduleOpen(false);
         await loadDetail(detail.id);
       },
@@ -1801,9 +1857,17 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 disabled={isBusy || !canBookSlots}
                 onClick={() => {
                   setRescheduleOpen(true);
-                  const fallbackBuilding = addresses[0]?.buildingId ?? demo?.buildings?.[0]?.id ?? "";
-                  setRescheduleBuildingId(fallbackBuilding);
-                  void loadRescheduleWindows(fallbackBuilding);
+                  const orderAddressBuilding = detail.addressId
+                    ? addresses.find((a) => a.id === detail.addressId)?.buildingId
+                    : undefined;
+                  const initialBuilding =
+                    detail.buildingId ??
+                    orderAddressBuilding ??
+                    addresses[0]?.buildingId ??
+                    demo?.buildings?.[0]?.id ??
+                    "";
+                  setRescheduleBuildingId(initialBuilding);
+                  void loadRescheduleWindows(initialBuilding);
                 }}
               >
                 <Calendar size={16} aria-hidden="true" />
@@ -2607,6 +2671,10 @@ function NotificationsTab({
 function SupportTab({ notify }: { notify: NotifyFn }) {
   const uid = useId();
   const [threads, setThreads] = useState<ThreadDto[] | null>(null);
+  const [threadsNextCursor, setThreadsNextCursor] = useState<string | null>(null);
+  const [threadsHasMore, setThreadsHasMore] = useState(false);
+  const [threadsTotalCount, setThreadsTotalCount] = useState<number | null>(null);
+  const [loadingMoreThreads, setLoadingMoreThreads] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [orders, setOrders] = useState<OrderListItemDto[]>([]);
@@ -2618,6 +2686,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [threadDetail, setThreadDetail] = useState<ThreadDetailDto | null>(null);
+  const threadReqRef = useRef(0);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -2628,18 +2697,74 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
     setReplyDrafts((prev) => ({ ...prev, [activeThreadId]: value }));
   };
 
+  const fetchThreadsPage = useCallback(async (cursor?: string | null) => {
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    const response = await fetch(`/api/v1/support/threads?${params.toString()}`, {
+      method: "GET",
+      credentials: "include",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new ApiError(
+        typeof payload?.error?.code === "string"
+          ? payload.error.code
+          : typeof payload?.error?.message === "string"
+            ? payload.error.message
+            : "REQUEST_FAILED",
+        response.status,
+        payload?.error?.details,
+        typeof payload?.error?.message === "string" ? payload.error.message : undefined,
+      );
+    }
+    const items: ThreadDto[] = Array.isArray(payload) ? (payload as ThreadDto[]) : [];
+    const rawTotal = response.headers.get("X-Total-Count");
+    const parsedTotal = rawTotal !== null ? Number(rawTotal) : NaN;
+    const totalCount = Number.isFinite(parsedTotal) && parsedTotal >= 0 ? parsedTotal : null;
+    const nextCursor = response.headers.get("X-Next-Cursor");
+    const hasMore = response.headers.get("X-Has-More") === "true" && Boolean(nextCursor);
+    return { items, totalCount, nextCursor, hasMore };
+  }, []);
+
   const loadThreads = useCallback(async () => {
     setLoading(true);
     try {
-      setThreads(await api<ThreadDto[]>("/support/threads"));
+      const page = await fetchThreadsPage(null);
+      setThreads(page.items);
+      setThreadsNextCursor(page.nextCursor);
+      setThreadsHasMore(page.hasMore);
+      setThreadsTotalCount(page.totalCount);
       setListError(null);
     } catch (err) {
       setThreads([]);
+      setThreadsNextCursor(null);
+      setThreadsHasMore(false);
+      setThreadsTotalCount(null);
       setListError(errorText(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchThreadsPage]);
+
+  const loadMoreThreads = useCallback(async () => {
+    if (!threadsNextCursor || loadingMoreThreads) return;
+    setLoadingMoreThreads(true);
+    try {
+      const page = await fetchThreadsPage(threadsNextCursor);
+      setThreads((prev) => {
+        const base = prev ?? [];
+        const seen = new Set(base.map((t) => t.id));
+        return [...base, ...page.items.filter((t) => !seen.has(t.id))];
+      });
+      setThreadsNextCursor(page.nextCursor);
+      setThreadsHasMore(page.hasMore);
+      if (page.totalCount !== null) setThreadsTotalCount(page.totalCount);
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setLoadingMoreThreads(false);
+    }
+  }, [fetchThreadsPage, loadingMoreThreads, notify, threadsNextCursor]);
 
   const loadReviews = useCallback(async () => {
     try {
@@ -2673,9 +2798,13 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
   };
 
   const loadThread = useCallback(async (threadId: string) => {
+    const reqId = ++threadReqRef.current;
     try {
-      setThreadDetail(await api<ThreadDetailDto>(`/support/threads/${threadId}`));
+      const res = await api<ThreadDetailDto>(`/support/threads/${threadId}`);
+      if (threadReqRef.current !== reqId) return;
+      setThreadDetail(res);
     } catch (err) {
+      if (threadReqRef.current !== reqId) return;
       setThreadDetail(null);
       notify({ kind: "error", text: errorText(err) });
     }
@@ -2708,8 +2837,9 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
   }, [activeThreadId, threadDetail?.earlierCursor, notify]);
 
   useEffect(() => {
+    threadReqRef.current += 1;
+    setThreadDetail(null);
     if (!activeThreadId) {
-      setThreadDetail(null);
       return;
     }
     void loadThread(activeThreadId);
@@ -2819,6 +2949,22 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
                 </Badge>
               </button>
             ))}
+          </div>
+        )}
+        {threads && threadsHasMore && threadsNextCursor && (
+          <div className="button-row" style={{ marginBlockStart: 10 }}>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={loadingMoreThreads || loading || isBusy}
+              onClick={() => void loadMoreThreads()}
+            >
+              {loadingMoreThreads
+                ? "Загрузка…"
+                : threadsTotalCount !== null
+                  ? `Загрузить ещё (${threads.length} из ${threadsTotalCount})`
+                  : "Загрузить ещё"}
+            </Button>
           </div>
         )}
       </section>

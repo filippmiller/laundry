@@ -51,6 +51,7 @@ import {
   enqueueScan,
   localDeviceId,
   migrateLegacyQueueForActor,
+  peekLocalDeviceId,
   queuedCount,
   queuedScans,
   removeScans,
@@ -459,13 +460,9 @@ export function CourierWorkspace({
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
 }) {
   const [actorScope, setActorScope] = useState<string | null>(null);
-  const [deviceNonce, setDeviceNonce] = useState(0);
+  const [deviceId, setDeviceId] = useState<string>("");
   const [unverifiedLegacyCount, setUnverifiedLegacyCount] = useState(0);
   const [recoveringLegacy, setRecoveringLegacy] = useState(false);
-  const deviceId = useMemo(
-    () => (actorScope ? localDeviceId(actorScope) : ""),
-    [actorScope, deviceNonce],
-  );
 
   // Network & simulated offline mode
   const [browserOnline, setBrowserOnline] = useState<boolean>(() =>
@@ -604,10 +601,20 @@ export function CourierWorkspace({
   // until the rightful owner signs in or explicitly confirms recovery.
   useEffect(() => {
     if (!actorScope) {
+      setDeviceId("");
       setUnverifiedLegacyCount(0);
       return;
     }
     let cancelled = false;
+    // Do NOT eagerly generate and persist a fresh scoped UUID before legacy migration finishes:
+    // if the actor already has a persisted scoped device ID we can surface it immediately,
+    // otherwise wait for `migrateLegacyQueueForActor` to adopt any verified legacy device ID first.
+    const existingScopedDeviceId = peekLocalDeviceId(actorScope);
+    if (existingScopedDeviceId) {
+      setDeviceId(existingScopedDeviceId);
+    } else {
+      setDeviceId("");
+    }
     const verifyDeviceOwner = async (candidateDeviceId: string): Promise<boolean> => {
       if (!isOnline) return false;
       try {
@@ -621,9 +628,7 @@ export function CourierWorkspace({
       .then(result => {
         if (cancelled) return;
         setUnverifiedLegacyCount(result.unverifiedCount);
-        if (result.adoptedDeviceId) {
-          setDeviceNonce(n => n + 1);
-        }
+        setDeviceId(result.adoptedDeviceId ?? localDeviceId(actorScope));
         if (result.migratedCount > 0) {
           void refreshQueue();
           notify({
@@ -632,7 +637,10 @@ export function CourierWorkspace({
           });
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (cancelled) return;
+        setDeviceId(localDeviceId(actorScope));
+      });
     return () => {
       cancelled = true;
     };
@@ -1101,6 +1109,12 @@ export function CourierWorkspace({
         let index = 0;
         for (const item of picked) {
           const meta = itemMeta[item.subtypeId] ?? { declaredValueRub: "5000", note: "" };
+          const trimmedDeclared = meta.declaredValueRub.trim();
+          const parsedDeclared = trimmedDeclared ? Number(trimmedDeclared.replace(",", ".")) : NaN;
+          const declaredValueKopeks =
+            trimmedDeclared && Number.isFinite(parsedDeclared) && parsedDeclared >= 0
+              ? Math.round(parsedDeclared * 100)
+              : undefined;
           for (let piece = 0; piece < item.quantity; piece += 1) {
             index += 1;
             const entry: Record<string, unknown> = {
@@ -1108,7 +1122,7 @@ export function CourierWorkspace({
               category: item.category,
               subtypeId: item.subtypeId,
               description: meta.note.trim() || item.label,
-              declaredValueKopeks: Math.max(0, Math.round((Number(meta.declaredValueRub) || 0) * 100)),
+              ...(declaredValueKopeks !== undefined ? { declaredValueKopeks } : {}),
             };
             if (intakeEvidenceIds.length > 0) {
               entry.evidenceAssetIds = intakeEvidenceIds;

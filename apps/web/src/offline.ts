@@ -93,6 +93,10 @@ export async function scanHash(scan: Omit<QueuedScan, "payloadHash">): Promise<s
   return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+export function peekLocalDeviceId(scope?: string): string | null {
+  return localStorage.getItem(deviceKey(scope))?.trim() || null;
+}
+
 export function localDeviceId(scope?: string): string {
   const key = deviceKey(scope);
   const existing = localStorage.getItem(key);
@@ -284,6 +288,7 @@ export async function migrateLegacyQueueForActor(
         migratedIds: [],
         updatedAt: new Date().toISOString(),
       });
+      localStorage.removeItem(LEGACY_DEVICE_KEY);
       return {
         status: "migrated",
         migratedCount: 0,
@@ -360,6 +365,9 @@ export async function migrateLegacyQueueForActor(
     migratedIds,
     updatedAt: new Date().toISOString(),
   });
+  if (finalStatus === "completed") {
+    localStorage.removeItem(LEGACY_DEVICE_KEY);
+  }
 
   return {
     status: remainingLegacy.length === 0 ? "migrated" : "partial",
