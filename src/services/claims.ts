@@ -116,6 +116,7 @@ export async function getClaim(db: Db, principal: Principal, claimId: string) {
   const items = await db.select().from(claimItems).where(eq(claimItems.claimId, claim.id));
   const decisions = await db.select().from(claimDecisions).where(eq(claimDecisions.claimId, claim.id));
   const holds = await db.select({
+    id: evidenceLegalHolds.id,
     assetId: evidenceLegalHolds.assetId,
     reason: evidenceLegalHolds.reason,
     createdAt: evidenceLegalHolds.createdAt,

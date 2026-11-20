@@ -28,7 +28,7 @@ async function loadThread(db: Db, principal: Principal, threadId: string) {
   }
   const support = isSupport(principal);
   if (!support && customerId !== principal.userId) throw errors.notFound("thread");
-  return { thread, support };
+  return { thread, support, customerId };
 }
 
 export async function openThread(
@@ -125,7 +125,7 @@ export async function listThreads(db: Db, principal: Principal, input: { limit?:
 
 export async function getThread(db: Db, principal: Principal, threadId: string) {
   assertRole(principal, "customer", ...SUPPORT_ROLES);
-  const { thread, support } = await loadThread(db, principal, threadId);
+  const { thread, support, customerId } = await loadThread(db, principal, threadId);
   const messages = await db.select({
     id: supportMessages.id,
     body: supportMessages.body,
@@ -142,6 +142,7 @@ export async function getThread(db: Db, principal: Principal, threadId: string) 
       body: message.body,
       createdAt: message.createdAt,
       isMine: message.authorId === principal.userId,
+      authorKind: (customerId && message.authorId === customerId ? "customer" : "support") as "customer" | "support",
     })),
     viewer: support ? "support" : "customer",
   };
