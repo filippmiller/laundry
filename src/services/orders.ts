@@ -4,7 +4,7 @@ import type { Db } from "../db/client.js";
 import {
   containerAssignments, containers, customerAddresses, customerInvoiceLines, customerInvoices, documentVersions, evidenceAssets,
   garmentEvidence, garments, intakeManifestLines, intakeManifests, orderAdjustments, orderLines,
-  orders, paymentIntents, quotes, refunds, routeStops, seals, serviceWindows, slotReservations,
+  orders, paymentIntents, quotes, refunds, seals, serviceWindows, slotReservations,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -13,6 +13,7 @@ import { hashRequest, withIdempotency, withIdempotencyFlat } from "../core/idemp
 import { nextState, type OrderState } from "../domain/order-state.js";
 import { confirmSlot, releaseSlot } from "../domain/slot-reservation.js";
 import { assertAcceptableQuote } from "./quotes.js";
+import { hasActiveCourierOrderEntitlement } from "./courier-entitlement.js";
 import { settlePendingRefundTx } from "./finance.js";
 import type { DeclaredItem } from "../../shared/garment-taxonomy.js";
 
@@ -116,6 +117,10 @@ export async function scheduleOrder(
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
     replayGuard: async tx => { await loadOrder(tx as Db, principal, input.orderId); },
   }, async tx => {
+    // Consistent lock order across order/slot flows: `orders` FOR UPDATE -> `slot_reservations`.
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const order = await loadOrder(tx as Db, principal, input.orderId);
     if (order.lifecycleState !== "confirmed") throw errors.transition(order.lifecycleState, "reserve_pickup");
     if (!input.pickupReservationId || !input.deliveryReservationId) {
@@ -412,6 +417,10 @@ export async function rescheduleOrder(
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
     replayGuard: async tx => { await loadOrder(tx as Db, principal, input.orderId); },
   }, async tx => {
+    // Consistent lock order across order/slot flows: `orders` FOR UPDATE -> `slot_reservations`.
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const order = await loadOrder(tx, principal, input.orderId);
     if (order.lifecycleState !== "scheduled") {
       throw new AppError("INVALID_TRANSITION", "ORDER_NOT_RESCHEDULABLE", { state: order.lifecycleState });
@@ -469,17 +478,12 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
         resourceId: order.id,
       });
     } else if (hasRole(principal, "courier")) {
-      const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
-        eq(routeStops.organizationId, principal.organizationId),
-        eq(routeStops.orderId, order.id),
-        eq(routeStops.assignedCourierId, principal.userId),
-        inArray(routeStops.state, ["pending", "en_route", "arrived"]),
-      )).limit(1);
+      const entitled = await hasActiveCourierOrderEntitlement(db, principal, order.id);
       authorize(principal, {
         resource: "order",
         action: "read",
         organizationId: order.organizationId,
-        allow: Boolean(stop),
+        allow: entitled,
         resourceId: order.id,
       });
     } else {

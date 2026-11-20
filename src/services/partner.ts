@@ -312,6 +312,16 @@ export async function receiveHandoff(
       actorId: principal.userId,
       requestHash: hashRequest({ ...input, actorId: principal.userId }),
     }, async tx => {
+      // Canonical lock order: route_stops (FOR UPDATE) -> orders (FOR UPDATE).
+      await tx.execute(sql`
+        SELECT id FROM route_stops
+        WHERE organization_id = ${principal.organizationId}
+          AND order_id = ${input.orderId}
+          AND kind = 'pickup'
+          AND state IN ('pending', 'en_route', 'arrived')
+        ORDER BY id
+        FOR UPDATE
+      `);
       await tx.execute(sql`
         SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
       `);
@@ -662,14 +672,19 @@ export async function startInspection(db: Db, principal: Principal, input: { ord
     organizationId: principal.organizationId, scope: "partner:inspection", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
     assertAssignedPartner(order, principal);
     const to = nextState(order.lifecycleState as "partner_received", "inspect", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [inspected] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ version: orders.version });
+    if (!inspected) throw errors.version(order.version);
     await appendEvent(tx, { principal, aggregateType: "order", aggregateId: order.id, eventType: "order.inspect" });
 
     // The partner's own scales may disagree with the quote. When they do, the customer
@@ -681,8 +696,10 @@ export async function startInspection(db: Db, principal: Principal, input: { ord
     }
 
     const awaiting = nextState("inspection", "propose_change", principal);
-    await tx.update(orders).set({ lifecycleState: awaiting, version: order.version + 2 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
+    const [awaitingRow] = await tx.update(orders).set({ lifecycleState: awaiting, version: order.version + 2 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)))
+      .returning({ version: orders.version });
+    if (!awaitingRow) throw errors.version(order.version + 1);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.propose_change",
       payload: { adjustmentId: proposal.adjustmentId, deltaKopeks: proposal.deltaKopeks, source: "weight_variance" },
@@ -701,6 +718,9 @@ export async function proposeAdjustment(
     organizationId: principal.organizationId, scope: "partner:adjustment", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
@@ -715,8 +735,10 @@ export async function proposeAdjustment(
       deltaKopeks: input.deltaKopeks,
     }).returning();
     const to = nextState("inspection", "propose_change", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ version: orders.version });
+    if (!advanced) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.propose_change",
       payload: { adjustmentId: adjustment.id, deltaKopeks: input.deltaKopeks },
@@ -1056,6 +1078,9 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
     organizationId: principal.organizationId, scope: "partner:batch", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
@@ -1091,8 +1116,10 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
     }
     const to = nextState(order.lifecycleState as "inspection" | "processing", "start_processing", principal);
     if (order.lifecycleState !== to) {
-      await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+      const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+        .returning({ version: orders.version });
+      if (!advanced) throw errors.version(order.version);
     }
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.start_processing",

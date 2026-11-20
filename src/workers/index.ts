@@ -3,6 +3,7 @@ import { organizations } from "../db/schema.js";
 import { createDb, requireDatabaseUrl, type Db } from "../db/client.js";
 import { expireDueHolds, reconcileCapacity } from "../domain/slot-reservation.js";
 import { ensureSystemPrincipal } from "../services/auth.js";
+import { processPendingRefunds } from "../services/finance.js";
 import { processPaymentInbox, requeueFailedPaymentEvents } from "../services/payment-inbox.js";
 import { processOutbox, requeueFailedOutboxEvents } from "../services/outbox.js";
 import { runEvidenceRetentionSweep } from "../services/workspace.js";
@@ -13,6 +14,7 @@ export async function runOnceWithDb(db: Db) {
     inboxProcessed: 0, inboxFailed: 0, inboxRequeued: 0,
     outboxProcessed: 0, outboxFailed: 0, outboxDeadLettered: 0, outboxRequeued: 0,
     evidenceExpired: 0,
+    refundsCompleted: 0, refundsErrored: 0,
   };
   const orgs = await db.select().from(organizations);
   summary.organizations = orgs.length;
@@ -20,6 +22,9 @@ export async function runOnceWithDb(db: Db) {
     const principal = await ensureSystemPrincipal(db, org.id);
     const swept = await expireDueHolds(db, { principal, limit: 200 });
     summary.expired += swept.expired;
+    const refunded = await processPendingRefunds(db, principal, { limit: 100 });
+    summary.refundsCompleted += refunded.completed;
+    summary.refundsErrored += refunded.errored;
     const mismatches = await reconcileCapacity(db, org.id);
     summary.mismatches += mismatches.length;
     const pending = await db.execute(sql`

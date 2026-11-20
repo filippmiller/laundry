@@ -2,7 +2,7 @@ import { and, desc, eq, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { orders, supportMessages, supportThreads } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
-import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern } from "../core/cursor.js";
+import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -130,7 +130,7 @@ export async function listThreadsPage(
   const pageWhere = and(
     baseWhere,
     decoded
-      ? sql`(${supportThreads.createdAt}, ${supportThreads.id}) < (${decoded.ts}, ${decoded.id})`
+      ? sql`(${supportThreads.createdAt}, ${supportThreads.id}) < (${decoded.ts}::timestamptz, ${decoded.id})`
       : undefined,
   );
 
@@ -159,6 +159,7 @@ export async function listThreadsPage(
         subject: supportThreads.subject,
         state: supportThreads.state,
         createdAt: supportThreads.createdAt,
+        cursorTs: pgCursorTimestampSql(supportThreads.createdAt),
       }).from(supportThreads)
         .leftJoin(orders, and(
           eq(orders.id, supportThreads.orderId),
@@ -174,6 +175,7 @@ export async function listThreadsPage(
         subject: supportThreads.subject,
         state: supportThreads.state,
         createdAt: supportThreads.createdAt,
+        cursorTs: pgCursorTimestampSql(supportThreads.createdAt),
       }).from(supportThreads)
         .innerJoin(orders, and(
           eq(orders.id, supportThreads.orderId),
@@ -185,11 +187,11 @@ export async function listThreadsPage(
   ]);
 
   const hasMore = rows.length > limit;
-  const items = hasMore ? rows.slice(0, limit) : rows;
-  const last = items[items.length - 1];
-  const nextCursor = hasMore && last ? encodeKeysetCursor(last.createdAt, last.id) : null;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.cursorTs, last.id) : null;
   return {
-    items,
+    items: pageRows.map(({ cursorTs: _cursorTs, ...row }) => row),
     totalCount: countRow?.count ?? 0,
     hasMore,
     nextCursor,
@@ -225,11 +227,12 @@ export async function getThread(
       body: supportMessages.body,
       createdAt: supportMessages.createdAt,
       authorId: supportMessages.authorId,
+      cursorTs: pgCursorTimestampSql(supportMessages.createdAt),
     }).from(supportMessages)
       .where(and(
         eq(supportMessages.threadId, thread.id),
         decoded
-          ? sql`(${supportMessages.createdAt}, ${supportMessages.id}) < (${decoded.ts}, ${decoded.id})`
+          ? sql`(${supportMessages.createdAt}, ${supportMessages.id}) < (${decoded.ts}::timestamptz, ${decoded.id})`
           : undefined,
       ))
       .orderBy(desc(supportMessages.createdAt), desc(supportMessages.id))
@@ -240,7 +243,7 @@ export async function getThread(
   const pageDesc = hasEarlier ? fetched.slice(0, limit) : fetched;
   const messages = pageDesc.reverse();
   const oldest = messages[0];
-  const earlierCursor = hasEarlier && oldest ? encodeKeysetCursor(oldest.createdAt, oldest.id) : null;
+  const earlierCursor = hasEarlier && oldest ? encodeKeysetCursor(oldest.cursorTs, oldest.id) : null;
 
   return {
     thread,

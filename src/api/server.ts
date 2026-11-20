@@ -175,7 +175,7 @@ export function buildApp(db: Db) {
   app.register(cors, {
     origin: process.env.WEB_ORIGIN ?? false,
     credentials: true,
-    exposedHeaders: ["X-Total-Unread"],
+    exposedHeaders: ["X-Total-Unread", "X-Next-Cursor", "X-Has-More", "X-Total-Count"],
   });
   const webDir = resolve(process.cwd(), "dist/web");
   if (existsSync(webDir)) {
@@ -700,7 +700,10 @@ export function buildApp(db: Db) {
       limit: z.coerce.number().int().min(1).max(100).optional(),
       cursor: z.string().min(1).max(256).optional(),
       query: z.string().max(120).optional(),
-      state: z.string().max(40).optional(),
+      state: z.enum([
+        "opened", "triage", "investigating", "decision_pending",
+        "resolved", "denied_with_reason", "escalated", "reopened",
+      ]).optional(),
     }),
     handler: async ctx => {
       const page = await listClaimsPage(db, ctx.principal, {

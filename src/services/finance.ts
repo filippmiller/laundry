@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, lt, notInArray, or, sql, sum } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, notInArray, or, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   claims, compensations, customerApprovals, customerInvoiceLines, customerInvoices, fiscalReceipts,
@@ -8,6 +8,7 @@ import {
   paymentIntents, quotes, refunds, services, users,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertCursorTimestamp, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -841,14 +842,13 @@ function encodeQueueCursor(cursor: QueueCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
 
-function decodeQueueCursor(raw: string): { createdAt: Date; id: string; priority?: 0 | 1 } {
+function decodeQueueCursor(raw: string): { createdAt: string; id: string; priority?: 0 | 1 } {
   try {
     const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<QueueCursor>;
     if (typeof parsed.createdAt !== "string" || typeof parsed.id !== "string" || !parsed.id) {
       throw new Error("INVALID_CURSOR");
     }
-    const createdAt = new Date(parsed.createdAt);
-    if (Number.isNaN(createdAt.getTime())) throw new Error("INVALID_CURSOR");
+    const createdAt = assertCursorTimestamp(parsed.createdAt);
     const priority = parsed.priority === 0 || parsed.priority === 1 ? parsed.priority : undefined;
     return { createdAt, id: parsed.id, priority };
   } catch {
@@ -882,21 +882,18 @@ export async function listPartnerPayouts(
       const priorityExpr = sql`CASE WHEN ${partnerPayouts.state} IN ('scheduled', 'pending') THEN 0 ELSE 1 END`;
       const p = parsedCursor.priority ?? 0;
       pageConditions.push(
-        sql`(${priorityExpr} > ${p} OR (${priorityExpr} = ${p} AND (${partnerPayouts.createdAt} < ${parsedCursor.createdAt} OR (${partnerPayouts.createdAt} = ${parsedCursor.createdAt} AND ${partnerPayouts.id} < ${parsedCursor.id}))))`,
+        sql`(${priorityExpr} > ${p} OR (${priorityExpr} = ${p} AND (${partnerPayouts.createdAt}, ${partnerPayouts.id}) < (${parsedCursor.createdAt}::timestamptz, ${parsedCursor.id})))`,
       );
     } else {
       pageConditions.push(
-        or(
-          lt(partnerPayouts.createdAt, parsedCursor.createdAt),
-          and(eq(partnerPayouts.createdAt, parsedCursor.createdAt), lt(partnerPayouts.id, parsedCursor.id)),
-        )!,
+        sql`(${partnerPayouts.createdAt}, ${partnerPayouts.id}) < (${parsedCursor.createdAt}::timestamptz, ${parsedCursor.id})`,
       );
     }
   }
 
   const [rows, [countRow]] = await Promise.all([
     bucket === "all"
-      ? db.select().from(partnerPayouts)
+      ? db.select({ row: partnerPayouts, cursorTs: pgCursorTimestampSql(partnerPayouts.createdAt) }).from(partnerPayouts)
         .where(and(...pageConditions))
         .orderBy(
           sql`CASE WHEN ${partnerPayouts.state} IN ('scheduled', 'pending') THEN 0 ELSE 1 END`,
@@ -904,7 +901,7 @@ export async function listPartnerPayouts(
           desc(partnerPayouts.id),
         )
         .limit(limit + 1)
-      : db.select().from(partnerPayouts)
+      : db.select({ row: partnerPayouts, cursorTs: pgCursorTimestampSql(partnerPayouts.createdAt) }).from(partnerPayouts)
         .where(and(...pageConditions))
         .orderBy(desc(partnerPayouts.createdAt), desc(partnerPayouts.id))
         .limit(limit + 1),
@@ -912,21 +909,21 @@ export async function listPartnerPayouts(
   ]);
 
   const hasMore = rows.length > limit;
-  const items = hasMore ? rows.slice(0, limit) : rows;
-  const last = items[items.length - 1];
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
   const nextCursor = hasMore && last
     ? encodeQueueCursor({
-      createdAt: last.createdAt.toISOString(),
-      id: last.id,
+      createdAt: last.cursorTs,
+      id: last.row.id,
       ...(bucket === "all"
-        ? { priority: ACTIVE_PAYOUT_STATES.includes(last.state as "scheduled" | "pending") ? 0 : 1 }
+        ? { priority: ACTIVE_PAYOUT_STATES.includes(last.row.state as "scheduled" | "pending") ? 0 : 1 }
         : {}),
     })
     : null;
 
   return {
     bucket,
-    items,
+    items: pageRows.map(entry => entry.row),
     nextCursor,
     hasMore,
     totalCount: Number(countRow?.count ?? 0),
@@ -956,21 +953,18 @@ export async function listPartnerCreditNotes(
       const priorityExpr = sql`CASE WHEN ${partnerCreditNotes.state} IN ('draft', 'pending') THEN 0 ELSE 1 END`;
       const p = parsedCursor.priority ?? 0;
       pageConditions.push(
-        sql`(${priorityExpr} > ${p} OR (${priorityExpr} = ${p} AND (${partnerCreditNotes.createdAt} < ${parsedCursor.createdAt} OR (${partnerCreditNotes.createdAt} = ${parsedCursor.createdAt} AND ${partnerCreditNotes.id} < ${parsedCursor.id}))))`,
+        sql`(${priorityExpr} > ${p} OR (${priorityExpr} = ${p} AND (${partnerCreditNotes.createdAt}, ${partnerCreditNotes.id}) < (${parsedCursor.createdAt}::timestamptz, ${parsedCursor.id})))`,
       );
     } else {
       pageConditions.push(
-        or(
-          lt(partnerCreditNotes.createdAt, parsedCursor.createdAt),
-          and(eq(partnerCreditNotes.createdAt, parsedCursor.createdAt), lt(partnerCreditNotes.id, parsedCursor.id)),
-        )!,
+        sql`(${partnerCreditNotes.createdAt}, ${partnerCreditNotes.id}) < (${parsedCursor.createdAt}::timestamptz, ${parsedCursor.id})`,
       );
     }
   }
 
   const [rows, [countRow]] = await Promise.all([
     bucket === "all"
-      ? db.select().from(partnerCreditNotes)
+      ? db.select({ row: partnerCreditNotes, cursorTs: pgCursorTimestampSql(partnerCreditNotes.createdAt) }).from(partnerCreditNotes)
         .where(and(...pageConditions))
         .orderBy(
           sql`CASE WHEN ${partnerCreditNotes.state} IN ('draft', 'pending') THEN 0 ELSE 1 END`,
@@ -978,7 +972,7 @@ export async function listPartnerCreditNotes(
           desc(partnerCreditNotes.id),
         )
         .limit(limit + 1)
-      : db.select().from(partnerCreditNotes)
+      : db.select({ row: partnerCreditNotes, cursorTs: pgCursorTimestampSql(partnerCreditNotes.createdAt) }).from(partnerCreditNotes)
         .where(and(...pageConditions))
         .orderBy(desc(partnerCreditNotes.createdAt), desc(partnerCreditNotes.id))
         .limit(limit + 1),
@@ -986,21 +980,21 @@ export async function listPartnerCreditNotes(
   ]);
 
   const hasMore = rows.length > limit;
-  const items = hasMore ? rows.slice(0, limit) : rows;
-  const last = items[items.length - 1];
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
   const nextCursor = hasMore && last
     ? encodeQueueCursor({
-      createdAt: last.createdAt.toISOString(),
-      id: last.id,
+      createdAt: last.cursorTs,
+      id: last.row.id,
       ...(bucket === "all"
-        ? { priority: ACTIVE_CREDIT_NOTE_STATES.includes(last.state as "draft" | "pending") ? 0 : 1 }
+        ? { priority: ACTIVE_CREDIT_NOTE_STATES.includes(last.row.state as "draft" | "pending") ? 0 : 1 }
         : {}),
     })
     : null;
 
   return {
     bucket,
-    items,
+    items: pageRows.map(entry => entry.row),
     nextCursor,
     hasMore,
     totalCount: Number(countRow?.count ?? 0),

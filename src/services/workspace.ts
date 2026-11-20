@@ -9,6 +9,7 @@ import {
   garmentEvidence, garments, notifications, orders, outboxEvents, reviews, sessions, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -446,46 +447,50 @@ export async function listEvidence(db: Db, principal: Principal, ownerType: stri
  */
 export async function listGarmentEvidence(db: Db, principal: Principal, garmentId: string) {
   assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
-  const [garment] = await db.select({
-    id: garments.id,
-    organizationId: garments.organizationId,
-    orderId: garments.orderId,
-  }).from(garments).where(and(
-    eq(garments.id, garmentId),
-    eq(garments.organizationId, principal.organizationId),
-  )).limit(1);
-  if (!garment) throw errors.notFound("garment");
-  const entitled = entitledToOrder(principal, await loadScopedOrder(db, principal, garment.orderId));
-  authorize(principal, {
-    resource: "evidence",
-    action: "list",
-    organizationId: garment.organizationId,
-    allow: entitled,
-    resourceId: garment.id,
+  return db.transaction(async tx => {
+    const [garment] = await tx.select({
+      id: garments.id,
+      organizationId: garments.organizationId,
+      orderId: garments.orderId,
+    }).from(garments).where(and(
+      eq(garments.id, garmentId),
+      eq(garments.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!garment) throw errors.notFound("garment");
+    const order = await loadScopedOrder(tx as Db, principal, garment.orderId);
+    const entitled = entitledToOrder(principal, order)
+      || (Boolean(order) && await hasActiveCourierOrderEntitlement(tx, principal, garment.orderId, { lockShift: true }));
+    authorize(principal, {
+      resource: "evidence",
+      action: "list",
+      organizationId: garment.organizationId,
+      allow: entitled,
+      resourceId: garment.id,
+    });
+    const rows = await tx.select({
+      id: evidenceAssets.id,
+      sha256: evidenceAssets.sha256,
+      purpose: evidenceAssets.purpose,
+      mimeType: evidenceAssets.mimeType,
+      sizeBytes: evidenceAssets.sizeBytes,
+      status: evidenceAssets.status,
+      createdAt: evidenceAssets.capturedAt,
+    }).from(garmentEvidence)
+      .innerJoin(evidenceAssets, eq(evidenceAssets.id, garmentEvidence.evidenceAssetId))
+      .where(and(
+        eq(garmentEvidence.organizationId, principal.organizationId),
+        eq(garmentEvidence.garmentId, garment.id),
+        isNull(evidenceAssets.deletedAt),
+        ne(evidenceAssets.status, "expired"),
+      ))
+      .orderBy(desc(evidenceAssets.capturedAt));
+    if (rows.length) {
+      await tx.insert(evidenceAccessEvents).values(
+        rows.map(row => ({ assetId: row.id, actorId: principal.userId, purpose: "garment_listing" })),
+      );
+    }
+    return rows;
   });
-  const rows = await db.select({
-    id: evidenceAssets.id,
-    sha256: evidenceAssets.sha256,
-    purpose: evidenceAssets.purpose,
-    mimeType: evidenceAssets.mimeType,
-    sizeBytes: evidenceAssets.sizeBytes,
-    status: evidenceAssets.status,
-    createdAt: evidenceAssets.capturedAt,
-  }).from(garmentEvidence)
-    .innerJoin(evidenceAssets, eq(evidenceAssets.id, garmentEvidence.evidenceAssetId))
-    .where(and(
-      eq(garmentEvidence.organizationId, principal.organizationId),
-      eq(garmentEvidence.garmentId, garment.id),
-      isNull(evidenceAssets.deletedAt),
-      ne(evidenceAssets.status, "expired"),
-    ))
-    .orderBy(desc(evidenceAssets.capturedAt));
-  if (rows.length) {
-    await db.insert(evidenceAccessEvents).values(
-      rows.map(row => ({ assetId: row.id, actorId: principal.userId, purpose: "garment_listing" })),
-    );
-  }
-  return rows;
 }
 
 /**
@@ -665,24 +670,25 @@ export async function runEvidenceRetentionSweep(db: Db, now = new Date()) {
   return { expired: expired.length, expiredIds: expired.map(row => row.id) };
 }
 
-async function paginateKeysetAll<T extends { id: string }>(
-  fetchPage: (limit: number, cursor: { ts: Date; id: string } | null) => Promise<T[]>,
-  getCursorTs: (row: T) => Date,
+async function paginateKeysetAll<T extends { id: string; cursorTs: string }>(
+  fetchPage: (limit: number, cursor: { ts: string; id: string } | null) => Promise<T[]>,
   pageSize = 500,
-): Promise<T[]> {
-  const all: T[] = [];
+): Promise<Array<Omit<T, "cursorTs">>> {
+  const all: Array<Omit<T, "cursorTs">> = [];
   const seen = new Set<string>();
-  let cursor: { ts: Date; id: string } | null = null;
+  let cursor: { ts: string; id: string } | null = null;
   while (true) {
     const page = await fetchPage(pageSize, cursor);
     for (const row of page) {
       if (seen.has(row.id)) continue;
       seen.add(row.id);
-      all.push(row);
+      const { cursorTs: _cursorTs, ...rest } = row;
+      void _cursorTs;
+      all.push(rest);
     }
     if (page.length < pageSize) break;
     const last = page[page.length - 1];
-    cursor = { ts: getCursorTs(last), id: last.id };
+    cursor = { ts: last.cursorTs, id: last.id };
   }
   return all;
 }
@@ -720,18 +726,18 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           apartment: customerAddresses.apartment,
           notes: customerAddresses.notes,
           createdAt: customerAddresses.createdAt,
+          cursorTs: pgCursorTimestampSql(customerAddresses.createdAt),
         }).from(customerAddresses)
           .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
           .where(and(
             eq(customerAddresses.organizationId, principal.organizationId),
             eq(customerAddresses.customerId, principal.userId),
             cursor
-              ? sql`(${customerAddresses.createdAt}, ${customerAddresses.id}) < (${cursor.ts}, ${cursor.id})`
+              ? sql`(${customerAddresses.createdAt}, ${customerAddresses.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
               : undefined,
           ))
           .orderBy(desc(customerAddresses.createdAt), desc(customerAddresses.id))
           .limit(limit),
-      row => row.createdAt,
     );
 
     const orderRows = await paginateKeysetAll(
@@ -741,16 +747,16 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           publicNumber: orders.publicNumber,
           lifecycleState: orders.lifecycleState,
           createdAt: orders.createdAt,
+          cursorTs: pgCursorTimestampSql(orders.createdAt),
         }).from(orders).where(and(
           eq(orders.organizationId, principal.organizationId),
           eq(orders.customerId, principal.userId),
           cursor
-            ? sql`(${orders.createdAt}, ${orders.id}) < (${cursor.ts}, ${cursor.id})`
+            ? sql`(${orders.createdAt}, ${orders.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
             : undefined,
         ))
           .orderBy(desc(orders.createdAt), desc(orders.id))
           .limit(limit),
-      row => row.createdAt,
     );
 
     // Align claim ownership with GET /claims: include claims opened by the customer AND
@@ -765,6 +771,7 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           state: claims.state,
           description: claims.description,
           openedAt: claims.openedAt,
+          cursorTs: pgCursorTimestampSql(claims.openedAt),
         }).from(claims)
           .innerJoin(orders, and(
             eq(orders.id, claims.orderId),
@@ -777,12 +784,11 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
               eq(orders.customerId, principal.userId),
             ),
             cursor
-              ? sql`(${claims.openedAt}, ${claims.id}) < (${cursor.ts}, ${cursor.id})`
+              ? sql`(${claims.openedAt}, ${claims.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
               : undefined,
           ))
           .orderBy(desc(claims.openedAt), desc(claims.id))
           .limit(limit),
-      row => row.openedAt,
     );
 
     const notificationRows = await paginateKeysetAll(
@@ -794,16 +800,16 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           template: notifications.template,
           readAt: notifications.readAt,
           createdAt: notifications.createdAt,
+          cursorTs: pgCursorTimestampSql(notifications.createdAt),
         }).from(notifications).where(and(
           eq(notifications.organizationId, principal.organizationId),
           eq(notifications.recipientId, principal.userId),
           cursor
-            ? sql`(${notifications.createdAt}, ${notifications.id}) < (${cursor.ts}, ${cursor.id})`
+            ? sql`(${notifications.createdAt}, ${notifications.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
             : undefined,
         ))
           .orderBy(desc(notifications.createdAt), desc(notifications.id))
           .limit(limit),
-      row => row.createdAt,
     );
 
     const reviewRows = await paginateKeysetAll(
@@ -815,16 +821,16 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           body: reviews.body,
           state: reviews.state,
           createdAt: reviews.createdAt,
+          cursorTs: pgCursorTimestampSql(reviews.createdAt),
         }).from(reviews).where(and(
           eq(reviews.organizationId, principal.organizationId),
           eq(reviews.customerId, principal.userId),
           cursor
-            ? sql`(${reviews.createdAt}, ${reviews.id}) < (${cursor.ts}, ${cursor.id})`
+            ? sql`(${reviews.createdAt}, ${reviews.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
             : undefined,
         ))
           .orderBy(desc(reviews.createdAt), desc(reviews.id))
           .limit(limit),
-      row => row.createdAt,
     );
 
     return {

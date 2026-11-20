@@ -4,7 +4,7 @@ import {
   claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, garments, orders,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
-import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern } from "../core/cursor.js";
+import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -137,7 +137,7 @@ export async function listClaimsPage(
   const pageWhere = and(
     baseWhere,
     decoded
-      ? sql`(${claims.openedAt}, ${claims.id}) < (${decoded.ts}, ${decoded.id})`
+      ? sql`(${claims.openedAt}, ${claims.id}) < (${decoded.ts}::timestamptz, ${decoded.id})`
       : undefined,
   );
 
@@ -158,6 +158,7 @@ export async function listClaimsPage(
       version: claims.version,
       dueAt: claims.dueAt,
       openedAt: claims.openedAt,
+      cursorTs: pgCursorTimestampSql(claims.openedAt),
     }).from(claims)
       .innerJoin(orders, and(eq(orders.id, claims.orderId), eq(orders.organizationId, claims.organizationId)))
       .where(pageWhere)
@@ -166,11 +167,11 @@ export async function listClaimsPage(
   ]);
 
   const hasMore = rows.length > limit;
-  const items = hasMore ? rows.slice(0, limit) : rows;
-  const last = items[items.length - 1];
-  const nextCursor = hasMore && last ? encodeKeysetCursor(last.openedAt, last.id) : null;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.cursorTs, last.id) : null;
   return {
-    items,
+    items: pageRows.map(({ cursorTs: _cursorTs, ...row }) => row),
     totalCount: countRow?.count ?? 0,
     hasMore,
     nextCursor,
