@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { buildings, cities, customerAddresses, entrances, notifications, orders, outboxEvents } from "../db/schema.js";
 import { assertRole, type Principal } from "../core/context.js";
@@ -89,12 +89,21 @@ export async function removeAddress(db: Db, principal: Principal, addressId: str
   });
 }
 
+const NOTIFICATIONS_DEFAULT_LIMIT = 100;
+const NOTIFICATIONS_MAX_LIMIT = 200;
+
 /**
  * Notification feed of the signed-in principal: every channel row the platform produced for
  * this user, newest first; unread ones carry readAt = null.
  */
-export async function listNotifications(db: Db, principal: Principal) {
+export async function listNotifications(
+  db: Db,
+  principal: Principal,
+  options?: { limit?: number; offset?: number },
+) {
   assertRole(principal, "customer", ...STAFF_ROLES);
+  const limit = Math.min(Math.max(Math.trunc(options?.limit ?? NOTIFICATIONS_DEFAULT_LIMIT), 1), NOTIFICATIONS_MAX_LIMIT);
+  const offset = Math.max(Math.trunc(options?.offset ?? 0), 0);
   const rows = await db.select({
     id: notifications.id,
     orderId: notifications.orderId,
@@ -108,8 +117,9 @@ export async function listNotifications(db: Db, principal: Principal) {
       eq(notifications.organizationId, principal.organizationId),
       eq(notifications.recipientId, principal.userId),
     ))
-    .orderBy(desc(notifications.createdAt))
-    .limit(100);
+    .orderBy(desc(notifications.createdAt), desc(notifications.id))
+    .limit(limit)
+    .offset(offset);
   return rows.map(row => ({
     ...row,
     payloadJson: row.payloadJson as Record<string, unknown>,
@@ -117,20 +127,42 @@ export async function listNotifications(db: Db, principal: Principal) {
   }));
 }
 
-export async function markNotificationsRead(db: Db, principal: Principal, input: { ids: string[] }) {
+export async function countUnreadNotifications(db: Db, principal: Principal): Promise<number> {
   assertRole(principal, "customer", ...STAFF_ROLES);
-  if (!input.ids.length) return { marked: 0 };
-  let marked = 0;
-  for (const id of input.ids) {
-    const updated = await db.update(notifications).set({ readAt: new Date() }).where(and(
-      eq(notifications.id, id),
+  const [row] = await db.select({
+    count: sql<number>`count(*)::int`,
+  }).from(notifications).where(and(
+    eq(notifications.organizationId, principal.organizationId),
+    eq(notifications.recipientId, principal.userId),
+    isNull(notifications.readAt),
+  ));
+  return row?.count ?? 0;
+}
+
+export async function markNotificationsRead(
+  db: Db,
+  principal: Principal,
+  input: { ids?: string[]; all?: boolean },
+) {
+  assertRole(principal, "customer", ...STAFF_ROLES);
+  const now = new Date();
+  if (input.all) {
+    const updated = await db.update(notifications).set({ readAt: now }).where(and(
       eq(notifications.organizationId, principal.organizationId),
       eq(notifications.recipientId, principal.userId),
       isNull(notifications.readAt),
     )).returning({ id: notifications.id });
-    marked += updated.length;
+    return { marked: updated.length };
   }
-  return { marked };
+  const ids = input.ids ?? [];
+  if (!ids.length) return { marked: 0 };
+  const updated = await db.update(notifications).set({ readAt: now }).where(and(
+    inArray(notifications.id, ids),
+    eq(notifications.organizationId, principal.organizationId),
+    eq(notifications.recipientId, principal.userId),
+    isNull(notifications.readAt),
+  )).returning({ id: notifications.id });
+  return { marked: updated.length };
 }
 
 /**

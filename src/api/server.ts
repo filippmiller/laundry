@@ -38,8 +38,8 @@ import { closeThread, getThread, listThreads, openThread, postMessage } from "..
 import { createReview, hideReview, likeReview, listReviews, unlikeReview } from "../services/reviews.js";
 import { markChargeback, paymentDrift } from "../services/payment-inbox.js";
 import {
-  addAddress, listAddresses, listNotifications, markNotificationsRead, removeAddress as removeAddressRoute,
-  trackOrder,
+  addAddress, countUnreadNotifications, listAddresses, listNotifications, markNotificationsRead,
+  removeAddress as removeAddressRoute, trackOrder,
 } from "../services/customer.js";
 import { completeShift, currentShift, openShift } from "../services/courier-shift.js";
 import {
@@ -172,7 +172,11 @@ export function buildApp(db: Db) {
   app.register(cookie);
   // External, maintained abuse control (MIT): baseline per-IP limit, stricter overrides below.
   app.register(rateLimit, { global: true, max: 600, timeWindow: "1 minute" });
-  app.register(cors, { origin: process.env.WEB_ORIGIN ?? false, credentials: true });
+  app.register(cors, {
+    origin: process.env.WEB_ORIGIN ?? false,
+    credentials: true,
+    exposedHeaders: ["X-Total-Unread"],
+  });
   const webDir = resolve(process.cwd(), "dist/web");
   if (existsSync(webDir)) {
     app.register(fastifyStatic, { root: webDir, prefix: "/" });
@@ -510,12 +514,35 @@ export function buildApp(db: Db) {
   });
   add({
     method: "GET", path: "/notifications", summary: "My notification feed", tags: ["Customer"],
-    handler: ctx => listNotifications(db, ctx.principal),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+      offset: z.coerce.number().int().min(0).max(100_000).optional(),
+    }),
+    handler: async ctx => {
+      const [items, totalUnread] = await Promise.all([
+        listNotifications(db, ctx.principal, {
+          limit: ctx.query.limit as number | undefined,
+          offset: ctx.query.offset as number | undefined,
+        }),
+        countUnreadNotifications(db, ctx.principal),
+      ]);
+      ctx.reply.header("X-Total-Unread", String(totalUnread));
+      return items;
+    },
   });
   add({
     method: "POST", path: "/notifications/read", summary: "Mark notifications read", tags: ["Customer"],
-    body: z.object({ ids: z.array(z.uuid()).max(100) }),
-    handler: ctx => markNotificationsRead(db, ctx.principal, { ids: ctx.body.ids }),
+    body: z.object({
+      ids: z.array(z.uuid()).max(100).optional(),
+      all: z.boolean().optional(),
+    }).refine(
+      data => data.all === true || Array.isArray(data.ids),
+      { message: "Either all=true or ids array is required" },
+    ),
+    handler: ctx => markNotificationsRead(db, ctx.principal, {
+      ids: ctx.body.ids,
+      all: ctx.body.all,
+    }),
   });
   add({
     method: "GET", path: "/service-areas/resolve", summary: "Resolve building and city", tags: ["Customer"],

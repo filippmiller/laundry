@@ -22,7 +22,7 @@ import {
   Trash2,
   Wallet,
 } from "lucide-react";
-import { api, dt, money } from "../api";
+import { ApiError, api, dt, money } from "../api";
 import { DocumentPrintModal, type DocumentKind } from "../components/DocumentPrintModal";
 import { EvidenceUploader } from "../components/EvidenceUploader";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
@@ -268,34 +268,87 @@ function isWindowClosed(window: WindowDto, now: number): boolean {
   return new Date(window.endsAt).getTime() <= now;
 }
 
+const NOTIFICATIONS_PAGE_SIZE = 100;
+
+async function fetchNotificationsPage(offset: number): Promise<{ items: NotificationDto[]; totalUnread: number }> {
+  const response = await fetch(
+    `/api/v1/notifications?limit=${NOTIFICATIONS_PAGE_SIZE}&offset=${offset}`,
+    { method: "GET", credentials: "include" },
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new ApiError(
+      payload?.error?.code ?? payload?.error?.message ?? "REQUEST_FAILED",
+      response.status,
+      payload?.error?.details,
+    );
+  }
+  const items = Array.isArray(payload) ? (payload as NotificationDto[]) : [];
+  const rawTotal = response.headers.get("X-Total-Unread");
+  const parsedTotal = rawTotal !== null ? Number(rawTotal) : NaN;
+  const totalUnread = Number.isFinite(parsedTotal) && parsedTotal >= 0
+    ? parsedTotal
+    : items.filter((item) => !item.read).length;
+  return { items, totalUnread };
+}
+
 export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; notify: NotifyFn }) {
   const tabsId = useId();
   const [activeTab, setActiveTab] = useState("new");
   const [repeat, setRepeat] = useState<RepeatDto | null>(null);
   const [notifications, setNotifications] = useState<NotificationDto[] | null>(null);
+  const [totalUnread, setTotalUnread] = useState<number | null>(null);
+  const [hasMoreNotifications, setHasMoreNotifications] = useState(false);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [notificationsLoadingMore, setNotificationsLoadingMore] = useState(false);
   const [notificationsError, setNotificationsError] = useState<string | null>(null);
 
   const loadNotifications = useCallback(async () => {
     setNotificationsLoading(true);
     try {
-      setNotifications(await api<NotificationDto[]>("/notifications"));
+      const page = await fetchNotificationsPage(0);
+      setNotifications(page.items);
+      setTotalUnread(page.totalUnread);
+      setHasMoreNotifications(page.items.length === NOTIFICATIONS_PAGE_SIZE);
       setNotificationsError(null);
     } catch (err) {
       setNotifications([]);
+      setTotalUnread(0);
+      setHasMoreNotifications(false);
       setNotificationsError(errorText(err));
     } finally {
       setNotificationsLoading(false);
     }
   }, []);
 
+  const loadMoreNotifications = useCallback(async () => {
+    const offset = notifications?.length ?? 0;
+    setNotificationsLoadingMore(true);
+    try {
+      const page = await fetchNotificationsPage(offset);
+      setNotifications((prev) => {
+        const base = prev ?? [];
+        const seen = new Set(base.map((item) => item.id));
+        const appended = page.items.filter((item) => !seen.has(item.id));
+        return [...base, ...appended];
+      });
+      setTotalUnread(page.totalUnread);
+      setHasMoreNotifications(page.items.length === NOTIFICATIONS_PAGE_SIZE);
+      setNotificationsError(null);
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setNotificationsLoadingMore(false);
+    }
+  }, [notifications?.length, notify]);
+
   useEffect(() => {
     void loadNotifications();
   }, [loadNotifications]);
 
   const unreadCount = useMemo(
-    () => (notifications ?? []).filter((item) => !item.read).length,
-    [notifications],
+    () => totalUnread ?? (notifications ?? []).filter((item) => !item.read).length,
+    [totalUnread, notifications],
   );
 
   const handleRepeat = async (orderId: string) => {
@@ -354,9 +407,13 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
       <TabPanel idPrefix={tabsId} id="notifications" active={activeTab === "notifications"}>
         <NotificationsTab
           notifications={notifications}
+          unreadCount={unreadCount}
           loading={notificationsLoading}
+          loadingMore={notificationsLoadingMore}
+          hasMore={hasMoreNotifications}
           loadError={notificationsError}
           onReload={loadNotifications}
+          onLoadMore={loadMoreNotifications}
           notify={notify}
         />
       </TabPanel>
@@ -1099,7 +1156,13 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   const [claimType, setClaimType] = useState("damage");
   const [claimDescription, setClaimDescription] = useState("");
   const [claimGarments, setClaimGarments] = useState<string[]>([]);
-  const [claimEvidenceIds, setClaimEvidenceIds] = useState<string[]>([]);
+  const [claimEvidenceState, setClaimEvidenceState] = useState<{
+    ownerId: string;
+    ids: string[];
+    uploadingCount: number;
+    hasError: boolean;
+  }>({ ownerId: "", ids: [], uploadingCount: 0, hasError: false });
+  const [claimEvidenceRefreshKey, setClaimEvidenceRefreshKey] = useState(0);
   const [rating, setRating] = useState("5");
   const [reviewBody, setReviewBody] = useState("");
 
@@ -1190,6 +1253,12 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   }, []);
 
   useEffect(() => {
+    setClaimEvidenceState({
+      ownerId: selectedId ?? "",
+      ids: [],
+      uploadingCount: 0,
+      hasError: false,
+    });
     if (!selectedId) {
       setDetail(null);
       setFinance(null);
@@ -1302,10 +1371,18 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
 
   const handleClaim = async () => {
     if (!detail) return;
+    if (claimEvidenceState.ownerId === detail.id && claimEvidenceState.uploadingCount > 0) {
+      notify({ kind: "error", text: "Дождитесь завершения загрузки файлов…" });
+      return;
+    }
     if (claimDescription.trim().length < 5) {
       notify({ kind: "error", text: "Опишите проблему подробнее (не короче 5 символов)" });
       return;
     }
+    const evidenceIds =
+      claimEvidenceState.ownerId === detail.id && claimEvidenceState.ids.length > 0
+        ? claimEvidenceState.ids
+        : [];
     await runAction(
       "claim",
       async () => {
@@ -1315,12 +1392,18 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             claimType,
             description: claimDescription.trim(),
             ...(claimGarments.length ? { garmentIds: claimGarments } : {}),
-            ...(claimEvidenceIds.length ? { evidenceIds: claimEvidenceIds } : {}),
+            ...(evidenceIds.length > 0 ? { evidenceIds } : {}),
           },
         });
         setClaimDescription("");
         setClaimGarments([]);
-        setClaimEvidenceIds([]);
+        setClaimEvidenceState({
+          ownerId: detail.id,
+          ids: [],
+          uploadingCount: 0,
+          hasError: false,
+        });
+        setClaimEvidenceRefreshKey((key) => key + 1);
         await loadClaims();
       },
       "Претензия открыта",
@@ -1776,13 +1859,32 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 ownerId={detail.id}
                 purpose="claim_evidence"
                 title="Фотографии к претензии (необязательно)"
+                refreshKey={claimEvidenceRefreshKey}
                 notify={notify}
-                onUploadedIdsChange={setClaimEvidenceIds}
+                onUploadStateChange={(state) =>
+                  setClaimEvidenceState({
+                    ownerId: state.ownerId,
+                    ids: state.uploadedIds,
+                    uploadingCount: state.uploadingCount,
+                    hasError: state.hasError,
+                  })
+                }
               />
             </div>
 
+            {claimEvidenceState.uploadingCount > 0 && (
+              <p className="muted" role="status" style={{ marginBlockStart: 8 }}>
+                Дождитесь завершения загрузки файлов…
+              </p>
+            )}
+
             <div className="button-row">
-              <button type="button" className="ghost" disabled={isBusy} onClick={() => void handleClaim()}>
+              <button
+                type="button"
+                className="ghost"
+                disabled={isBusy || claimEvidenceState.uploadingCount > 0}
+                onClick={() => void handleClaim()}
+              >
                 <AlertCircle size={16} aria-hidden="true" />
                 <span>Открыть претензию</span>
               </button>
@@ -2131,23 +2233,26 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
 
 function NotificationsTab({
   notifications,
+  unreadCount,
   loading,
+  loadingMore,
+  hasMore,
   loadError,
   onReload,
+  onLoadMore,
   notify,
 }: {
   notifications: NotificationDto[] | null;
+  unreadCount: number;
   loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
   loadError: string | null;
   onReload: () => Promise<void>;
+  onLoadMore: () => Promise<void>;
   notify: NotifyFn;
 }) {
   const [busy, setBusy] = useState(false);
-
-  const unreadIds = useMemo(
-    () => (notifications ?? []).filter((item) => !item.read).map((item) => item.id),
-    [notifications],
-  );
 
   const markRead = async (ids: string[]) => {
     if (ids.length === 0) return;
@@ -2161,7 +2266,30 @@ function NotificationsTab({
       await onReload();
       notify({
         kind: "ok",
-        text: ids.length === 1 ? "Уведомление отмечено прочитанным" : "Все уведомления отмечены прочитанными",
+        text: ids.length === 1 ? "Уведомление отмечено прочитанным" : "Уведомления отмечены прочитанными",
+      });
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const markAllRead = async () => {
+    if (unreadCount === 0) return;
+    setBusy(true);
+    notify(null);
+    try {
+      const res = await api<{ marked: number }>("/notifications/read", {
+        method: "POST",
+        body: { all: true },
+      });
+      await onReload();
+      notify({
+        kind: "ok",
+        text: res.marked > 0
+          ? `Отмечено прочитанными: ${res.marked}`
+          : "Все уведомления уже прочитаны",
       });
     } catch (err) {
       notify({ kind: "error", text: errorText(err) });
@@ -2175,21 +2303,26 @@ function NotificationsTab({
       <section className="panel">
         <CardHeader
           title="Уведомления"
+          subtitle={
+            notifications !== null
+              ? (unreadCount > 0 ? `Непрочитанных: ${unreadCount}` : "Все прочитаны")
+              : undefined
+          }
           actions={
             <div className="row row--tight">
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={busy || unreadIds.length === 0}
+                disabled={busy || unreadCount === 0}
                 leadingIcon={<Check size={16} aria-hidden="true" />}
-                onClick={() => void markRead(unreadIds)}
+                onClick={() => void markAllRead()}
               >
                 Отметить все прочитанными
               </Button>
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={loading || busy}
+                disabled={loading || loadingMore || busy}
                 leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
                 onClick={() => void onReload()}
               >
@@ -2213,49 +2346,63 @@ function NotificationsTab({
           />
         )}
         {notifications && notifications.length > 0 && (
-          <div className="data-list">
-            {notifications.map((item) => {
-              const payload = item.payloadJson ?? {};
-              const title =
-                typeof payload.title === "string" && payload.title.trim()
-                  ? payload.title
-                  : (NOTIFICATION_LABELS[item.template] ?? item.template);
-              const body =
-                typeof payload.body === "string" && payload.body.trim()
-                  ? payload.body
-                  : typeof payload.message === "string" && payload.message.trim()
-                    ? payload.message
-                    : null;
-              return (
-                <div className="data-row" key={item.id}>
-                  <span className="data-row__main">
-                    <span className="row row--tight">
-                      <strong>{title}</strong>
-                      <Badge tone={item.read ? "neutral" : "accent"}>
-                        {item.read ? "Прочитано" : "Новое"}
-                      </Badge>
-                      <span className="muted">{item.channel}</span>
+          <>
+            <div className="data-list">
+              {notifications.map((item) => {
+                const payload = item.payloadJson ?? {};
+                const title =
+                  typeof payload.title === "string" && payload.title.trim()
+                    ? payload.title
+                    : (NOTIFICATION_LABELS[item.template] ?? item.template);
+                const body =
+                  typeof payload.body === "string" && payload.body.trim()
+                    ? payload.body
+                    : typeof payload.message === "string" && payload.message.trim()
+                      ? payload.message
+                      : null;
+                return (
+                  <div className="data-row" key={item.id}>
+                    <span className="data-row__main">
+                      <span className="row row--tight">
+                        <strong>{title}</strong>
+                        <Badge tone={item.read ? "neutral" : "accent"}>
+                          {item.read ? "Прочитано" : "Новое"}
+                        </Badge>
+                        <span className="muted">{item.channel}</span>
+                      </span>
+                      {body && <span>{body}</span>}
                     </span>
-                    {body && <span>{body}</span>}
-                  </span>
-                  <span className="row row--tight">
-                    <span className="mono">{dt(item.createdAt)}</span>
-                    {!item.read && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={busy}
-                        leadingIcon={<Check size={14} aria-hidden="true" />}
-                        onClick={() => void markRead([item.id])}
-                      >
-                        Прочитано
-                      </Button>
-                    )}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
+                    <span className="row row--tight">
+                      <span className="mono">{dt(item.createdAt)}</span>
+                      {!item.read && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          leadingIcon={<Check size={14} aria-hidden="true" />}
+                          onClick={() => void markRead([item.id])}
+                        >
+                          Прочитано
+                        </Button>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            {hasMore && (
+              <div className="button-row" style={{ marginBlockStart: 12 }}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={loading || loadingMore || busy}
+                  onClick={() => void onLoadMore()}
+                >
+                  {loadingMore ? "Загрузка…" : "Загрузить ещё"}
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </section>
     </div>

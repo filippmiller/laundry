@@ -4,7 +4,7 @@ import type { Db } from "../db/client.js";
 import {
   buildings, claims, compensations, courierShifts, custodyEvents, customerAddresses,
   evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
-  garmentEvidence, garments, notifications, orders, outboxEvents, routeStops, sessions, supportThreads, users,
+  garmentEvidence, garments, notifications, orders, outboxEvents, reviews, routeStops, sessions, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -572,73 +572,123 @@ export async function runEvidenceRetentionSweep(db: Db, now = new Date()) {
   return { expired: expired.length, expiredIds: expired.map(row => row.id) };
 }
 
+async function paginateAll<T>(
+  fetchPage: (limit: number, offset: number) => Promise<T[]>,
+  pageSize = 500,
+): Promise<T[]> {
+  const all: T[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await fetchPage(pageSize, offset);
+    all.push(...page);
+    if (page.length < pageSize) break;
+    offset += page.length;
+  }
+  return all;
+}
+
 /**
  * Privacy export for the signed-in user: returns only the caller's own non-internal records
  * scoped to their tenant. Never exposes internal hashes, door codes, storage keys, or other users' data.
  */
 export async function exportMyPrivacyData(db: Db, principal: Principal) {
-  const [[user], addressRows, orderRows, claimRows, notificationRows] = await Promise.all([
+  const [[user], addressRows, orderRows, claimRows, notificationRows, reviewRows] = await Promise.all([
     db.select({
       id: users.id,
       phone: users.phone,
       displayName: users.displayName,
       createdAt: users.createdAt,
     }).from(users).where(eq(users.id, principal.userId)).limit(1),
-    db.select({
-      id: customerAddresses.id,
-      buildingId: customerAddresses.buildingId,
-      address: buildings.address,
-      apartment: customerAddresses.apartment,
-      notes: customerAddresses.notes,
-      createdAt: customerAddresses.createdAt,
-    }).from(customerAddresses)
-      .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
-      .where(and(
-        eq(customerAddresses.organizationId, principal.organizationId),
-        eq(customerAddresses.customerId, principal.userId),
-      ))
-      .orderBy(desc(customerAddresses.createdAt))
-      .limit(100),
-    db.select({
-      id: orders.id,
-      publicNumber: orders.publicNumber,
-      lifecycleState: orders.lifecycleState,
-      createdAt: orders.createdAt,
-    }).from(orders).where(and(
-      eq(orders.organizationId, principal.organizationId),
-      eq(orders.customerId, principal.userId),
-    )).orderBy(desc(orders.createdAt)).limit(200),
-    db.select({
-      id: claims.id,
-      orderId: claims.orderId,
-      claimType: claims.claimType,
-      state: claims.state,
-      description: claims.description,
-      openedAt: claims.openedAt,
-    }).from(claims).where(and(
-      eq(claims.organizationId, principal.organizationId),
-      eq(claims.openedBy, principal.userId),
-    )).orderBy(desc(claims.openedAt)).limit(100),
-    db.select({
-      id: notifications.id,
-      orderId: notifications.orderId,
-      channel: notifications.channel,
-      template: notifications.template,
-      readAt: notifications.readAt,
-      createdAt: notifications.createdAt,
-    }).from(notifications).where(and(
-      eq(notifications.organizationId, principal.organizationId),
-      eq(notifications.recipientId, principal.userId),
-    )).orderBy(desc(notifications.createdAt)).limit(200),
+    paginateAll((limit, offset) =>
+      db.select({
+        id: customerAddresses.id,
+        buildingId: customerAddresses.buildingId,
+        address: buildings.address,
+        apartment: customerAddresses.apartment,
+        notes: customerAddresses.notes,
+        createdAt: customerAddresses.createdAt,
+      }).from(customerAddresses)
+        .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
+        .where(and(
+          eq(customerAddresses.organizationId, principal.organizationId),
+          eq(customerAddresses.customerId, principal.userId),
+        ))
+        .orderBy(desc(customerAddresses.createdAt), desc(customerAddresses.id))
+        .limit(limit)
+        .offset(offset),
+    ),
+    paginateAll((limit, offset) =>
+      db.select({
+        id: orders.id,
+        publicNumber: orders.publicNumber,
+        lifecycleState: orders.lifecycleState,
+        createdAt: orders.createdAt,
+      }).from(orders).where(and(
+        eq(orders.organizationId, principal.organizationId),
+        eq(orders.customerId, principal.userId),
+      )).orderBy(desc(orders.createdAt), desc(orders.id)).limit(limit).offset(offset),
+    ),
+    paginateAll((limit, offset) =>
+      db.select({
+        id: claims.id,
+        orderId: claims.orderId,
+        claimType: claims.claimType,
+        state: claims.state,
+        description: claims.description,
+        openedAt: claims.openedAt,
+      }).from(claims).where(and(
+        eq(claims.organizationId, principal.organizationId),
+        eq(claims.openedBy, principal.userId),
+      )).orderBy(desc(claims.openedAt), desc(claims.id)).limit(limit).offset(offset),
+    ),
+    paginateAll((limit, offset) =>
+      db.select({
+        id: notifications.id,
+        orderId: notifications.orderId,
+        channel: notifications.channel,
+        template: notifications.template,
+        readAt: notifications.readAt,
+        createdAt: notifications.createdAt,
+      }).from(notifications).where(and(
+        eq(notifications.organizationId, principal.organizationId),
+        eq(notifications.recipientId, principal.userId),
+      )).orderBy(desc(notifications.createdAt), desc(notifications.id)).limit(limit).offset(offset),
+    ),
+    paginateAll((limit, offset) =>
+      db.select({
+        id: reviews.id,
+        orderId: reviews.orderId,
+        rating: reviews.rating,
+        body: reviews.body,
+        state: reviews.state,
+        createdAt: reviews.createdAt,
+      }).from(reviews).where(and(
+        eq(reviews.organizationId, principal.organizationId),
+        eq(reviews.customerId, principal.userId),
+      )).orderBy(desc(reviews.createdAt), desc(reviews.id)).limit(limit).offset(offset),
+    ),
   ]);
 
+  const exportedAt = new Date().toISOString();
   return {
-    exportedAt: new Date().toISOString(),
+    exportedAt,
+    exportMeta: {
+      complete: true as const,
+      exportedAt,
+      counts: {
+        addresses: addressRows.length,
+        orders: orderRows.length,
+        claims: claimRows.length,
+        notifications: notificationRows.length,
+        reviews: reviewRows.length,
+      },
+    },
     profile: user ?? { id: principal.userId, phone: null, displayName: null, createdAt: null },
     addresses: addressRows,
     orders: orderRows,
     claims: claimRows,
     notifications: notificationRows,
+    reviews: reviewRows,
   };
 }
 
