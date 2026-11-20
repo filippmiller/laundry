@@ -1,18 +1,20 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Building2,
   CheckCircle2,
   FileText,
+  PackageCheck,
   Printer,
   Receipt,
   RefreshCw,
   RotateCcw,
   Scale,
   ShieldAlert,
+  Wallet,
   XCircle,
 } from "lucide-react";
-import { api, DemoConfig, dt, money } from "../api";
+import { api, ApiError, DemoConfig, dt, money } from "../api";
 import { DocumentKind, DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
 import { Badge } from "../components/ui/Badge";
@@ -24,6 +26,7 @@ import {
   FISCAL_STATE_LABELS,
   formatError,
   INVOICE_STATE_LABELS,
+  ORDER_STATE_LABELS,
   PARTNER_INVOICE_STATE_LABELS,
   PAYMENT_STATE_LABELS,
   providerLabel,
@@ -84,6 +87,42 @@ type FiscalReceiptItem = {
   createdAt?: string;
 };
 
+type PartnerOption = {
+  id: string;
+  name: string;
+  status?: string;
+};
+
+type PartnerPayoutItem = {
+  id: string;
+  partnerId: string;
+  amountKopeks: number;
+  state: string;
+  reference?: string | null;
+  createdBy?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  createdAt?: string;
+};
+
+type PartnerCreditNoteItem = {
+  id: string;
+  invoiceId: string;
+  originalLineId?: string | null;
+  amountKopeks: number;
+  reason: string;
+  state: string;
+  approvedBy?: string | null;
+  createdAt?: string;
+};
+
+type DeliveredOrderItem = {
+  id: string;
+  publicNumber: string;
+  lifecycleState: string;
+  createdAt?: string;
+};
+
 type FinanceOverviewResponse = {
   invoices?: InvoiceItem[];
   intents?: PaymentIntentItem[];
@@ -91,6 +130,26 @@ type FinanceOverviewResponse = {
   partnerInvoices?: PartnerInvoiceItem[];
   pendingCompensations?: CompensationItem[];
   fiscalReceipts?: FiscalReceiptItem[];
+  partners?: PartnerOption[];
+  partnerPayouts?: PartnerPayoutItem[];
+  partnerCreditNotes?: PartnerCreditNoteItem[];
+  deliveredOrders?: DeliveredOrderItem[];
+};
+
+const PAYOUT_STATE_LABELS: Record<string, string> = {
+  scheduled: "Запланирована",
+  pending: "Ожидает одобрения",
+  approved: "Одобрена",
+  paid: "Выплачена",
+  cancelled: "Отменена",
+};
+
+const CREDIT_NOTE_STATE_LABELS: Record<string, string> = {
+  draft: "Черновик",
+  pending: "На согласовании",
+  approved: "Одобрена",
+  applied: "Применена",
+  rejected: "Отклонена",
 };
 
 type ReconciliationResponse = {
@@ -152,19 +211,37 @@ export function FinanceWorkspace({
   const [periodStart, setPeriodStart] = useState(initialStart);
   const [periodEnd, setPeriodEnd] = useState(initialEnd);
 
+  const [payoutPartnerId, setPayoutPartnerId] = useState(() => demo?.partners?.[0]?.id ?? "");
+  const [payoutAmountRub, setPayoutAmountRub] = useState("");
+  const [payoutReference, setPayoutReference] = useState("");
+
   const partnerSelectId = useId();
   const partnerInputId = useId();
   const periodStartId = useId();
   const periodEndId = useId();
+  const payoutPartnerSelectId = useId();
+  const payoutPartnerInputId = useId();
+  const payoutAmountId = useId();
+  const payoutRefId = useId();
   const refundAmountId = useId();
   const refundReasonId = useId();
   const chargebackReasonId = useId();
 
+  const partners = useMemo<PartnerOption[]>(
+    () => (overview.partners && overview.partners.length > 0 ? overview.partners : (demo?.partners ?? [])),
+    [overview.partners, demo?.partners],
+  );
+  const partnerNames = useMemo(
+    () => new Map(partners.map(p => [p.id, p.name])),
+    [partners],
+  );
+
   useEffect(() => {
-    if (!partnerId && demo?.partners && demo.partners.length > 0) {
-      setPartnerId(demo.partners[0].id);
+    if (partners.length > 0) {
+      if (!partnerId) setPartnerId(partners[0].id);
+      if (!payoutPartnerId) setPayoutPartnerId(partners[0].id);
     }
-  }, [demo, partnerId]);
+  }, [partners, partnerId, payoutPartnerId]);
 
   const loadFinance = useCallback(async () => {
     setLoading(true);
@@ -341,9 +418,102 @@ export function FinanceWorkspace({
     }
   };
 
+  const createPartnerPayout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedPartner = payoutPartnerId.trim();
+    if (!trimmedPartner) {
+      notify({ kind: "error", text: "Выберите партнёра или укажите идентификатор партнёра" });
+      return;
+    }
+    const parsedRub = Number(payoutAmountRub.replace(",", "."));
+    const amountKopeks = Math.round(parsedRub * 100);
+    if (!Number.isInteger(amountKopeks) || amountKopeks <= 0) {
+      notify({ kind: "error", text: "Укажите корректную сумму выплаты больше нуля" });
+      return;
+    }
+    const reference = payoutReference.trim();
+    setBusyAction("partner-payout");
+    try {
+      await api("/finance/partner-payouts", {
+        method: "POST",
+        body: {
+          partnerId: trimmedPartner,
+          amountKopeks,
+          ...(reference ? { reference } : {}),
+        },
+      });
+      notify({ kind: "ok", text: "Выплата партнёру запланирована (ожидает одобрения второго финансиста)" });
+      setPayoutAmountRub("");
+      setPayoutReference("");
+      await loadFinance();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const approvePartnerPayout = async (payout: PartnerPayoutItem) => {
+    setBusyAction(`payout-${payout.id}`);
+    try {
+      await api(`/finance/partner-payouts/${payout.id}/approve`, {
+        method: "POST",
+        body: {},
+      });
+      notify({ kind: "ok", text: "Выплата партнёру одобрена" });
+      await loadFinance();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "DUAL_CONTROL_REQUIRED") {
+        notify({
+          kind: "error",
+          text: "Требуется двойной контроль: выплату должен одобрить другой финансист или администратор",
+        });
+      } else {
+        notify({ kind: "error", text: formatError(err) });
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const approvePartnerCreditNote = async (note: PartnerCreditNoteItem) => {
+    setBusyAction(`credit-note-${note.id}`);
+    try {
+      await api(`/finance/partner-credit-notes/${note.id}/approve`, {
+        method: "POST",
+        body: {},
+      });
+      notify({ kind: "ok", text: "Кредит-нота одобрена" });
+      await loadFinance();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const closeDeliveredOrder = async (order: DeliveredOrderItem) => {
+    setBusyAction(`close-order-${order.id}`);
+    try {
+      await api(`/orders/${order.id}/close`, {
+        method: "POST",
+        body: {},
+      });
+      notify({ kind: "ok", text: `Заказ ${order.publicNumber} закрыт` });
+      await loadFinance();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const invoices = overview.invoices ?? [];
   const intents = overview.intents ?? [];
   const partnerInvoices = overview.partnerInvoices ?? [];
+  const partnerPayouts = overview.partnerPayouts ?? [];
+  const partnerCreditNotes = overview.partnerCreditNotes ?? [];
+  const deliveredOrders = overview.deliveredOrders ?? [];
   const pendingCompensations = overview.pendingCompensations ?? [];
   const fiscalReceipts = overview.fiscalReceipts ?? [];
 
@@ -351,8 +521,6 @@ export function FinanceWorkspace({
   const paymentEventsCount = countMetric(reconciliation.payment_events);
   const refundsCount = countMetric(reconciliation.refunds ?? overview.refunds);
   const driftCount = drift.length;
-
-  const partners = demo?.partners ?? [];
 
   return (
     <div className="workspace-grid">
@@ -737,6 +905,182 @@ export function FinanceWorkspace({
           </div>
         )}
 
+        <h4 style={{ marginBlock: "8px 10px" }}>Выплаты партнёрам</h4>
+        <form onSubmit={e => void createPartnerPayout(e)} style={{ display: "grid", gap: 12, marginBlockEnd: 18 }}>
+          <div className="grid-three" style={{ alignItems: "end" }}>
+            <div>
+              {partners.length > 0 ? (
+                <>
+                  <label htmlFor={payoutPartnerSelectId}>Партнёр (фабрика)</label>
+                  <select
+                    id={payoutPartnerSelectId}
+                    value={payoutPartnerId}
+                    onChange={e => setPayoutPartnerId(e.target.value)}
+                  >
+                    {partners.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : (
+                <>
+                  <label htmlFor={payoutPartnerInputId}>Идентификатор партнёра</label>
+                  <input
+                    id={payoutPartnerInputId}
+                    type="text"
+                    value={payoutPartnerId}
+                    onChange={e => setPayoutPartnerId(e.target.value)}
+                    placeholder="Введите ID партнёра"
+                  />
+                </>
+              )}
+            </div>
+            <div>
+              <label htmlFor={payoutAmountId}>Сумма выплаты (руб.)</label>
+              <input
+                id={payoutAmountId}
+                type="number"
+                step="0.01"
+                min="0.01"
+                required
+                value={payoutAmountRub}
+                onChange={e => setPayoutAmountRub(e.target.value)}
+                placeholder="0.00"
+              />
+            </div>
+            <div>
+              <label htmlFor={payoutRefId}>Назначение / референс</label>
+              <input
+                id={payoutRefId}
+                type="text"
+                maxLength={120}
+                value={payoutReference}
+                onChange={e => setPayoutReference(e.target.value)}
+                placeholder="Например, PAY-2026-01"
+              />
+            </div>
+          </div>
+          <div className="button-row" style={{ marginBlock: 0 }}>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={busyAction === "partner-payout"}
+              leadingIcon={<Wallet size={16} aria-hidden="true" />}
+            >
+              Запланировать выплату
+            </Button>
+          </div>
+        </form>
+
+        {partnerPayouts.length === 0 ? (
+          <p className="muted" style={{ marginBlockEnd: 18 }}>Выплаты партнёрам отсутствуют.</p>
+        ) : (
+          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Партнёр</th>
+                  <th>Сумма</th>
+                  <th>Назначение</th>
+                  <th>Статус</th>
+                  <th>Создана</th>
+                  <th>Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                {partnerPayouts.map(p => {
+                  const isBusy = busyAction === `payout-${p.id}`;
+                  const canApprove = p.state === "scheduled" || p.state === "pending";
+                  return (
+                    <tr key={p.id}>
+                      <td>{partnerNames.get(p.partnerId) ?? <span className="mono">{p.partnerId}</span>}</td>
+                      <td className="mono">{money(p.amountKopeks)}</td>
+                      <td className="muted">{p.reference ?? "—"}</td>
+                      <td>
+                        <Badge tone={p.state === "approved" || p.state === "paid" ? "ok" : p.state === "cancelled" ? "danger" : "warn"}>
+                          {stateLabel(PAYOUT_STATE_LABELS, p.state)}
+                        </Badge>
+                      </td>
+                      <td className="mono">{dt(p.createdAt)}</td>
+                      <td>
+                        {canApprove ? (
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            disabled={isBusy}
+                            leadingIcon={<CheckCircle2 size={15} aria-hidden="true" />}
+                            onClick={() => void approvePartnerPayout(p)}
+                          >
+                            Одобрить выплату
+                          </Button>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <h4 style={{ marginBlock: "8px 10px" }}>Кредит-ноты партнёров</h4>
+        {partnerCreditNotes.length === 0 ? (
+          <p className="muted" style={{ marginBlockEnd: 18 }}>Кредит-ноты партнёров отсутствуют.</p>
+        ) : (
+          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Счёт партнёра</th>
+                  <th>Причина</th>
+                  <th>Сумма</th>
+                  <th>Статус</th>
+                  <th>Создана</th>
+                  <th>Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                {partnerCreditNotes.map(cn => {
+                  const isBusy = busyAction === `credit-note-${cn.id}`;
+                  const canApprove = cn.state !== "approved";
+                  return (
+                    <tr key={cn.id}>
+                      <td className="mono">{cn.invoiceId.slice(0, 8)}</td>
+                      <td>{cn.reason}</td>
+                      <td className="mono">{money(cn.amountKopeks)}</td>
+                      <td>
+                        <Badge tone={cn.state === "approved" || cn.state === "applied" ? "ok" : cn.state === "rejected" ? "danger" : "warn"}>
+                          {stateLabel(CREDIT_NOTE_STATE_LABELS, cn.state)}
+                        </Badge>
+                      </td>
+                      <td className="mono">{dt(cn.createdAt)}</td>
+                      <td>
+                        {canApprove ? (
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            disabled={isBusy}
+                            leadingIcon={<CheckCircle2 size={15} aria-hidden="true" />}
+                            onClick={() => void approvePartnerCreditNote(cn)}
+                          >
+                            Одобрить кредит-ноту
+                          </Button>
+                        ) : (
+                          <span className="muted">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         <h4 style={{ marginBlock: "8px 10px" }}>Фискальный реестр (чеки)</h4>
         {fiscalReceipts.length === 0 ? (
           <p className="muted">Фискальные чеки отсутствуют.</p>
@@ -760,6 +1104,56 @@ export function FinanceWorkspace({
                     <td className="mono">{dt(rec.createdAt)}</td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* 5. Закрытие доставленных заказов */}
+      <section className="panel" aria-labelledby="finance-close-orders-heading">
+        <h3 id="finance-close-orders-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <PackageCheck size={18} aria-hidden="true" />
+          <span>Закрытие доставленных заказов</span>
+        </h3>
+
+        {deliveredOrders.length === 0 ? (
+          <p className="muted">Доставленных заказов, ожидающих закрытия, нет.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Номер заказа</th>
+                  <th>Статус</th>
+                  <th>Создан</th>
+                  <th>Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                {deliveredOrders.map(order => {
+                  const isBusy = busyAction === `close-order-${order.id}`;
+                  return (
+                    <tr key={order.id}>
+                      <td className="mono">{order.publicNumber}</td>
+                      <td>
+                        <Badge tone="ok">{stateLabel(ORDER_STATE_LABELS, order.lifecycleState)}</Badge>
+                      </td>
+                      <td className="mono">{dt(order.createdAt)}</td>
+                      <td>
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          disabled={isBusy}
+                          leadingIcon={<PackageCheck size={15} aria-hidden="true" />}
+                          onClick={() => void closeDeliveredOrder(order)}
+                        >
+                          Закрыть заказ
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Building2,
+  CheckCircle2,
   Package,
   RefreshCw,
   Truck,
@@ -79,6 +80,11 @@ type DispatchOverview = {
   deliveryQueue: QueueOrder[];
   returnOrders: QueueOrder[];
   openDiscrepancies: Discrepancy[];
+};
+type CapacityMismatch = {
+  windowId: string;
+  stored: number;
+  actual: number;
 };
 
 const PARTNER_ASSIGNABLE_STATES = new Set([
@@ -171,6 +177,22 @@ const DISCREPANCY_COLUMNS: DataTableColumn<Discrepancy>[] = [
   { key: "opened", header: "Дата", render: item => <span className="muted">{dt(item.openedAt)}</span> },
 ];
 
+const CAPACITY_DRIFT_COLUMNS: DataTableColumn<CapacityMismatch>[] = [
+  { key: "windowId", header: "Окно (windowId)", render: row => <span className="mono">{row.windowId}</span> },
+  { key: "stored", header: "В окне (reservedOrders)", numeric: true, render: row => <span className="mono">{row.stored}</span> },
+  { key: "actual", header: "Активные удержания (actual)", numeric: true, render: row => <span className="mono">{row.actual}</span> },
+  {
+    key: "delta",
+    header: "Расхождение (delta)",
+    numeric: true,
+    render: row => {
+      const delta = row.stored - row.actual;
+      const sign = delta > 0 ? `+${delta}` : String(delta);
+      return <Badge tone="danger">{sign}</Badge>;
+    },
+  },
+];
+
 export function DispatcherWorkspace({
   notify,
 }: {
@@ -179,6 +201,7 @@ export function DispatcherWorkspace({
   const [data, setData] = useState<DispatchOverview | null>(null);
   const [metrics, setMetrics] = useState<Metric | null>(null);
   const [orders, setOrders] = useState<ScopedOrder[]>([]);
+  const [capacityDrift, setCapacityDrift] = useState<CapacityMismatch[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [busyAction, setBusyAction] = useState<"pickup" | "partner" | "delivery" | null>(null);
@@ -193,14 +216,16 @@ export function DispatcherWorkspace({
   const fetchData = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [overview, metricsData, orderRows] = await Promise.all([
+      const [overview, metricsData, orderRows, reconciliationRows] = await Promise.all([
         api<DispatchOverview>("/dispatch/overview"),
         api<Metric>("/ops/metrics"),
         api<ScopedOrder[]>("/orders"),
+        api<CapacityMismatch[]>("/dispatch/capacity-reconciliation"),
       ]);
       setData(overview);
       setMetrics(metricsData);
       setOrders(orderRows);
+      setCapacityDrift(Array.isArray(reconciliationRows) ? reconciliationRows : []);
       setRefreshNonce(n => n + 1);
     } catch (error) {
       notify({ kind: "error", text: `Ошибка загрузки данных: ${formatError(error)}` });
@@ -650,6 +675,36 @@ export function DispatcherWorkspace({
               <EmptyState
                 icon={<AlertTriangle size={20} aria-hidden="true" />}
                 title="Открытых расхождений нет."
+              />
+            }
+          />
+        </CardBody>
+      </Card>
+
+      {/* 8. Сверка ёмкости слотов */}
+      <Card>
+        <CardHeader
+          title="Сверка ёмкости слотов"
+          subtitle="Сравнение счётчика reservedOrders с активными удержаниями и бронями"
+          actions={
+            <Badge tone={capacityDrift.length > 0 ? "danger" : "ok"}>
+              {capacityDrift.length > 0
+                ? `Расхождений: ${capacityDrift.length}`
+                : "Расхождений нет"}
+            </Badge>
+          }
+        />
+        <CardBody>
+          <DataTable
+            columns={CAPACITY_DRIFT_COLUMNS}
+            rows={capacityDrift}
+            rowKey={row => row.windowId}
+            caption="Сверка ёмкости слотов"
+            empty={
+              <EmptyState
+                icon={<CheckCircle2 size={20} aria-hidden="true" />}
+                title="Расхождений ёмкости слотов нет."
+                text="Значения reservedOrders по всем окнам соответствуют сумме активных удержаний."
               />
             }
           />
