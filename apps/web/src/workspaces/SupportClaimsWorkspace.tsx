@@ -57,13 +57,15 @@ type SupportThread = {
   publicNumber?: string | null;
   channel?: string;
   subject?: string | null;
-  status: string;
+  state?: string;
+  status?: string;
   createdAt: string;
   updatedAt?: string;
 };
 
 type SupportMessage = {
   id: string;
+  isMine?: boolean;
   senderType?: string;
   authorRole?: string;
   senderRole?: string;
@@ -87,11 +89,13 @@ type ClaimSummary = {
   state?: string;
   status?: string;
   claimType?: string;
+  description?: string;
   reason?: string;
   summary?: string;
   claimedAmountKopeks?: number;
   compensationKopeks?: number;
-  createdAt: string;
+  openedAt?: string;
+  createdAt?: string;
 };
 
 type ClaimItem = {
@@ -99,6 +103,7 @@ type ClaimItem = {
   orderItemId?: string;
   title?: string;
   description?: string;
+  issue?: string;
   name?: string;
   quantity?: number;
   claimedAmountKopeks?: number;
@@ -118,7 +123,7 @@ type ClaimDecision = {
 };
 
 type EvidenceHold = {
-  id: string;
+  id?: string;
   evidenceAssetId?: string;
   assetId?: string;
   objectKey?: string;
@@ -130,7 +135,7 @@ type EvidenceHold = {
 
 type EvidenceAsset = {
   id: string;
-  objectKey: string;
+  objectKey?: string;
   sha256?: string;
   sha256Hex?: string;
   contentHash?: string;
@@ -196,6 +201,7 @@ function isAssetOnLegalHold(asset: EvidenceAsset, holds: EvidenceHold[]): boolea
 }
 
 function isCustomerMessage(msg: SupportMessage): boolean {
+  if (typeof msg.isMine === "boolean") return !msg.isMine;
   const role = (msg.senderType ?? msg.authorRole ?? msg.senderRole ?? "").toLowerCase();
   if (role === "customer" || role === "client") return true;
   if (msg.direction?.toLowerCase() === "inbound") return true;
@@ -240,7 +246,6 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const [foundOrders, setFoundOrders] = useState<SupportOrder[]>([]);
 
   const [ticketOrder, setTicketOrder] = useState<SupportOrder | null>(null);
-  const [ticketChannel, setTicketChannel] = useState<"call" | "chat">("call");
   const [ticketSubject, setTicketSubject] = useState("");
   const [ticketBody, setTicketBody] = useState("");
   const [creatingTicket, setCreatingTicket] = useState(false);
@@ -385,8 +390,8 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   async function handleOrderSearch(e: FormEvent) {
     e.preventDefault();
     const trimmed = orderQuery.trim();
-    if (!trimmed) {
-      notify({ kind: "error", text: "Введите номер заказа (LA-...) или телефон (+7...)" });
+    if (trimmed.length < 4) {
+      notify({ kind: "error", text: "Введите минимум 4 символа номера заказа (LA-...) или телефона (+7...)" });
       return;
     }
     setSearchingOrders(true);
@@ -403,7 +408,6 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   function openTicketModal(order: SupportOrder) {
     setTicketOrder(order);
-    setTicketChannel("call");
     setTicketSubject(`Обращение по заказу ${order.publicNumber}`);
     setTicketBody("");
   }
@@ -413,12 +417,12 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     if (!ticketOrder) return;
     const subject = ticketSubject.trim();
     const body = ticketBody.trim();
-    if (!subject) {
-      notify({ kind: "error", text: "Укажите тему обращения" });
+    if (subject.length < 3) {
+      notify({ kind: "error", text: "Тема обращения должна содержать минимум 3 символа" });
       return;
     }
-    if (!body) {
-      notify({ kind: "error", text: "Введите текст обращения" });
+    if (body.length < 3) {
+      notify({ kind: "error", text: "Текст обращения должен содержать минимум 3 символа" });
       return;
     }
     setCreatingTicket(true);
@@ -427,19 +431,20 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         method: "POST",
         body: {
           orderId: ticketOrder.id,
-          channel: ticketChannel,
           subject,
           body,
         },
       });
       const createdThread = (res.thread as SupportThread | undefined) ?? (res as unknown as SupportThread);
+      const createdId = (typeof res.threadId === "string" ? res.threadId : undefined) ?? createdThread?.id;
       setTicketOrder(null);
       setTicketSubject("");
       setTicketBody("");
       notify({ kind: "ok", text: `Обращение по заказу ${ticketOrder.publicNumber} зарегистрировано` });
       await loadThreads();
-      if (createdThread?.id) {
-        await loadThreadDetail(createdThread.id);
+      if (createdId) {
+        await loadThreadDetail(createdId);
+        setActiveSection("threads");
       }
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -784,6 +789,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   {threads.map((t) => {
                     const isSelected = t.id === selectedThreadId;
                     const orderRef = t.orderPublicNumber ?? t.publicNumber;
+                    const threadState = t.state ?? t.status ?? "open";
                     return (
                       <button
                         key={t.id}
@@ -806,8 +812,8 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                             </span>
                           </span>
                         </span>
-                        <Badge tone={threadStatusTone(t.status)}>
-                          {stateLabel(THREAD_STATUS_LABELS, t.status)}
+                        <Badge tone={threadStatusTone(threadState)}>
+                          {stateLabel(THREAD_STATUS_LABELS, threadState)}
                         </Badge>
                       </button>
                     );
@@ -834,7 +840,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   </h3>
                   <span className="muted row row--tight">
                     <span>
-                      Статус: {stateLabel(THREAD_STATUS_LABELS, threadDetail.thread.status)}
+                      Статус: {stateLabel(THREAD_STATUS_LABELS, threadDetail.thread.state ?? threadDetail.thread.status ?? "open")}
                       {threadDetail.thread.orderPublicNumber
                         ? ` · Заказ ${threadDetail.thread.orderPublicNumber}`
                         : ""}
@@ -842,7 +848,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   </span>
                 </div>
 
-                {threadDetail.thread.status !== "closed" && (
+                {(threadDetail.thread.state ?? threadDetail.thread.status ?? "open") !== "closed" && (
                   <div className="row row--tight">
                     <Input
                       aria-label="Причина закрытия обращения"
@@ -889,7 +895,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   </div>
                 )}
 
-                {threadDetail.thread.status !== "closed" ? (
+                {(threadDetail.thread.state ?? threadDetail.thread.status ?? "open") !== "closed" ? (
                   <form onSubmit={handleSendReply} className="stack">
                     <Textarea
                       label="Ответ клиенту"
@@ -967,7 +973,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                             </span>
                             <span className="muted row row--tight">
                               <span>
-                                {c.reason ?? c.summary ?? (c.claimType ? stateLabel(CLAIM_TYPE_LABELS, c.claimType) : "Претензия")} · {dt(c.createdAt)}
+                                {c.description ?? c.reason ?? c.summary ?? (c.claimType ? stateLabel(CLAIM_TYPE_LABELS, c.claimType) : "Претензия")} · {dt(c.openedAt ?? c.createdAt)}
                               </span>
                             </span>
                           </span>
@@ -1006,7 +1012,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   </div>
                   <span className="muted row row--tight">
                     <span>
-                      Создана: {dt(claimDetail.claim.createdAt)}
+                      Создана: {dt(claimDetail.claim.openedAt ?? claimDetail.claim.createdAt)}
                       {claimDetail.claim.claimedAmountKopeks !== undefined
                         ? ` · Заявлено: ${money(claimDetail.claim.claimedAmountKopeks)}`
                         : ""}
@@ -1015,38 +1021,43 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                         : ""}
                     </span>
                   </span>
-                  {(claimDetail.claim.reason || claimDetail.claim.summary) && (
+                  {(claimDetail.claim.description || claimDetail.claim.reason || claimDetail.claim.summary) && (
                     <span className="row row--tight">
-                      <span>{claimDetail.claim.reason ?? claimDetail.claim.summary}</span>
+                      <span>{claimDetail.claim.description ?? claimDetail.claim.reason ?? claimDetail.claim.summary}</span>
                     </span>
                   )}
                 </div>
 
                 <div className="button-row">
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      setCompRub("");
-                      setCompModalOpen(true);
-                    }}
-                    leadingIcon={<Banknote size={16} aria-hidden="true" />}
-                  >
-                    Предложить компенсацию
-                  </Button>
-
-                  {canDecideClaims && (
+                  {["resolved", "decision_pending", "escalated"].includes(activeClaimStatus) && (
                     <Button
-                      variant="primary"
+                      variant="ghost"
                       onClick={() => {
-                        setDecisionOutcome("resolved");
-                        setDecisionRationale("");
-                        setDecisionModalOpen(true);
+                        setCompRub("");
+                        setCompModalOpen(true);
                       }}
-                      leadingIcon={<Scale size={16} aria-hidden="true" />}
+                      leadingIcon={<Banknote size={16} aria-hidden="true" />}
                     >
-                      Вынести решение
+                      Предложить компенсацию
                     </Button>
                   )}
+
+                  {canDecideClaims &&
+                    ["opened", "triage", "investigating", "decision_pending", "escalated", "reopened"].includes(
+                      activeClaimStatus,
+                    ) && (
+                      <Button
+                        variant="primary"
+                        onClick={() => {
+                          setDecisionOutcome("resolved");
+                          setDecisionRationale("");
+                          setDecisionModalOpen(true);
+                        }}
+                        leadingIcon={<Scale size={16} aria-hidden="true" />}
+                      >
+                        Вынести решение
+                      </Button>
+                    )}
 
                   {canReopenClaim && (
                     <Button
@@ -1071,7 +1082,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                           <span className="data-row__main">
                             <span className="row row--tight">
                               <strong>
-                                {item.title ?? item.name ?? item.description ?? `Позиция #${item.id.slice(0, 6)}`}
+                                {item.title ?? item.name ?? item.description ?? item.issue ?? `Позиция #${item.id.slice(0, 6)}`}
                               </strong>
                             </span>
                             {item.description && item.title ? (
@@ -1114,7 +1125,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                           <div className="data-row" key={asset.id}>
                             <span className="data-row__main">
                               <span className="row row--tight">
-                                <code>{asset.objectKey}</code>
+                                <code>{asset.objectKey || `Файл #${asset.id.slice(0, 8)}`}</code>
                               </span>
                               <span className="muted row row--tight">
                                 <span>
@@ -1130,11 +1141,11 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                     </div>
                   ) : (
                     <div className="data-list">
-                      {claimDetail.evidenceHolds.map((hold) => (
-                        <div className="data-row" key={hold.id}>
+                      {claimDetail.evidenceHolds.map((hold, idx) => (
+                        <div className="data-row" key={hold.id ?? hold.assetId ?? idx}>
                           <span className="data-row__main">
                             <span className="row row--tight">
-                              <code>{hold.objectKey ?? hold.evidenceAssetId ?? hold.assetId ?? hold.id}</code>
+                              <code>{hold.objectKey ?? hold.evidenceAssetId ?? hold.assetId ?? hold.id ?? `Удержание #${idx + 1}`}</code>
                             </span>
                             {hold.reason ? (
                               <span className="muted row row--tight">
@@ -1278,15 +1289,6 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         onClose={() => setTicketOrder(null)}
       >
         <form onSubmit={handleCreateTicket} className="stack">
-          <Select
-            label="Канал обращения"
-            value={ticketChannel}
-            onChange={(e) => setTicketChannel(e.target.value as "call" | "chat")}
-          >
-            <option value="call">Звонок</option>
-            <option value="chat">Чат</option>
-          </Select>
-
           <Input
             label="Тема обращения"
             type="text"

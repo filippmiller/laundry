@@ -136,9 +136,38 @@ const SHIFT_COLUMNS: DataTableColumn<Shift>[] = [
   },
 ];
 
+function formatDiscrepancyDetails(detailsJson: string): string {
+  if (!detailsJson) return "—";
+  try {
+    const parsed = JSON.parse(detailsJson) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const entries = Object.entries(parsed as Record<string, unknown>);
+      if (entries.length === 0) return "—";
+      return entries.map(([k, v]) => `${k}: ${String(v)}`).join(", ");
+    }
+    return String(parsed);
+  } catch {
+    return detailsJson;
+  }
+}
+
 const DISCREPANCY_COLUMNS: DataTableColumn<Discrepancy>[] = [
   { key: "number", header: "Номер", render: item => <span className="mono">{item.publicNumber}</span> },
+  {
+    key: "orderState",
+    header: "Статус заказа",
+    render: item => (
+      <Badge tone={orderStateTone(item.orderState)}>
+        {stateLabel(ORDER_STATE_LABELS, item.orderState)}
+      </Badge>
+    ),
+  },
   { key: "kind", header: "Тип", render: item => stateLabel(DISCREPANCY_KIND_LABELS, item.kind) },
+  {
+    key: "details",
+    header: "Детали",
+    render: item => <span className="muted">{formatDiscrepancyDetails(item.detailsJson)}</span>,
+  },
   { key: "opened", header: "Дата", render: item => <span className="muted">{dt(item.openedAt)}</span> },
 ];
 
@@ -151,6 +180,7 @@ export function DispatcherWorkspace({
   const [metrics, setMetrics] = useState<Metric | null>(null);
   const [orders, setOrders] = useState<ScopedOrder[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const [busyAction, setBusyAction] = useState<"pickup" | "partner" | "delivery" | null>(null);
 
   const [pickupOrderId, setPickupOrderId] = useState("");
@@ -171,6 +201,7 @@ export function DispatcherWorkspace({
       setData(overview);
       setMetrics(metricsData);
       setOrders(orderRows);
+      setRefreshNonce(n => n + 1);
     } catch (error) {
       notify({ kind: "error", text: `Ошибка загрузки данных: ${formatError(error)}` });
     } finally {
@@ -187,11 +218,17 @@ export function DispatcherWorkspace({
     [data?.shifts],
   );
   const assignablePickupOrders = useMemo(
-    () => (data?.pickupQueue ?? []).filter(order => order.lifecycleState === "scheduled"),
+    () =>
+      (data?.pickupQueue ?? []).filter(order =>
+        ["scheduled", "pickup_assigned"].includes(order.lifecycleState),
+      ),
     [data?.pickupQueue],
   );
   const assignableDeliveryOrders = useMemo(
-    () => (data?.deliveryQueue ?? []).filter(order => order.lifecycleState === "ready"),
+    () =>
+      (data?.deliveryQueue ?? []).filter(order =>
+        ["ready", "out_for_delivery"].includes(order.lifecycleState),
+      ),
     [data?.deliveryQueue],
   );
   const assignablePartnerOrders = useMemo(
@@ -331,7 +368,7 @@ export function DispatcherWorkspace({
           <StatGrid>
             <StatTile
               label="Активные смены"
-              value={metrics.activeShifts}
+              value={activeShifts.length}
               icon={<Truck size={16} aria-hidden="true" />}
             />
             <StatTile
@@ -364,13 +401,13 @@ export function DispatcherWorkspace({
       </Card>
 
       {/* 2. Объём: что приняли и сколько весит */}
-      <ItemMixPanel notify={notify} />
+      <ItemMixPanel key={refreshNonce} notify={notify} />
 
       {/* 3. Сколько идёт заказ: где теряется время */}
-      <ChronometryPanel notify={notify} />
+      <ChronometryPanel key={refreshNonce} notify={notify} />
 
       {/* 4. Клиенты, у которых доставка не состоялась */}
-      <ChurnPanel notify={notify} />
+      <ChurnPanel key={refreshNonce} notify={notify} />
 
       {/* 5. Назначение курьера на забор, фабрики-прачечной и доставки */}
       <Card>
@@ -534,7 +571,7 @@ export function DispatcherWorkspace({
       {/* 6. Очереди забора и доставки */}
       <Card>
         <CardHeader title="Очереди забора и доставки" />
-        <CardBody>
+        <CardBody className="stack">
           <div className="grid-two">
             <div className="stack">
               <h4 className="section-title">Ожидают забора</h4>
@@ -578,6 +615,25 @@ export function DispatcherWorkspace({
               )}
             </div>
           </div>
+          {data.returnOrders.length > 0 && (
+            <div className="stack">
+              <h4 className="section-title">Возвраты без обработки</h4>
+              <Stagger as="ul" className="data-list">
+                {data.returnOrders.map(order => (
+                  <Reveal as="li" key={order.id} className="data-row">
+                    <span className="mono">{order.publicNumber}</span>
+                    <span className="muted">{order.address}</span>
+                    <Badge tone={orderStateTone(order.lifecycleState)}>
+                      {stateLabel(ORDER_STATE_LABELS, order.lifecycleState)}
+                    </Badge>
+                    {order.returnReason ? (
+                      <span className="muted">{order.returnReason}</span>
+                    ) : null}
+                  </Reveal>
+                ))}
+              </Stagger>
+            </div>
+          )}
         </CardBody>
       </Card>
 

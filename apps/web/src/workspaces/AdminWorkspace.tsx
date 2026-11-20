@@ -44,6 +44,7 @@ type OpsMetrics = {
   activeOrders?: number;
   ordersInProgress?: number;
   inProgressOrders?: number;
+  ordersByState?: Record<string, number>;
   openClaims?: number;
   capturedKopeks?: number;
   capturedTotalKopeks?: number;
@@ -311,10 +312,16 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
   const handleRevokeOwnSession = async (sessionId: string) => {
     setBusy(true);
     try {
+      const targetSession = ownSessions.find((s) => s.id === sessionId);
+      const isCurrentSession = Boolean(targetSession?.current ?? targetSession?.isCurrent);
       await api(`/auth/sessions/${encodeURIComponent(sessionId)}/revoke`, {
         method: "POST",
         body: {},
       });
+      if (isCurrentSession) {
+        window.location.reload();
+        return;
+      }
       notify({ kind: "ok", text: `Сессия ${sessionId} отозвана` });
       await loadAll();
     } catch (err) {
@@ -355,8 +362,19 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
     }
   };
 
+  const TERMINAL_ORDER_STATES = new Set(["delivered", "closed", "cancelled"]);
   const activeOrdersCount =
-    metrics?.activeOrders ?? metrics?.ordersInProgress ?? metrics?.inProgressOrders ?? metrics?.orders?.active ?? metrics?.orders?.inProgress ?? 0;
+    metrics?.activeOrders ??
+    metrics?.ordersInProgress ??
+    metrics?.inProgressOrders ??
+    metrics?.orders?.active ??
+    metrics?.orders?.inProgress ??
+    (metrics?.ordersByState
+      ? Object.entries(metrics.ordersByState).reduce(
+          (sum, [state, count]) => (TERMINAL_ORDER_STATES.has(state) ? sum : sum + count),
+          0,
+        )
+      : 0);
   const openClaimsCount = metrics?.openClaims ?? metrics?.claims?.open ?? 0;
   const capturedKopeks =
     metrics?.capturedKopeks ?? metrics?.capturedTotalKopeks ?? metrics?.payments?.capturedKopeks ?? metrics?.revenueKopeks ?? 0;
@@ -612,7 +630,7 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
               type="text"
               value={adminSessionId}
               onChange={(e) => setAdminSessionId(e.target.value)}
-              placeholder="Например, sess_01H..."
+              placeholder="00000000-0000-4000-8000-000000000000"
               required
             />
             <Input
