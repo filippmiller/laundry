@@ -32,6 +32,13 @@ export type WorkspaceDef = {
 /**
  * The single registry of role workspaces. The rail, the router and the
  * topbar all read from this list so a new role only has to be described once.
+ *
+ * Note on unmapped backend roles: `"driver"` and `"hub_worker"` exist in
+ * `src/core/context.ts`, but neither is authorized by the backend read
+ * endpoints (`GET /courier/routes/current` requires `courier` or
+ * `ROLE_GROUPS.dispatcher`; `GET /partner/workspace` requires
+ * `ROLE_GROUPS.partner`). They are intentionally omitted here to avoid
+ * mounting a workspace that immediately fails with 403.
  */
 export const WORKSPACES: readonly WorkspaceDef[] = [
   {

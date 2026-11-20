@@ -6,7 +6,14 @@ import { DemoConfig, Me, Notice } from "./types";
 import { Shell } from "./components/Shell";
 import { Router } from "./components/Router";
 import { AuthLanding } from "./workspaces/AuthLanding";
-import { workspacesForRoles, type WorkspaceKey } from "./workspaces/registry";
+import { WORKSPACES, workspacesForRoles, type WorkspaceKey } from "./workspaces/registry";
+
+export function workspaceFromHash(hash: string): WorkspaceKey | null {
+  if (!hash.startsWith("#/")) return null;
+  const key = hash.slice(2).split(/[/?#]/)[0];
+  const match = WORKSPACES.find(ws => ws.key === key);
+  return match ? match.key : null;
+}
 
 function App() {
   const [demo, setDemo] = useState<DemoConfig | null>(null);
@@ -31,7 +38,7 @@ function App() {
       .catch(() => setBooting(false));
   }, []);
 
-  // Open the first workspace this session is allowed to see.
+  // Open the workspace from URL hash if allowed for this session, otherwise fall back to the first allowed workspace.
   const available = useMemo(() => workspacesForRoles(me?.roles ?? []), [me?.roles]);
   useEffect(() => {
     if (!me) {
@@ -43,16 +50,47 @@ function App() {
       setActiveWorkspace(null);
       return;
     }
-    setActiveWorkspace(current => (current && options.some(item => item.key === current) ? current : options[0].key));
+    const fromHash = workspaceFromHash(window.location.hash);
+    if (fromHash && options.some(item => item.key === fromHash)) {
+      setActiveWorkspace(fromHash);
+      return;
+    }
+    const fallback = options[0].key;
+    setActiveWorkspace(fallback);
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${fallback}`);
   }, [me]);
 
+  useEffect(() => {
+    if (!me) return;
+    const options = workspacesForRoles(me.roles);
+    function onHashChange() {
+      const fromHash = workspaceFromHash(window.location.hash);
+      if (fromHash && options.some(item => item.key === fromHash)) {
+        setActiveWorkspace(fromHash);
+      }
+    }
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [me]);
+
+  function selectWorkspace(key: WorkspaceKey) {
+    setActiveWorkspace(key);
+    const nextHash = `#/${key}`;
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+    }
+  }
+
   function handleAuthenticated(nextMe: Me, roleHint?: string) {
-    setMe(nextMe);
     if (roleHint) {
       const options = workspacesForRoles(nextMe.roles);
       const preferred = options.find(ws => ws.roles.includes(roleHint));
-      if (preferred) setActiveWorkspace(preferred.key);
+      if (preferred) {
+        setActiveWorkspace(preferred.key);
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${preferred.key}`);
+      }
     }
+    setMe(nextMe);
     setNotice({ kind: "ok", text: "Вы вошли" });
   }
 
@@ -60,6 +98,7 @@ function App() {
     await api("/auth/logout", { method: "POST", body: {} }).catch(() => undefined);
     setMe(null);
     setNotice(null);
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
   }
 
   return (
@@ -71,7 +110,7 @@ function App() {
         setNotice={setNotice}
         workspaces={available}
         activeWorkspace={activeWorkspace}
-        onSelectWorkspace={setActiveWorkspace}
+        onSelectWorkspace={selectWorkspace}
       >
         {booting ? (
           <div className="boot" role="status" aria-live="polite">
