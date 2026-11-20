@@ -84,7 +84,16 @@ export function Shell({
 
   return (
     <div className="app-shell" data-rail-open={railOpen ? "true" : "false"}>
-      <a className="skip-link" href="#workspace">
+      <a
+        className="skip-link"
+        href="#workspace"
+        onClick={(event) => {
+          event.preventDefault();
+          const workspace = document.getElementById("workspace");
+          workspace?.focus();
+          workspace?.scrollIntoView({ block: "start" });
+        }}
+      >
         Перейти к основному содержимому
       </a>
 

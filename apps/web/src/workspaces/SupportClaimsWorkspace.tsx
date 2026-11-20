@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import {
   Banknote,
   CheckCircle2,
@@ -66,6 +66,7 @@ type SupportThread = {
 type SupportMessage = {
   id: string;
   isMine?: boolean;
+  authorKind?: "customer" | "support";
   senderType?: string;
   authorRole?: string;
   senderRole?: string;
@@ -201,6 +202,8 @@ function isAssetOnLegalHold(asset: EvidenceAsset, holds: EvidenceHold[]): boolea
 }
 
 function isCustomerMessage(msg: SupportMessage): boolean {
+  if (msg.authorKind === "customer") return true;
+  if (msg.authorKind === "support") return false;
   if (typeof msg.isMine === "boolean") return !msg.isMine;
   const role = (msg.senderType ?? msg.authorRole ?? msg.senderRole ?? "").toLowerCase();
   if (role === "customer" || role === "client") return true;
@@ -289,6 +292,9 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const [hideReason, setHideReason] = useState("");
   const [submittingHide, setSubmittingHide] = useState(false);
 
+  const threadReqRef = useRef(0);
+  const claimReqRef = useRef(0);
+
   const loadThreads = useCallback(async () => {
     setLoadingThreads(true);
     try {
@@ -303,17 +309,23 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   const loadThreadDetail = useCallback(
     async (threadId: string) => {
+      const reqId = ++threadReqRef.current;
       setSelectedThreadId(threadId);
+      setThreadDetail(null);
       setLoadingThreadDetail(true);
       try {
         const res = await api<Record<string, unknown>>(`/support/threads/${threadId}`);
+        if (threadReqRef.current !== reqId) return;
         const thread = (res.thread as SupportThread | undefined) ?? (res as unknown as SupportThread);
         const messages = unwrapList<SupportMessage>(res.messages ?? res, ["messages", "items"]);
         setThreadDetail({ thread, messages });
       } catch (err) {
+        if (threadReqRef.current !== reqId) return;
         notify({ kind: "error", text: formatError(err) });
       } finally {
-        setLoadingThreadDetail(false);
+        if (threadReqRef.current === reqId) {
+          setLoadingThreadDetail(false);
+        }
       }
     },
     [notify],
@@ -333,7 +345,10 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   const loadClaimAndEvidence = useCallback(
     async (claimId: string, knownOrderId?: string) => {
+      const reqId = ++claimReqRef.current;
       setSelectedClaimId(claimId);
+      setClaimDetail(null);
+      setOrderEvidence([]);
       setLoadingClaimDetail(true);
       try {
         const claimPromise = api<Record<string, unknown>>(`/claims/${claimId}`);
@@ -342,6 +357,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
           : Promise.resolve(null);
 
         const [claimRes, preloadedEvidenceRes] = await Promise.all([claimPromise, evidencePromise]);
+        if (claimReqRef.current !== reqId) return;
 
         const claimObj = (claimRes.claim as ClaimSummary | undefined) ?? (claimRes as unknown as ClaimSummary);
         const items = unwrapList<ClaimItem>(claimRes.items, ["items"]);
@@ -358,12 +374,16 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         let evidenceRes = preloadedEvidenceRes;
         if (!evidenceRes && claimObj?.orderId) {
           evidenceRes = await api<unknown>(`/evidence/order/${claimObj.orderId}`);
+          if (claimReqRef.current !== reqId) return;
         }
         setOrderEvidence(unwrapList<EvidenceAsset>(evidenceRes, ["assets", "evidence", "items"]));
       } catch (err) {
+        if (claimReqRef.current !== reqId) return;
         notify({ kind: "error", text: formatError(err) });
       } finally {
-        setLoadingClaimDetail(false);
+        if (claimReqRef.current === reqId) {
+          setLoadingClaimDetail(false);
+        }
       }
     },
     [notify],
@@ -455,7 +475,8 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   async function handleSendReply(e: FormEvent) {
     e.preventDefault();
-    if (!selectedThreadId) return;
+    if (!threadDetail || threadDetail.thread.id !== selectedThreadId) return;
+    const targetThreadId = threadDetail.thread.id;
     const trimmed = replyText.trim();
     if (!trimmed) {
       notify({ kind: "error", text: "Введите текст ответа" });
@@ -463,13 +484,13 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     }
     setSendingReply(true);
     try {
-      await api(`/support/threads/${selectedThreadId}/messages`, {
+      await api(`/support/threads/${targetThreadId}/messages`, {
         method: "POST",
         body: { body: trimmed },
       });
       setReplyText("");
       notify({ kind: "ok", text: "Сообщение отправлено клиенту" });
-      await Promise.all([loadThreadDetail(selectedThreadId), loadThreads()]);
+      await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -478,7 +499,8 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   }
 
   async function handleCloseThread() {
-    if (!selectedThreadId) return;
+    if (!threadDetail || threadDetail.thread.id !== selectedThreadId) return;
+    const targetThreadId = threadDetail.thread.id;
     // The route requires a reason of at least three characters: an empty body was rejected with
     // 400, so the "Закрыть обращение" button never worked.
     const reason = closeReason.trim();
@@ -488,13 +510,13 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     }
     setClosingThread(true);
     try {
-      await api(`/support/threads/${selectedThreadId}/close`, {
+      await api(`/support/threads/${targetThreadId}/close`, {
         method: "POST",
         body: { reason },
       });
       notify({ kind: "ok", text: "Обращение закрыто" });
       setCloseReason("");
-      await Promise.all([loadThreadDetail(selectedThreadId), loadThreads()]);
+      await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -504,7 +526,9 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   async function handleProposeCompensation(e: FormEvent) {
     e.preventDefault();
-    if (!selectedClaimId || !claimDetail) return;
+    if (!claimDetail || claimDetail.claim.id !== selectedClaimId) return;
+    const targetClaimId = claimDetail.claim.id;
+    const targetOrderId = claimDetail.claim.orderId;
     const parsed = Number(compRub.replace(",", "."));
     const amountKopeks = Math.round(parsed * 100);
     if (!Number.isFinite(parsed) || amountKopeks <= 0) {
@@ -513,7 +537,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     }
     setSubmittingComp(true);
     try {
-      await api(`/claims/${selectedClaimId}/compensations`, {
+      await api(`/claims/${targetClaimId}/compensations`, {
         method: "POST",
         body: { amountKopeks },
       });
@@ -522,7 +546,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       notify({ kind: "ok", text: `Компенсация ${money(amountKopeks)} предложена` });
       await Promise.all([
         loadClaims(),
-        loadClaimAndEvidence(selectedClaimId, claimDetail.claim.orderId),
+        loadClaimAndEvidence(targetClaimId, targetOrderId),
       ]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -533,7 +557,9 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   async function handleSubmitDecision(e: FormEvent) {
     e.preventDefault();
-    if (!selectedClaimId || !claimDetail) return;
+    if (!claimDetail || claimDetail.claim.id !== selectedClaimId) return;
+    const targetClaimId = claimDetail.claim.id;
+    const targetOrderId = claimDetail.claim.orderId;
     const rationale = decisionRationale.trim();
     if (rationale.length < 10) {
       notify({ kind: "error", text: "Обоснование решения должно содержать минимум 10 символов" });
@@ -541,7 +567,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     }
     setSubmittingDecision(true);
     try {
-      await api(`/claims/${selectedClaimId}/decision`, {
+      await api(`/claims/${targetClaimId}/decision`, {
         method: "POST",
         body: {
           outcome: decisionOutcome,
@@ -553,7 +579,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       notify({ kind: "ok", text: "Решение по претензии вынесено" });
       await Promise.all([
         loadClaims(),
-        loadClaimAndEvidence(selectedClaimId, claimDetail.claim.orderId),
+        loadClaimAndEvidence(targetClaimId, targetOrderId),
       ]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -564,7 +590,9 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   async function handleReopenClaim(e: FormEvent) {
     e.preventDefault();
-    if (!selectedClaimId || !claimDetail) return;
+    if (!claimDetail || claimDetail.claim.id !== selectedClaimId) return;
+    const targetClaimId = claimDetail.claim.id;
+    const targetOrderId = claimDetail.claim.orderId;
     const reason = reopenReason.trim();
     if (reason.length < 5) {
       notify({ kind: "error", text: "Причина переоткрытия должна содержать минимум 5 символов" });
@@ -572,7 +600,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     }
     setSubmittingReopen(true);
     try {
-      await api(`/claims/${selectedClaimId}/reopen`, {
+      await api(`/claims/${targetClaimId}/reopen`, {
         method: "POST",
         body: { reason },
       });
@@ -581,7 +609,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       notify({ kind: "ok", text: "Претензия переоткрыта" });
       await Promise.all([
         loadClaims(),
-        loadClaimAndEvidence(selectedClaimId, claimDetail.claim.orderId),
+        loadClaimAndEvidence(targetClaimId, targetOrderId),
       ]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -875,13 +903,24 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                 ) : (
                   <div className="data-list">
                     {threadDetail.messages.map((m) => {
-                      const fromCustomer = isCustomerMessage(m);
+                      const label = m.isMine
+                        ? "вы"
+                        : m.authorKind === "support"
+                          ? "сотрудник"
+                          : isCustomerMessage(m)
+                            ? "клиент"
+                            : "сотрудник";
+                      const tone: BadgeTone = m.isMine
+                        ? "accent"
+                        : label === "клиент"
+                          ? "info"
+                          : "neutral";
                       return (
                         <div className="data-row" key={m.id}>
                           <span className="data-row__main">
                             <span className="row row--tight">
-                              <Badge tone={fromCustomer ? "info" : "accent"}>
-                                {fromCustomer ? "клиент" : "вы"}
+                              <Badge tone={tone}>
+                                {label}
                               </Badge>
                               <span className="muted">{dt(m.createdAt)}</span>
                             </span>

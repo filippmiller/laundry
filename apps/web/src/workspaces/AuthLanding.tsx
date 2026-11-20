@@ -234,7 +234,12 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
       });
       setOtpRequested(true);
       setDevCodeHint(res?.devCode ?? null);
-      notify({ kind: "ok", text: "Код подтверждения отправлен" });
+      notify({
+        kind: "ok",
+        text: res?.devCode
+          ? "Тестовый код сформирован (демо-провайдер, реальная SMS не отправляется)"
+          : "Код подтверждения отправлен",
+      });
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
