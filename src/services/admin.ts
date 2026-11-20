@@ -1,9 +1,10 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   auditEvents, memberships, membershipRoles, partners, sessions, users,
 } from "../db/schema.js";
 import { assertRole, type Principal, type Role } from "../core/context.js";
+import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 
@@ -28,33 +29,90 @@ async function writeAudit(
   });
 }
 
-export async function listMembers(db: Db, principal: Principal) {
+export async function listMembersPage(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number; cursor?: string; query?: string; state?: string } = {},
+) {
   assertRole(principal, ...AUDIT_ROLES);
-  const rows = await db.select({
-    userId: memberships.userId,
-    membershipId: memberships.id,
-    phone: users.phone,
-    displayName: users.displayName,
-    state: memberships.state,
-    partnerId: memberships.partnerId,
-    partnerName: partners.name,
-    createdAt: memberships.createdAt,
-  }).from(memberships)
-    .innerJoin(users, eq(users.id, memberships.userId))
-    .leftJoin(partners, eq(partners.id, memberships.partnerId))
-    .where(eq(memberships.organizationId, principal.organizationId))
-    .orderBy(desc(memberships.createdAt))
-    .limit(200);
-  const roles = await db.select({
-    membershipId: membershipRoles.membershipId, role: membershipRoles.role,
-  }).from(membershipRoles)
-    .innerJoin(memberships, eq(memberships.id, membershipRoles.membershipId))
-    .where(eq(memberships.organizationId, principal.organizationId));
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 100), 1), 200);
+  const decoded = input.cursor ? decodeKeysetCursor(input.cursor) : null;
+  const trimmedQuery = input.query?.trim();
+  const likePattern = trimmedQuery ? `%${escapeLikePattern(trimmedQuery)}%` : null;
+  const stateFilter = input.state?.trim() || null;
+
+  const baseWhere = and(
+    eq(memberships.organizationId, principal.organizationId),
+    stateFilter ? sql`${memberships.state} = ${stateFilter}` : undefined,
+    likePattern
+      ? or(
+        sql`${users.phone} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${users.displayName} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${partners.name} ILIKE ${likePattern} ESCAPE '\\'`,
+      )
+      : undefined,
+  );
+  const pageWhere = and(
+    baseWhere,
+    decoded
+      ? sql`(${memberships.createdAt}, ${memberships.id}) < (${decoded.ts}, ${decoded.id})`
+      : undefined,
+  );
+
+  const [[countRow], rows] = await Promise.all([
+    db.select({ count: sql<number>`count(*)::int` })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .leftJoin(partners, eq(partners.id, memberships.partnerId))
+      .where(baseWhere),
+    db.select({
+      userId: memberships.userId,
+      membershipId: memberships.id,
+      phone: users.phone,
+      displayName: users.displayName,
+      state: memberships.state,
+      partnerId: memberships.partnerId,
+      partnerName: partners.name,
+      createdAt: memberships.createdAt,
+    }).from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .leftJoin(partners, eq(partners.id, memberships.partnerId))
+      .where(pageWhere)
+      .orderBy(desc(memberships.createdAt), desc(memberships.id))
+      .limit(limit + 1),
+  ]);
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const membershipIds = pageRows.map(r => r.membershipId);
+  const roles = membershipIds.length > 0
+    ? await db.select({
+      membershipId: membershipRoles.membershipId, role: membershipRoles.role,
+    }).from(membershipRoles)
+      .where(inArray(membershipRoles.membershipId, membershipIds))
+    : [];
+
   const byMembership = new Map<string, Role[]>();
   for (const row of roles) {
     byMembership.set(row.membershipId, [...(byMembership.get(row.membershipId) ?? []), row.role]);
   }
-  return rows.map(row => ({ ...row, roles: byMembership.get(row.membershipId) ?? [] }));
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.createdAt, last.membershipId) : null;
+  return {
+    items: pageRows.map(row => ({ ...row, roles: byMembership.get(row.membershipId) ?? [] })),
+    totalCount: countRow?.count ?? 0,
+    hasMore,
+    nextCursor,
+  };
+}
+
+export async function listMembers(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number; cursor?: string; query?: string; state?: string } = {},
+) {
+  const page = await listMembersPage(db, principal, input);
+  return page.items;
 }
 
 async function membershipFor(db: Db, principal: Principal, userId: string) {

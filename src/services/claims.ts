@@ -1,9 +1,10 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, garments, orders,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -97,6 +98,83 @@ export async function openClaim(
     });
     return { claimId: claim.id, orderId: order.id, state: "opened" as const };
   });
+}
+
+/** Scoped claims list with stable keyset pagination on (openedAt, id), optional search and accurate totalCount. */
+export async function listClaimsPage(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number; cursor?: string; query?: string; state?: string } = {},
+) {
+  assertRole(principal, "customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 100);
+  const decoded = input.cursor ? decodeKeysetCursor(input.cursor) : null;
+  const trimmedQuery = input.query?.trim();
+  const likePattern = trimmedQuery ? `%${escapeLikePattern(trimmedQuery)}%` : null;
+  const stateFilter = input.state?.trim() || null;
+
+  const customerOnly = hasRole(principal, "customer")
+    && !hasRole(principal, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
+
+  const baseWhere = and(
+    eq(claims.organizationId, principal.organizationId),
+    customerOnly
+      ? or(
+        eq(claims.openedBy, principal.userId),
+        eq(orders.customerId, principal.userId),
+      )
+      : undefined,
+    stateFilter ? sql`${claims.state} = ${stateFilter}` : undefined,
+    likePattern
+      ? or(
+        sql`${claims.description} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${claims.claimType} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${orders.publicNumber} ILIKE ${likePattern} ESCAPE '\\'`,
+      )
+      : undefined,
+  );
+
+  const pageWhere = and(
+    baseWhere,
+    decoded
+      ? sql`(${claims.openedAt}, ${claims.id}) < (${decoded.ts}, ${decoded.id})`
+      : undefined,
+  );
+
+  const [[countRow], rows] = await Promise.all([
+    db.select({ count: sql<number>`count(*)::int` })
+      .from(claims)
+      .innerJoin(orders, and(eq(orders.id, claims.orderId), eq(orders.organizationId, claims.organizationId)))
+      .where(baseWhere),
+    db.select({
+      id: claims.id,
+      organizationId: claims.organizationId,
+      orderId: claims.orderId,
+      orderPublicNumber: orders.publicNumber,
+      openedBy: claims.openedBy,
+      claimType: claims.claimType,
+      state: claims.state,
+      description: claims.description,
+      version: claims.version,
+      dueAt: claims.dueAt,
+      openedAt: claims.openedAt,
+    }).from(claims)
+      .innerJoin(orders, and(eq(orders.id, claims.orderId), eq(orders.organizationId, claims.organizationId)))
+      .where(pageWhere)
+      .orderBy(desc(claims.openedAt), desc(claims.id))
+      .limit(limit + 1),
+  ]);
+
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  const last = items[items.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.openedAt, last.id) : null;
+  return {
+    items,
+    totalCount: countRow?.count ?? 0,
+    hasMore,
+    nextCursor,
+  };
 }
 
 /** Claim detail for its customer or support staff, with items, decisions and held evidence ids. */

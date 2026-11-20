@@ -2,6 +2,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { buildings, cities, customerAddresses, entrances, notifications, orders, outboxEvents } from "../db/schema.js";
 import { assertRole, type Principal } from "../core/context.js";
+import { decodeKeysetCursor, encodeKeysetCursor } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 
@@ -95,16 +96,20 @@ const NOTIFICATIONS_MAX_LIMIT = 200;
 /**
  * Notification feed of the signed-in principal: every channel row the platform produced for
  * this user, newest first; unread ones carry readAt = null.
+ * Supports stable opaque keyset pagination via `cursor` on (createdAt, id), with legacy
+ * `offset` preserved only when `cursor` is omitted.
  */
-export async function listNotifications(
+export async function listNotificationsPage(
   db: Db,
   principal: Principal,
-  options?: { limit?: number; offset?: number },
+  options?: { limit?: number; offset?: number; cursor?: string },
 ) {
   assertRole(principal, "customer", ...STAFF_ROLES);
   const limit = Math.min(Math.max(Math.trunc(options?.limit ?? NOTIFICATIONS_DEFAULT_LIMIT), 1), NOTIFICATIONS_MAX_LIMIT);
-  const offset = Math.max(Math.trunc(options?.offset ?? 0), 0);
-  const rows = await db.select({
+  const decoded = options?.cursor ? decodeKeysetCursor(options.cursor) : null;
+  const offset = decoded ? 0 : Math.max(Math.trunc(options?.offset ?? 0), 0);
+
+  const query = db.select({
     id: notifications.id,
     orderId: notifications.orderId,
     channel: notifications.channel,
@@ -116,15 +121,37 @@ export async function listNotifications(
     .where(and(
       eq(notifications.organizationId, principal.organizationId),
       eq(notifications.recipientId, principal.userId),
+      decoded
+        ? sql`(${notifications.createdAt}, ${notifications.id}) < (${decoded.ts}, ${decoded.id})`
+        : undefined,
     ))
     .orderBy(desc(notifications.createdAt), desc(notifications.id))
-    .limit(limit)
-    .offset(offset);
-  return rows.map(row => ({
-    ...row,
-    payloadJson: row.payloadJson as Record<string, unknown>,
-    read: row.readAt !== null,
-  }));
+    .limit(limit + 1);
+
+  const rows = offset > 0 ? await query.offset(offset) : await query;
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.createdAt, last.id) : null;
+
+  return {
+    items: pageRows.map(row => ({
+      ...row,
+      payloadJson: row.payloadJson as Record<string, unknown>,
+      read: row.readAt !== null,
+    })),
+    hasMore,
+    nextCursor,
+  };
+}
+
+export async function listNotifications(
+  db: Db,
+  principal: Principal,
+  options?: { limit?: number; offset?: number; cursor?: string },
+) {
+  const page = await listNotificationsPage(db, principal, options);
+  return page.items;
 }
 
 export async function countUnreadNotifications(db: Db, principal: Principal): Promise<number> {

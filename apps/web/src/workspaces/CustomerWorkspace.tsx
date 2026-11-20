@@ -22,9 +22,14 @@ import {
   Trash2,
   Wallet,
 } from "lucide-react";
-import { ApiError, api, dt, money } from "../api";
+import { ApiError, api, dt, money, newKey } from "../api";
 import { DocumentPrintModal, type DocumentKind } from "../components/DocumentPrintModal";
 import { EvidenceUploader } from "../components/EvidenceUploader";
+import {
+  evidenceOwnerKey,
+  getOwnerUploadSnapshot,
+  subscribeEvidenceUploads,
+} from "../components/evidence-upload-store";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { findSubtype } from "@shared/garment-taxonomy";
 import { ModalDialog } from "../components/ModalDialog";
@@ -158,10 +163,20 @@ type OrderDetailDto = {
   qrPayload?: string | null;
 };
 
+type HoldPairDto = {
+  pickup: HoldDto;
+  delivery: HoldDto;
+  releasedReservationIds?: string[];
+  replayed?: boolean;
+};
+
 type RepeatDto = {
   sourceOrderId: string;
   publicNumber: string;
   buildingId: string | null;
+  addressId?: string | null;
+  originalAddressId?: string | null;
+  addressAvailable?: boolean;
   lines: Array<{ serviceId: string; tier: "economy" | "protected"; quantity: number; unit: string }>;
   declaredItems: Array<{ subtypeId: string; category: string; label: string; quantity: number }>;
   note: string;
@@ -212,6 +227,9 @@ type ThreadDto = {
 type ThreadDetailDto = {
   thread: { id: string; orderId: string | null; subject: string; state: string; createdAt: string };
   messages: Array<{ id: string; body: string; createdAt: string; isMine: boolean }>;
+  hasEarlier?: boolean;
+  earlierCursor?: string | null;
+  totalMessages?: number;
   viewer: string;
 };
 
@@ -272,9 +290,13 @@ function isWindowClosed(window: WindowDto, now: number): boolean {
 
 const NOTIFICATIONS_PAGE_SIZE = 100;
 
-async function fetchNotificationsPage(offset: number): Promise<{ items: NotificationDto[]; totalUnread: number }> {
+async function fetchNotificationsPage(
+  cursor: string | null,
+): Promise<{ items: NotificationDto[]; totalUnread: number; nextCursor: string | null; hasMore: boolean }> {
+  const params = new URLSearchParams({ limit: String(NOTIFICATIONS_PAGE_SIZE) });
+  if (cursor) params.set("cursor", cursor);
   const response = await fetch(
-    `/api/v1/notifications?limit=${NOTIFICATIONS_PAGE_SIZE}&offset=${offset}`,
+    `/api/v1/notifications?${params.toString()}`,
     { method: "GET", credentials: "include" },
   );
   const payload = await response.json().catch(() => ({}));
@@ -291,7 +313,9 @@ async function fetchNotificationsPage(offset: number): Promise<{ items: Notifica
   const totalUnread = Number.isFinite(parsedTotal) && parsedTotal >= 0
     ? parsedTotal
     : items.filter((item) => !item.read).length;
-  return { items, totalUnread };
+  const nextCursor = response.headers.get("X-Next-Cursor");
+  const hasMore = response.headers.get("X-Has-More") === "true" && Boolean(nextCursor);
+  return { items, totalUnread, nextCursor, hasMore };
 }
 
 export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; notify: NotifyFn }) {
@@ -300,6 +324,7 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
   const [repeat, setRepeat] = useState<RepeatDto | null>(null);
   const [notifications, setNotifications] = useState<NotificationDto[] | null>(null);
   const [totalUnread, setTotalUnread] = useState<number | null>(null);
+  const [nextNotificationsCursor, setNextNotificationsCursor] = useState<string | null>(null);
   const [hasMoreNotifications, setHasMoreNotifications] = useState(false);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [notificationsLoadingMore, setNotificationsLoadingMore] = useState(false);
@@ -308,14 +333,16 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
   const loadNotifications = useCallback(async () => {
     setNotificationsLoading(true);
     try {
-      const page = await fetchNotificationsPage(0);
+      const page = await fetchNotificationsPage(null);
       setNotifications(page.items);
       setTotalUnread(page.totalUnread);
-      setHasMoreNotifications(page.items.length === NOTIFICATIONS_PAGE_SIZE);
+      setNextNotificationsCursor(page.nextCursor);
+      setHasMoreNotifications(page.hasMore);
       setNotificationsError(null);
     } catch (err) {
       setNotifications([]);
       setTotalUnread(0);
+      setNextNotificationsCursor(null);
       setHasMoreNotifications(false);
       setNotificationsError(errorText(err));
     } finally {
@@ -324,10 +351,10 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
   }, []);
 
   const loadMoreNotifications = useCallback(async () => {
-    const offset = notifications?.length ?? 0;
+    if (!nextNotificationsCursor) return;
     setNotificationsLoadingMore(true);
     try {
-      const page = await fetchNotificationsPage(offset);
+      const page = await fetchNotificationsPage(nextNotificationsCursor);
       setNotifications((prev) => {
         const base = prev ?? [];
         const seen = new Set(base.map((item) => item.id));
@@ -335,14 +362,15 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
         return [...base, ...appended];
       });
       setTotalUnread(page.totalUnread);
-      setHasMoreNotifications(page.items.length === NOTIFICATIONS_PAGE_SIZE);
+      setNextNotificationsCursor(page.nextCursor);
+      setHasMoreNotifications(page.hasMore);
       setNotificationsError(null);
     } catch (err) {
       notify({ kind: "error", text: errorText(err) });
     } finally {
       setNotificationsLoadingMore(false);
     }
-  }, [notifications?.length, notify]);
+  }, [nextNotificationsCursor, notify]);
 
   useEffect(() => {
     void loadNotifications();
@@ -480,6 +508,9 @@ function NewOrderTab({
   const [busy, setBusy] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [repeatPending, setRepeatPending] = useState(false);
+  const [repeatAddressRequired, setRepeatAddressRequired] = useState(false);
+  const pendingRepeatAddressIdRef = useRef<string | null>(null);
+  const holdAttemptKeyRef = useRef<{ sig: string; key: string } | null>(null);
 
   const selectedService = useMemo(
     () => catalog?.find((service) => service.id === serviceId) ?? null,
@@ -554,6 +585,24 @@ function NewOrderTab({
   }, [addresses, buildings, buildingId, hasAddressInBuilding]);
 
   useEffect(() => {
+    if (repeatAddressRequired) return;
+    if (pendingRepeatAddressIdRef.current) {
+      const targetId = pendingRepeatAddressIdRef.current;
+      if (buildingAddresses.some((address) => address.id === targetId)) {
+        if (addressId !== targetId) setAddressId(targetId);
+        pendingRepeatAddressIdRef.current = null;
+        return;
+      }
+      if (addresses.length > 0) {
+        // Addresses finished loading, but the repeated order's original address is not available.
+        pendingRepeatAddressIdRef.current = null;
+        setRepeatAddressRequired(true);
+        setAddressId("");
+        setRepeatPending(false);
+        return;
+      }
+      return;
+    }
     if (buildingAddresses.length === 0) {
       if (addressId !== "") setAddressId("");
       return;
@@ -561,7 +610,7 @@ function NewOrderTab({
     if (!buildingAddresses.some((address) => address.id === addressId)) {
       setAddressId(buildingAddresses[0].id);
     }
-  }, [buildingAddresses, addressId]);
+  }, [addresses.length, buildingAddresses, addressId, repeatAddressRequired]);
 
   const loadWindows = useCallback(async (targetBuildingId: string) => {
     if (!targetBuildingId) {
@@ -625,6 +674,10 @@ function NewOrderTab({
   }, [notify]);
 
   const handleQuote = async () => {
+    if (repeatAddressRequired && !addressId) {
+      notify({ kind: "error", text: "Исходный адрес повторяемого заказа недоступен — выберите адрес вручную." });
+      return;
+    }
     const parsedQuantity = Number(quantity);
     if (!Number.isInteger(parsedQuantity) || parsedQuantity <= 0) {
       notify({ kind: "error", text: "Укажите целое количество больше нуля" });
@@ -636,6 +689,9 @@ function NewOrderTab({
     }
     const reqId = ++quoteReqRef.current;
     const requestFingerprint = formFingerprint;
+    const priorReservationIds = [pickupHold?.reservationId, deliveryHold?.reservationId].filter(
+      (id): id is string => Boolean(id),
+    );
     setBusy("quote");
     notify(null);
     try {
@@ -653,6 +709,7 @@ function NewOrderTab({
           ...(tier === "protected" && declared.length > 0
             ? { declaredItems: declared.map((item) => ({ subtypeId: item.subtypeId, quantity: item.quantity })) }
             : {}),
+          ...(priorReservationIds.length > 0 ? { releaseReservationIds: priorReservationIds } : {}),
         },
       });
       if (quoteReqRef.current !== reqId) return;
@@ -660,8 +717,12 @@ function NewOrderTab({
       setQuoteFingerprint(requestFingerprint);
       setPickupHold(null);
       setDeliveryHold(null);
+      holdAttemptKeyRef.current = null;
       setOrder(null);
       setFinance(null);
+      if (priorReservationIds.length > 0) {
+        void loadWindows(buildingId);
+      }
       notify({ kind: "ok", text: `Расчёт готов: ${money(created.totalKopeks)} · действует до ${dt(created.expiresAt)}` });
     } catch (err) {
       if (quoteReqRef.current !== reqId) return;
@@ -684,6 +745,15 @@ function NewOrderTab({
       setQuantity(String(line.quantity));
     }
     if (repeat.buildingId) setBuildingId(repeat.buildingId);
+    if (repeat.addressAvailable === false || !repeat.addressId) {
+      pendingRepeatAddressIdRef.current = null;
+      setRepeatAddressRequired(true);
+      setAddressId("");
+    } else {
+      pendingRepeatAddressIdRef.current = repeat.addressId;
+      setRepeatAddressRequired(false);
+      setAddressId(repeat.addressId);
+    }
     setDeclared(repeat.declaredItems.map((item) => {
       const subtype = findSubtype(item.subtypeId);
       return {
@@ -697,18 +767,19 @@ function NewOrderTab({
     quoteReqRef.current += 1;
     setQuote(null);
     setQuoteFingerprint(null);
-    setRepeatPending(true);
+    setRepeatPending(repeat.addressAvailable !== false && Boolean(repeat.addressId));
   }, [repeat]);
 
   // The quote for a repeated order is requested as soon as the windows of the
-  // remembered building are known — one tap, no re-typing of the order.
+  // remembered building and the exact repeated address are known — one tap, no re-typing of the order.
   useEffect(() => {
-    if (!repeatPending || !repeat) return;
+    if (!repeatPending || !repeat || repeatAddressRequired) return;
     if (!buildingId || !pickupWindowId || !deliveryWindowId || !serviceId) return;
+    if (repeat.addressId && addressId !== repeat.addressId) return;
     if (buildingAddresses.length > 0 && !buildingAddresses.some((address) => address.id === addressId)) return;
     setRepeatPending(false);
     void handleQuote();
-  }, [repeatPending, repeat, buildingId, buildingAddresses, addressId, pickupWindowId, deliveryWindowId, serviceId]);
+  }, [repeatPending, repeat, repeatAddressRequired, buildingId, buildingAddresses, addressId, pickupWindowId, deliveryWindowId, serviceId]);
 
   const handleHold = async () => {
     if (!quote) {
@@ -723,22 +794,34 @@ function NewOrderTab({
       notify({ kind: "error", text: "Выберите окно забора и окно доставки" });
       return;
     }
+    const priorReservationIds = [pickupHold?.reservationId, deliveryHold?.reservationId].filter(
+      (id): id is string => Boolean(id),
+    );
+    const attemptSig = `${quote.id}:${pickupWindowId}:${deliveryWindowId}:${priorReservationIds.join(",")}`;
+    const key = holdAttemptKeyRef.current?.sig === attemptSig
+      ? holdAttemptKeyRef.current.key
+      : newKey();
+    holdAttemptKeyRef.current = { sig: attemptSig, key };
+
     setBusy("hold");
     notify(null);
     try {
-      const [pickup, delivery] = await Promise.all([
-        api<HoldDto>("/slots/holds", {
-          method: "POST",
-          body: { windowId: pickupWindowId, ttlMinutes: HOLD_TTL_MINUTES },
-        }),
-        api<HoldDto>("/slots/holds", {
-          method: "POST",
-          body: { windowId: deliveryWindowId, ttlMinutes: HOLD_TTL_MINUTES },
-        }),
-      ]);
-      setPickupHold(pickup);
-      setDeliveryHold(delivery);
-      notify({ kind: "ok", text: `Слоты забронированы до ${dt(pickup.expiresAt)}` });
+      const pair = await api<HoldPairDto>("/slots/holds/pair", {
+        method: "POST",
+        key,
+        body: {
+          pickupWindowId,
+          deliveryWindowId,
+          ttlMinutes: HOLD_TTL_MINUTES,
+          quoteId: quote.id,
+          ...(priorReservationIds.length > 0 ? { releaseReservationIds: priorReservationIds } : {}),
+        },
+      });
+      setPickupHold(pair.pickup);
+      setDeliveryHold(pair.delivery);
+      holdAttemptKeyRef.current = null;
+      void loadWindows(buildingId);
+      notify({ kind: "ok", text: `Слоты забронированы до ${dt(pair.pickup.expiresAt)}` });
     } catch (err) {
       notify({ kind: "error", text: errorText(err) });
     } finally {
@@ -884,8 +967,14 @@ function NewOrderTab({
               <select
                 id={`${uid}-address`}
                 value={addressId}
-                onChange={(event) => setAddressId(event.target.value)}
+                onChange={(event) => {
+                  setAddressId(event.target.value);
+                  if (event.target.value) setRepeatAddressRequired(false);
+                }}
               >
+                {repeatAddressRequired && (
+                  <option value="">Выберите адрес / квартиру…</option>
+                )}
                 {buildingAddresses.map((address) => (
                   <option key={address.id} value={address.id}>
                     {address.apartment ? `кв. ${address.apartment}` : address.buildingAddress}
@@ -1014,6 +1103,15 @@ function NewOrderTab({
             >
               Перейти в адресную книгу
             </Button>
+          </div>
+        )}
+
+        {repeatAddressRequired && (
+          <div className="alert-banner" role="alert">
+            <AlertCircle size={16} aria-hidden="true" />
+            <span>
+              <strong>Исходный адрес повторяемого заказа недоступен.</strong> Выберите адрес вручную перед расчётом стоимости.
+            </span>
           </div>
         )}
 
@@ -1233,13 +1331,32 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   const [claimType, setClaimType] = useState("damage");
   const [claimDescription, setClaimDescription] = useState("");
   const [claimGarments, setClaimGarments] = useState<string[]>([]);
-  const [claimEvidenceState, setClaimEvidenceState] = useState<{
-    ownerId: string;
-    ids: string[];
-    uploadingCount: number;
-    hasError: boolean;
-  }>({ ownerId: "", ids: [], uploadingCount: 0, hasError: false });
+  const [claimEvidenceByOwner, setClaimEvidenceByOwner] = useState<
+    Record<string, { ids: string[]; uploadingCount: number; hasError: boolean }>
+  >({});
   const [claimEvidenceRefreshKey, setClaimEvidenceRefreshKey] = useState(0);
+  const [storeUploadTick, setStoreUploadTick] = useState(0);
+
+  useEffect(() => {
+    return subscribeEvidenceUploads(() => {
+      setStoreUploadTick((tick) => tick + 1);
+    });
+  }, []);
+
+  const currentClaimEvidence = useMemo(() => {
+    void storeUploadTick;
+    if (!selectedId) {
+      return { ownerId: "", ids: [] as string[], uploadingCount: 0, hasError: false };
+    }
+    const stored = claimEvidenceByOwner[selectedId];
+    const snap = getOwnerUploadSnapshot(evidenceOwnerKey("order", selectedId));
+    return {
+      ownerId: selectedId,
+      ids: stored?.ids ?? [],
+      uploadingCount: Math.max(stored?.uploadingCount ?? 0, snap.uploadingCount),
+      hasError: Boolean(stored?.hasError || snap.lastError),
+    };
+  }, [selectedId, claimEvidenceByOwner, storeUploadTick]);
   const [rating, setRating] = useState("5");
   const [reviewBody, setReviewBody] = useState("");
 
@@ -1330,12 +1447,6 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   }, []);
 
   useEffect(() => {
-    setClaimEvidenceState({
-      ownerId: selectedId ?? "",
-      ids: [],
-      uploadingCount: 0,
-      hasError: false,
-    });
     if (!selectedId) {
       setDetail(null);
       setFinance(null);
@@ -1422,21 +1533,19 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
     await runAction(
       "reschedule",
       async () => {
-        const [pickup, delivery] = await Promise.all([
-          api<HoldDto>("/slots/holds", {
-            method: "POST",
-            body: { windowId: reschedulePickupId, ttlMinutes: HOLD_TTL_MINUTES },
-          }),
-          api<HoldDto>("/slots/holds", {
-            method: "POST",
-            body: { windowId: rescheduleDeliveryId, ttlMinutes: HOLD_TTL_MINUTES },
-          }),
-        ]);
+        const pair = await api<HoldPairDto>("/slots/holds/pair", {
+          method: "POST",
+          body: {
+            pickupWindowId: reschedulePickupId,
+            deliveryWindowId: rescheduleDeliveryId,
+            ttlMinutes: HOLD_TTL_MINUTES,
+          },
+        });
         await api(`/orders/${detail.id}/${isSchedule ? "schedule" : "reschedule"}`, {
           method: "POST",
           body: {
-            pickupReservationId: pickup.reservationId,
-            deliveryReservationId: delivery.reservationId,
+            pickupReservationId: pair.pickup.reservationId,
+            deliveryReservationId: pair.delivery.reservationId,
           },
         });
         setRescheduleOpen(false);
@@ -1448,7 +1557,11 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
 
   const handleClaim = async () => {
     if (!detail) return;
-    if (claimEvidenceState.ownerId === detail.id && claimEvidenceState.uploadingCount > 0) {
+    const liveSnap = getOwnerUploadSnapshot(evidenceOwnerKey("order", detail.id));
+    if (
+      liveSnap.uploadingCount > 0 ||
+      (currentClaimEvidence.ownerId === detail.id && currentClaimEvidence.uploadingCount > 0)
+    ) {
       notify({ kind: "error", text: "Дождитесь завершения загрузки файлов…" });
       return;
     }
@@ -1457,8 +1570,8 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
       return;
     }
     const evidenceIds =
-      claimEvidenceState.ownerId === detail.id && claimEvidenceState.ids.length > 0
-        ? claimEvidenceState.ids
+      currentClaimEvidence.ownerId === detail.id && currentClaimEvidence.ids.length > 0
+        ? currentClaimEvidence.ids
         : [];
     await runAction(
       "claim",
@@ -1474,12 +1587,14 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
         });
         setClaimDescription("");
         setClaimGarments([]);
-        setClaimEvidenceState({
-          ownerId: detail.id,
-          ids: [],
-          uploadingCount: 0,
-          hasError: false,
-        });
+        setClaimEvidenceByOwner((prev) => ({
+          ...prev,
+          [detail.id]: {
+            ids: [],
+            uploadingCount: getOwnerUploadSnapshot(evidenceOwnerKey("order", detail.id)).uploadingCount,
+            hasError: false,
+          },
+        }));
         setClaimEvidenceRefreshKey((key) => key + 1);
         await loadClaims();
       },
@@ -1938,18 +2053,21 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 title="Фотографии к претензии (необязательно)"
                 refreshKey={claimEvidenceRefreshKey}
                 notify={notify}
-                onUploadStateChange={(state) =>
-                  setClaimEvidenceState({
-                    ownerId: state.ownerId,
-                    ids: state.uploadedIds,
-                    uploadingCount: state.uploadingCount,
-                    hasError: state.hasError,
-                  })
-                }
+                onUploadStateChange={(state) => {
+                  if (!state.ownerId) return;
+                  setClaimEvidenceByOwner((prev) => ({
+                    ...prev,
+                    [state.ownerId]: {
+                      ids: state.uploadedIds,
+                      uploadingCount: state.uploadingCount,
+                      hasError: state.hasError,
+                    },
+                  }));
+                }}
               />
             </div>
 
-            {claimEvidenceState.uploadingCount > 0 && (
+            {currentClaimEvidence.uploadingCount > 0 && (
               <p className="muted" role="status" style={{ marginBlockStart: 8 }}>
                 Дождитесь завершения загрузки файлов…
               </p>
@@ -1959,7 +2077,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
               <button
                 type="button"
                 className="ghost"
-                disabled={isBusy || claimEvidenceState.uploadingCount > 0}
+                disabled={isBusy || currentClaimEvidence.uploadingCount > 0}
                 onClick={() => void handleClaim()}
               >
                 <AlertCircle size={16} aria-hidden="true" />
@@ -2415,7 +2533,7 @@ function NotificationsTab({
           </div>
         )}
         {loading && !notifications && <p className="muted">Загрузка уведомлений…</p>}
-        {!loading && notifications && notifications.length === 0 && (
+        {!loading && !loadError && notifications && notifications.length === 0 && (
           <EmptyState
             icon={<Bell size={20} aria-hidden="true" />}
             title="Уведомлений пока нет"
@@ -2500,8 +2618,15 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [threadDetail, setThreadDetail] = useState<ThreadDetailDto | null>(null);
-  const [reply, setReply] = useState("");
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+
+  const reply = activeThreadId ? (replyDrafts[activeThreadId] ?? "") : "";
+  const setReply = (value: string) => {
+    if (!activeThreadId) return;
+    setReplyDrafts((prev) => ({ ...prev, [activeThreadId]: value }));
+  };
 
   const loadThreads = useCallback(async () => {
     setLoading(true);
@@ -2555,6 +2680,32 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       notify({ kind: "error", text: errorText(err) });
     }
   }, [notify]);
+
+  const loadEarlierMessages = useCallback(async () => {
+    if (!activeThreadId || !threadDetail?.earlierCursor) return;
+    setLoadingEarlier(true);
+    try {
+      const res = await api<ThreadDetailDto>(
+        `/support/threads/${activeThreadId}?beforeCursor=${encodeURIComponent(threadDetail.earlierCursor)}`,
+      );
+      setThreadDetail((prev) => {
+        if (!prev || prev.thread.id !== activeThreadId) return prev;
+        const existing = new Set(prev.messages.map((m) => m.id));
+        const prepended = res.messages.filter((m) => !existing.has(m.id));
+        return {
+          ...prev,
+          messages: [...prepended, ...prev.messages],
+          hasEarlier: res.hasEarlier,
+          earlierCursor: res.earlierCursor ?? null,
+          totalMessages: res.totalMessages ?? prev.totalMessages,
+        };
+      });
+    } catch (err) {
+      notify({ kind: "error", text: errorText(err) });
+    } finally {
+      setLoadingEarlier(false);
+    }
+  }, [activeThreadId, threadDetail?.earlierCursor, notify]);
 
   useEffect(() => {
     if (!activeThreadId) {
@@ -2641,7 +2792,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
           </div>
         )}
         {loading && !threads && <p className="muted">Загрузка обращений…</p>}
-        {!loading && threads && threads.length === 0 && (
+        {!loading && !listError && threads && threads.length === 0 && (
           <EmptyState
             icon={<MessageSquare size={20} aria-hidden="true" />}
             title="Обращений пока нет"
@@ -2680,6 +2831,18 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
               {threadDetail.thread.state === "open" ? "Открыто" : "Закрыто"}
             </Badge>
           </div>
+          {threadDetail.hasEarlier && threadDetail.earlierCursor && (
+            <div className="button-row" style={{ marginBlockEnd: 10 }}>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={loadingEarlier || isBusy}
+                onClick={() => void loadEarlierMessages()}
+              >
+                {loadingEarlier ? "Загрузка более ранних…" : "Загрузить более ранние сообщения"}
+              </Button>
+            </div>
+          )}
           {threadDetail.messages.length === 0 ? (
             <p className="muted">Сообщений пока нет.</p>
           ) : (

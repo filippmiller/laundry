@@ -22,23 +22,23 @@ import {
   returnUnprocessedOrder, startInspection, startProcessing, partnerWorkspace,
 } from "../services/partner.js";
 import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt, startStop, dispatchOverview } from "../services/delivery.js";
-import { decideClaim, getClaim, openClaim, reopenClaim } from "../services/claims.js";
+import { decideClaim, getClaim, listClaimsPage, openClaim, reopenClaim } from "../services/claims.js";
 import {
   approvePartnerCreditNote, approvePartnerPayout, capturePayment, createCustomerInvoice, createPartnerInvoice,
   createPartnerPayout, disputePartnerLine, handlePaymentWebhook, listPartnerCreditNotes, listPartnerPayouts,
   orderFinance, partnerAccruals, processPendingRefunds, refundPayment, settleClaimCompensation,
 } from "../services/finance.js";
-import { holdSlot, reconcileCapacity } from "../domain/slot-reservation.js";
+import { holdSlot, holdSlotPair, reconcileCapacity, releaseSlot } from "../domain/slot-reservation.js";
 import { MAX_DECLARED_ROWS, MAX_PICKED_QUANTITY } from "../../shared/garment-taxonomy.js";
 import {
-  grantRole, listAuditEvents, listMembers, memberRoles, revokeRole, revokeSession, setMembershipState,
+  grantRole, listAuditEvents, listMembersPage, memberRoles, revokeRole, revokeSession, setMembershipState,
 } from "../services/admin.js";
 import { fraudSignals } from "../services/fraud.js";
-import { closeThread, getThread, listThreads, openThread, postMessage } from "../services/support.js";
+import { closeThread, getThread, listThreadsPage, openThread, postMessage } from "../services/support.js";
 import { createReview, hideReview, likeReview, listReviews, unlikeReview } from "../services/reviews.js";
 import { markChargeback, paymentDrift } from "../services/payment-inbox.js";
 import {
-  addAddress, countUnreadNotifications, listAddresses, listNotifications, markNotificationsRead,
+  addAddress, countUnreadNotifications, listAddresses, listNotificationsPage, markNotificationsRead,
   removeAddress as removeAddressRoute, trackOrder,
 } from "../services/customer.js";
 import { completeShift, currentShift, getShiftReconciliation, openShift } from "../services/courier-shift.js";
@@ -55,8 +55,8 @@ import { chronometry } from "../services/chronometry.js";
 import { churnSignal } from "../services/churn.js";
 import { renderDocument, type DocumentKind } from "../services/documents.js";
 import { requestOtpChallenge, unlockPreviewAccess, verifyOtpChallenge } from "../services/otp.js";
-import { and, desc, eq, or, sql } from "drizzle-orm";
-import { claims, fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { fiscalReceipts, intakeManifests, orders, routeStops } from "../db/schema.js";
 
 const SESSION_COOKIE = "laundry_session";
 
@@ -517,17 +517,23 @@ export function buildApp(db: Db) {
     query: z.object({
       limit: z.coerce.number().int().min(1).max(200).optional(),
       offset: z.coerce.number().int().min(0).max(100_000).optional(),
+      cursor: z.string().min(1).max(256).optional(),
     }),
     handler: async ctx => {
-      const [items, totalUnread] = await Promise.all([
-        listNotifications(db, ctx.principal, {
+      const [page, totalUnread] = await Promise.all([
+        listNotificationsPage(db, ctx.principal, {
           limit: ctx.query.limit as number | undefined,
           offset: ctx.query.offset as number | undefined,
+          cursor: ctx.query.cursor as string | undefined,
         }),
         countUnreadNotifications(db, ctx.principal),
       ]);
       ctx.reply.header("X-Total-Unread", String(totalUnread));
-      return items;
+      ctx.reply.header("X-Has-More", String(page.hasMore));
+      if (page.nextCursor) {
+        ctx.reply.header("X-Next-Cursor", page.nextCursor);
+      }
+      return page.items;
     },
   });
   add({
@@ -570,6 +576,38 @@ export function buildApp(db: Db) {
     }),
   });
   add({
+    method: "POST", path: "/slots/holds/pair", summary: "Atomically hold pickup and delivery windows together", tags: ["Customer"],
+    body: z.object({
+      pickupWindowId: z.uuid(),
+      deliveryWindowId: z.uuid(),
+      quoteId: z.uuid().optional(),
+      releaseReservationIds: z.array(z.uuid()).max(10).optional(),
+      key: z.string().min(1).optional(),
+      ttlMinutes: z.number().int().min(1).max(60).default(10),
+    }),
+    handler: ctx => holdSlotPair(db, {
+      principal: ctx.principal,
+      pickupWindowId: ctx.body.pickupWindowId,
+      deliveryWindowId: ctx.body.deliveryWindowId,
+      quoteId: ctx.body.quoteId,
+      releaseReservationIds: ctx.body.releaseReservationIds,
+      key: idempotencyKey(ctx),
+      ttlMinutes: ctx.body.ttlMinutes,
+    }),
+  });
+  add({
+    method: "POST", path: "/slots/holds/:id/release", summary: "Release an unattached held slot reservation", tags: ["Customer"],
+    params: idSchema,
+    body: z.object({ reason: z.string().min(3).max(200).default("Released by customer"), key: z.string().min(1).optional() }),
+    handler: ctx => releaseSlot(db, {
+      principal: ctx.principal,
+      reservationId: ctx.params.id,
+      reason: ctx.body.reason,
+      key: idempotencyKey(ctx),
+      heldOnly: true,
+    }),
+  });
+  add({
     method: "POST", path: "/quotes", summary: "Create immutable quote", tags: ["Customer"],
     body: z.object({
       buildingId: z.uuid(), addressId: z.uuid().optional(), tariffVersionId: z.uuid().optional(),
@@ -582,6 +620,7 @@ export function buildApp(db: Db) {
       declaredItems: z.array(z.object({
         subtypeId: z.string().min(1), quantity: z.number().int().min(1).max(MAX_PICKED_QUANTITY),
       })).max(MAX_DECLARED_ROWS).optional(),
+      releaseReservationIds: z.array(z.uuid()).max(10).optional(),
     }),
     handler: ctx => createQuote(db, ctx.principal, {
       ...ctx.body, key: idempotencyKey(ctx),
@@ -657,37 +696,23 @@ export function buildApp(db: Db) {
   add({
     method: "GET", path: "/claims", summary: "Scoped claims list", tags: ["Support"],
     roles: ["customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin],
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).max(256).optional(),
+      query: z.string().max(120).optional(),
+      state: z.string().max(40).optional(),
+    }),
     handler: async ctx => {
-      const customerOnly = hasRole(ctx.principal, "customer")
-        && !hasRole(ctx.principal, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
-      if (customerOnly) {
-        return db.select({
-          id: claims.id,
-          organizationId: claims.organizationId,
-          orderId: claims.orderId,
-          openedBy: claims.openedBy,
-          claimType: claims.claimType,
-          state: claims.state,
-          description: claims.description,
-          version: claims.version,
-          dueAt: claims.dueAt,
-          openedAt: claims.openedAt,
-        }).from(claims)
-          .innerJoin(orders, and(eq(orders.id, claims.orderId), eq(orders.organizationId, claims.organizationId)))
-          .where(and(
-            eq(claims.organizationId, ctx.principal.organizationId),
-            or(
-              eq(claims.openedBy, ctx.principal.userId),
-              eq(orders.customerId, ctx.principal.userId),
-            ),
-          ))
-          .orderBy(desc(claims.openedAt))
-          .limit(100);
-      }
-      return db.select().from(claims)
-        .where(eq(claims.organizationId, ctx.principal.organizationId))
-        .orderBy(desc(claims.openedAt))
-        .limit(100);
+      const page = await listClaimsPage(db, ctx.principal, {
+        limit: ctx.query.limit as number | undefined,
+        cursor: ctx.query.cursor as string | undefined,
+        query: ctx.query.query as string | undefined,
+        state: ctx.query.state as string | undefined,
+      });
+      ctx.reply.header("X-Total-Count", String(page.totalCount));
+      ctx.reply.header("X-Has-More", String(page.hasMore));
+      if (page.nextCursor) ctx.reply.header("X-Next-Cursor", page.nextCursor);
+      return page.items;
     },
   });
   add({
@@ -712,13 +737,36 @@ export function buildApp(db: Db) {
   });
   add({
     method: "GET", path: "/support/threads", summary: "Scoped support threads", tags: ["Support"],
-    query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }),
-    handler: ctx => listThreads(db, ctx.principal, { limit: ctx.query.limit as number | undefined }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).max(256).optional(),
+      query: z.string().max(120).optional(),
+      state: z.enum(["open", "closed"]).optional(),
+    }),
+    handler: async ctx => {
+      const page = await listThreadsPage(db, ctx.principal, {
+        limit: ctx.query.limit as number | undefined,
+        cursor: ctx.query.cursor as string | undefined,
+        query: ctx.query.query as string | undefined,
+        state: ctx.query.state as string | undefined,
+      });
+      ctx.reply.header("X-Total-Count", String(page.totalCount));
+      ctx.reply.header("X-Has-More", String(page.hasMore));
+      if (page.nextCursor) ctx.reply.header("X-Next-Cursor", page.nextCursor);
+      return page.items;
+    },
   });
   add({
     method: "GET", path: "/support/threads/:id", summary: "Thread with messages", tags: ["Support"],
     params: idSchema,
-    handler: ctx => getThread(db, ctx.principal, ctx.params.id),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(500).optional(),
+      beforeCursor: z.string().min(1).max(256).optional(),
+    }),
+    handler: ctx => getThread(db, ctx.principal, ctx.params.id, {
+      limit: ctx.query.limit as number | undefined,
+      beforeCursor: ctx.query.beforeCursor as string | undefined,
+    }),
   });
   add({
     method: "POST", path: "/support/threads/:id/messages", summary: "Reply in a thread", tags: ["Support", "Customer"],
@@ -942,7 +990,24 @@ export function buildApp(db: Db) {
   add({
     method: "GET", path: "/admin/members", summary: "Tenant memberships with roles", tags: ["Admin"],
     roles: ["platform_admin", "security_auditor"],
-    handler: ctx => listMembers(db, ctx.principal),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+      cursor: z.string().min(1).max(256).optional(),
+      query: z.string().max(120).optional(),
+      state: z.enum(["active", "suspended", "revoked"]).optional(),
+    }),
+    handler: async ctx => {
+      const page = await listMembersPage(db, ctx.principal, {
+        limit: ctx.query.limit as number | undefined,
+        cursor: ctx.query.cursor as string | undefined,
+        query: ctx.query.query as string | undefined,
+        state: ctx.query.state as string | undefined,
+      });
+      ctx.reply.header("X-Total-Count", String(page.totalCount));
+      ctx.reply.header("X-Has-More", String(page.hasMore));
+      if (page.nextCursor) ctx.reply.header("X-Next-Cursor", page.nextCursor);
+      return page.items;
+    },
   });
   add({
     method: "GET", path: "/admin/members/:id/roles", summary: "Roles of one member", tags: ["Admin"],

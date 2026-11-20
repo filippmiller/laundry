@@ -665,124 +665,192 @@ export async function runEvidenceRetentionSweep(db: Db, now = new Date()) {
   return { expired: expired.length, expiredIds: expired.map(row => row.id) };
 }
 
-async function paginateAll<T>(
-  fetchPage: (limit: number, offset: number) => Promise<T[]>,
+async function paginateKeysetAll<T extends { id: string }>(
+  fetchPage: (limit: number, cursor: { ts: Date; id: string } | null) => Promise<T[]>,
+  getCursorTs: (row: T) => Date,
   pageSize = 500,
 ): Promise<T[]> {
   const all: T[] = [];
-  let offset = 0;
+  const seen = new Set<string>();
+  let cursor: { ts: Date; id: string } | null = null;
   while (true) {
-    const page = await fetchPage(pageSize, offset);
-    all.push(...page);
+    const page = await fetchPage(pageSize, cursor);
+    for (const row of page) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      all.push(row);
+    }
     if (page.length < pageSize) break;
-    offset += page.length;
+    const last = page[page.length - 1];
+    cursor = { ts: getCursorTs(last), id: last.id };
   }
   return all;
 }
 
 /**
  * Privacy export for the signed-in user: returns only the caller's own non-internal records
- * scoped to their tenant. Never exposes internal hashes, door codes, storage keys, or other users' data.
+ * scoped to their tenant. Executes every collection query inside a single REPEATABLE READ
+ * READ ONLY transaction so concurrent inserts/updates/deletes never produce duplicates,
+ * skips, or cross-collection skew. Never exposes internal hashes, door codes, storage keys,
+ * or other users' data.
  */
 export async function exportMyPrivacyData(db: Db, principal: Principal) {
-  const [[user], addressRows, orderRows, claimRows, notificationRows, reviewRows] = await Promise.all([
-    db.select({
+  return db.transaction(async tx => {
+    const snapRes = await tx.execute(sql`SELECT NOW() AS "exportedAsOf"`);
+    const rawSnap = (snapRes.rows as unknown as Array<{ exportedAsOf?: string | Date }>)[0]?.exportedAsOf;
+    const exportedAsOf = rawSnap instanceof Date
+      ? rawSnap.toISOString()
+      : rawSnap
+        ? new Date(rawSnap).toISOString()
+        : new Date().toISOString();
+
+    const [user] = await tx.select({
       id: users.id,
       phone: users.phone,
       displayName: users.displayName,
       createdAt: users.createdAt,
-    }).from(users).where(eq(users.id, principal.userId)).limit(1),
-    paginateAll((limit, offset) =>
-      db.select({
-        id: customerAddresses.id,
-        buildingId: customerAddresses.buildingId,
-        address: buildings.address,
-        apartment: customerAddresses.apartment,
-        notes: customerAddresses.notes,
-        createdAt: customerAddresses.createdAt,
-      }).from(customerAddresses)
-        .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
-        .where(and(
-          eq(customerAddresses.organizationId, principal.organizationId),
-          eq(customerAddresses.customerId, principal.userId),
-        ))
-        .orderBy(desc(customerAddresses.createdAt), desc(customerAddresses.id))
-        .limit(limit)
-        .offset(offset),
-    ),
-    paginateAll((limit, offset) =>
-      db.select({
-        id: orders.id,
-        publicNumber: orders.publicNumber,
-        lifecycleState: orders.lifecycleState,
-        createdAt: orders.createdAt,
-      }).from(orders).where(and(
-        eq(orders.organizationId, principal.organizationId),
-        eq(orders.customerId, principal.userId),
-      )).orderBy(desc(orders.createdAt), desc(orders.id)).limit(limit).offset(offset),
-    ),
-    paginateAll((limit, offset) =>
-      db.select({
-        id: claims.id,
-        orderId: claims.orderId,
-        claimType: claims.claimType,
-        state: claims.state,
-        description: claims.description,
-        openedAt: claims.openedAt,
-      }).from(claims).where(and(
-        eq(claims.organizationId, principal.organizationId),
-        eq(claims.openedBy, principal.userId),
-      )).orderBy(desc(claims.openedAt), desc(claims.id)).limit(limit).offset(offset),
-    ),
-    paginateAll((limit, offset) =>
-      db.select({
-        id: notifications.id,
-        orderId: notifications.orderId,
-        channel: notifications.channel,
-        template: notifications.template,
-        readAt: notifications.readAt,
-        createdAt: notifications.createdAt,
-      }).from(notifications).where(and(
-        eq(notifications.organizationId, principal.organizationId),
-        eq(notifications.recipientId, principal.userId),
-      )).orderBy(desc(notifications.createdAt), desc(notifications.id)).limit(limit).offset(offset),
-    ),
-    paginateAll((limit, offset) =>
-      db.select({
-        id: reviews.id,
-        orderId: reviews.orderId,
-        rating: reviews.rating,
-        body: reviews.body,
-        state: reviews.state,
-        createdAt: reviews.createdAt,
-      }).from(reviews).where(and(
-        eq(reviews.organizationId, principal.organizationId),
-        eq(reviews.customerId, principal.userId),
-      )).orderBy(desc(reviews.createdAt), desc(reviews.id)).limit(limit).offset(offset),
-    ),
-  ]);
+    }).from(users).where(eq(users.id, principal.userId)).limit(1);
 
-  const exportedAt = new Date().toISOString();
-  return {
-    exportedAt,
-    exportMeta: {
-      complete: true as const,
-      exportedAt,
-      counts: {
-        addresses: addressRows.length,
-        orders: orderRows.length,
-        claims: claimRows.length,
-        notifications: notificationRows.length,
-        reviews: reviewRows.length,
+    const addressRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: customerAddresses.id,
+          buildingId: customerAddresses.buildingId,
+          address: buildings.address,
+          apartment: customerAddresses.apartment,
+          notes: customerAddresses.notes,
+          createdAt: customerAddresses.createdAt,
+        }).from(customerAddresses)
+          .innerJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
+          .where(and(
+            eq(customerAddresses.organizationId, principal.organizationId),
+            eq(customerAddresses.customerId, principal.userId),
+            cursor
+              ? sql`(${customerAddresses.createdAt}, ${customerAddresses.id}) < (${cursor.ts}, ${cursor.id})`
+              : undefined,
+          ))
+          .orderBy(desc(customerAddresses.createdAt), desc(customerAddresses.id))
+          .limit(limit),
+      row => row.createdAt,
+    );
+
+    const orderRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: orders.id,
+          publicNumber: orders.publicNumber,
+          lifecycleState: orders.lifecycleState,
+          createdAt: orders.createdAt,
+        }).from(orders).where(and(
+          eq(orders.organizationId, principal.organizationId),
+          eq(orders.customerId, principal.userId),
+          cursor
+            ? sql`(${orders.createdAt}, ${orders.id}) < (${cursor.ts}, ${cursor.id})`
+            : undefined,
+        ))
+          .orderBy(desc(orders.createdAt), desc(orders.id))
+          .limit(limit),
+      row => row.createdAt,
+    );
+
+    // Align claim ownership with GET /claims: include claims opened by the customer AND
+    // staff-created claims on the customer's own orders, while preserving original `openedBy`.
+    const claimRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: claims.id,
+          orderId: claims.orderId,
+          openedBy: claims.openedBy,
+          claimType: claims.claimType,
+          state: claims.state,
+          description: claims.description,
+          openedAt: claims.openedAt,
+        }).from(claims)
+          .innerJoin(orders, and(
+            eq(orders.id, claims.orderId),
+            eq(orders.organizationId, claims.organizationId),
+          ))
+          .where(and(
+            eq(claims.organizationId, principal.organizationId),
+            or(
+              eq(claims.openedBy, principal.userId),
+              eq(orders.customerId, principal.userId),
+            ),
+            cursor
+              ? sql`(${claims.openedAt}, ${claims.id}) < (${cursor.ts}, ${cursor.id})`
+              : undefined,
+          ))
+          .orderBy(desc(claims.openedAt), desc(claims.id))
+          .limit(limit),
+      row => row.openedAt,
+    );
+
+    const notificationRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: notifications.id,
+          orderId: notifications.orderId,
+          channel: notifications.channel,
+          template: notifications.template,
+          readAt: notifications.readAt,
+          createdAt: notifications.createdAt,
+        }).from(notifications).where(and(
+          eq(notifications.organizationId, principal.organizationId),
+          eq(notifications.recipientId, principal.userId),
+          cursor
+            ? sql`(${notifications.createdAt}, ${notifications.id}) < (${cursor.ts}, ${cursor.id})`
+            : undefined,
+        ))
+          .orderBy(desc(notifications.createdAt), desc(notifications.id))
+          .limit(limit),
+      row => row.createdAt,
+    );
+
+    const reviewRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: reviews.id,
+          orderId: reviews.orderId,
+          rating: reviews.rating,
+          body: reviews.body,
+          state: reviews.state,
+          createdAt: reviews.createdAt,
+        }).from(reviews).where(and(
+          eq(reviews.organizationId, principal.organizationId),
+          eq(reviews.customerId, principal.userId),
+          cursor
+            ? sql`(${reviews.createdAt}, ${reviews.id}) < (${cursor.ts}, ${cursor.id})`
+            : undefined,
+        ))
+          .orderBy(desc(reviews.createdAt), desc(reviews.id))
+          .limit(limit),
+      row => row.createdAt,
+    );
+
+    return {
+      exportedAt: exportedAsOf,
+      exportedAsOf,
+      exportMeta: {
+        complete: true as const,
+        exportedAt: exportedAsOf,
+        exportedAsOf,
+        snapshotIsolation: "repeatable_read_read_only" as const,
+        counts: {
+          addresses: addressRows.length,
+          orders: orderRows.length,
+          claims: claimRows.length,
+          notifications: notificationRows.length,
+          reviews: reviewRows.length,
+        },
       },
-    },
-    profile: user ?? { id: principal.userId, phone: null, displayName: null, createdAt: null },
-    addresses: addressRows,
-    orders: orderRows,
-    claims: claimRows,
-    notifications: notificationRows,
-    reviews: reviewRows,
-  };
+      profile: user ?? { id: principal.userId, phone: null, displayName: null, createdAt: null },
+      addresses: addressRows,
+      orders: orderRows,
+      claims: claimRows,
+      notifications: notificationRows,
+      reviews: reviewRows,
+    };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 /**

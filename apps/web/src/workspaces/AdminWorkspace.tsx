@@ -5,13 +5,14 @@ import {
   ClipboardList,
   KeyRound,
   RefreshCw,
+  Search,
   Shield,
   UserCog,
   UserMinus,
   UserPlus,
   Users,
 } from "lucide-react";
-import { api, dt, money, newKey } from "../api";
+import { ApiError, api, dt, money, newKey } from "../api";
 import { ADMIN_AUDIT_ACTION_LABELS, eventLabel, resourceTypeLabel, ROLE_LABELS, formatError, stateLabel } from "../labels";
 import { ModalDialog } from "../components/ModalDialog";
 import { FinanceMoneyPanel } from "./analytics-panels";
@@ -155,6 +156,36 @@ function getMemberStateTone(state: string): BadgeTone {
   return "info";
 }
 
+const MEMBERS_PAGE_SIZE = 100;
+
+async function fetchMembersPage(options: {
+  cursor?: string | null;
+  query?: string;
+}): Promise<{ items: AdminMember[]; totalCount: number; nextCursor: string | null; hasMore: boolean }> {
+  const params = new URLSearchParams({ limit: String(MEMBERS_PAGE_SIZE) });
+  if (options.cursor) params.set("cursor", options.cursor);
+  if (options.query?.trim()) params.set("query", options.query.trim());
+  const response = await fetch(`/api/v1/admin/members?${params.toString()}`, {
+    method: "GET",
+    credentials: "include",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new ApiError(
+      payload?.error?.code ?? payload?.error?.message ?? "REQUEST_FAILED",
+      response.status,
+      payload?.error?.details,
+    );
+  }
+  const items = unwrapList<AdminMember>(payload, ["members", "items", "data"]);
+  const rawTotal = response.headers.get("X-Total-Count");
+  const parsedTotal = rawTotal !== null ? Number(rawTotal) : NaN;
+  const totalCount = Number.isFinite(parsedTotal) && parsedTotal >= 0 ? parsedTotal : items.length;
+  const nextCursor = response.headers.get("X-Next-Cursor");
+  const hasMore = response.headers.get("X-Has-More") === "true" && Boolean(nextCursor);
+  return { items, totalCount, nextCursor, hasMore };
+}
+
 export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles?: string[] }) {
   const canAdminWrite = roles.includes("platform_admin");
   const canViewFinance = roles.includes("platform_admin") || roles.includes("platform_finance");
@@ -163,8 +194,17 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
 
   const [metrics, setMetrics] = useState<OpsMetrics | null>(null);
   const [members, setMembers] = useState<AdminMember[]>([]);
+  const [membersTotalCount, setMembersTotalCount] = useState<number | null>(null);
+  const [membersNextCursor, setMembersNextCursor] = useState<string | null>(null);
+  const [membersHasMore, setMembersHasMore] = useState(false);
+  const [membersLoadingMore, setMembersLoadingMore] = useState(false);
+  const [membersSearch, setMembersSearch] = useState("");
+  const [appliedMembersSearch, setAppliedMembersSearch] = useState("");
+  const [membersLoadError, setMembersLoadError] = useState<string | null>(null);
   const [signals, setSignals] = useState<FraudSignal[]>([]);
+  const [signalsLoadError, setSignalsLoadError] = useState<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [auditLoadError, setAuditLoadError] = useState<string | null>(null);
   const [ownSessions, setOwnSessions] = useState<AuthSession[]>([]);
 
   // Modal state for member RBAC & access state actions
@@ -177,12 +217,48 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
   const [adminSessionId, setAdminSessionId] = useState("");
   const [adminSessionReason, setAdminSessionReason] = useState("");
 
+  const loadMembers = useCallback(async (queryText: string) => {
+    try {
+      const page = await fetchMembersPage({ query: queryText });
+      setMembers(page.items);
+      setMembersTotalCount(page.totalCount);
+      setMembersNextCursor(page.nextCursor);
+      setMembersHasMore(page.hasMore);
+      setMembersLoadError(null);
+    } catch (err) {
+      const msg = formatError(err);
+      setMembersLoadError(msg);
+      throw err;
+    }
+  }, []);
+
+  const loadMoreMembers = useCallback(async () => {
+    if (!membersNextCursor) return;
+    setMembersLoadingMore(true);
+    try {
+      const page = await fetchMembersPage({ cursor: membersNextCursor, query: appliedMembersSearch });
+      setMembers((prev) => {
+        const seen = new Set(prev.map((m) => getMemberId(m)));
+        const appended = page.items.filter((m) => !seen.has(getMemberId(m)));
+        return [...prev, ...appended];
+      });
+      setMembersTotalCount(page.totalCount);
+      setMembersNextCursor(page.nextCursor);
+      setMembersHasMore(page.hasMore);
+      setMembersLoadError(null);
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setMembersLoadingMore(false);
+    }
+  }, [membersNextCursor, appliedMembersSearch, notify]);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
       const [metricsRes, membersRes, signalsRes, auditRes, sessionsRes] = await Promise.allSettled([
         api<OpsMetrics>("/ops/metrics"),
-        api<unknown>("/admin/members"),
+        loadMembers(appliedMembersSearch),
         api<unknown>("/admin/fraud/signals"),
         api<unknown>("/admin/audit-events"),
         api<unknown>("/auth/sessions"),
@@ -196,22 +272,26 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
         errors.push(formatError(metricsRes.reason));
       }
 
-      if (membersRes.status === "fulfilled") {
-        setMembers(unwrapList<AdminMember>(membersRes.value, ["members", "items", "data"]));
-      } else {
+      if (membersRes.status === "rejected") {
         errors.push(formatError(membersRes.reason));
       }
 
       if (signalsRes.status === "fulfilled") {
         setSignals(unwrapList<FraudSignal>(signalsRes.value, ["signals", "items", "data"]));
+        setSignalsLoadError(null);
       } else {
-        errors.push(formatError(signalsRes.reason));
+        const msg = formatError(signalsRes.reason);
+        setSignalsLoadError(msg);
+        errors.push(msg);
       }
 
       if (auditRes.status === "fulfilled") {
         setAuditEvents(unwrapList<AuditEvent>(auditRes.value, ["events", "auditEvents", "items", "data"]));
+        setAuditLoadError(null);
       } else {
-        errors.push(formatError(auditRes.reason));
+        const msg = formatError(auditRes.reason);
+        setAuditLoadError(msg);
+        errors.push(msg);
       }
 
       if (sessionsRes.status === "fulfilled") {
@@ -226,7 +306,21 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
     } finally {
       setLoading(false);
     }
-  }, [notify]);
+  }, [notify, loadMembers, appliedMembersSearch]);
+
+  const handleMembersSearchSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    const nextQuery = membersSearch.trim();
+    setAppliedMembersSearch(nextQuery);
+    setLoading(true);
+    try {
+      await loadMembers(nextQuery);
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     void loadAll();
@@ -532,7 +626,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
           }
         />
         <StatGrid>
-          <StatTile label="Участники" value={members.length} />
+          <StatTile label="Участники" value={membersTotalCount ?? members.length} />
           <StatTile label="Сигналы антифрода" value={signals.length} />
           <StatTile label="Заказы в работе" value={activeOrdersCount} />
           <StatTile label="Открытые претензии" value={openClaimsCount} />
@@ -550,24 +644,83 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
               <span>Управление участниками и RBAC</span>
             </span>
           }
+          subtitle={
+            membersTotalCount !== null
+              ? `Показано ${members.length} из ${membersTotalCount}`
+              : undefined
+          }
         />
+
+        <form className="row row--tight" style={{ marginBlockEnd: 12 }} onSubmit={(e) => void handleMembersSearchSubmit(e)}>
+          <Input
+            aria-label="Поиск участников по телефону, имени или партнёру"
+            type="text"
+            value={membersSearch}
+            onChange={(e) => setMembersSearch(e.target.value)}
+            placeholder="Поиск по телефону, имени или партнёру…"
+          />
+          <Button
+            type="submit"
+            variant="secondary"
+            size="sm"
+            disabled={loading || busy}
+            leadingIcon={<Search size={14} aria-hidden="true" />}
+          >
+            Найти
+          </Button>
+          {appliedMembersSearch && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={loading || busy}
+              onClick={() => {
+                setMembersSearch("");
+                setAppliedMembersSearch("");
+              }}
+            >
+              Сбросить
+            </Button>
+          )}
+        </form>
+
+        {membersLoadError && (
+          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+            <AlertTriangle size={16} aria-hidden="true" />
+            <span>Не удалось загрузить список участников: {membersLoadError}</span>
+          </div>
+        )}
 
         {members.length === 0 ? (
           loading ? (
             <p className="muted">Загрузка списка участников...</p>
-          ) : (
+          ) : membersLoadError ? null : (
             <EmptyState
               icon={<Users size={20} aria-hidden="true" />}
               title="Участники не найдены."
             />
           )
         ) : (
-          <DataTable
-            columns={memberColumns}
-            rows={members}
-            rowKey={(member) => getMemberId(member)}
-            caption="Участники платформы, их роли и статус доступа"
-          />
+          <>
+            <DataTable
+              columns={memberColumns}
+              rows={members}
+              rowKey={(member) => getMemberId(member)}
+              caption="Участники платформы, их роли и статус доступа"
+            />
+            {membersHasMore && (
+              <div className="button-row" style={{ marginBlockStart: 12 }}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={loading || membersLoadingMore || busy}
+                  onClick={() => void loadMoreMembers()}
+                >
+                  {membersLoadingMore ? "Загрузка…" : "Загрузить ещё"}
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </Card>
 
@@ -677,10 +830,17 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
           }
         />
 
+        {signalsLoadError && (
+          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+            <AlertTriangle size={16} aria-hidden="true" />
+            <span>Не удалось загрузить сигналы антифрода: {signalsLoadError}</span>
+          </div>
+        )}
+
         {signals.length === 0 ? (
           loading ? (
             <p className="muted">Загрузка сигналов антифрода...</p>
-          ) : (
+          ) : signalsLoadError ? null : (
             <EmptyState
               icon={<AlertTriangle size={20} aria-hidden="true" />}
               title="Подозрительных сигналов не обнаружено."
@@ -707,10 +867,17 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
           }
         />
 
+        {auditLoadError && (
+          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+            <AlertTriangle size={16} aria-hidden="true" />
+            <span>Не удалось загрузить журнал аудита: {auditLoadError}</span>
+          </div>
+        )}
+
         {auditEvents.length === 0 ? (
           loading ? (
             <p className="muted">Загрузка журнала аудита...</p>
-          ) : (
+          ) : auditLoadError ? null : (
             <EmptyState
               icon={<ClipboardList size={20} aria-hidden="true" />}
               title="Записи аудита отсутствуют."
