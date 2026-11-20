@@ -1,4 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { resolve, sep } from "node:path";
 import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
@@ -103,6 +105,49 @@ export const ALLOWED_EVIDENCE_MIME_TYPES = new Set([
 ]);
 export const MAX_EVIDENCE_BYTES = 15 * 1024 * 1024; // 15 MB
 const SERVABLE_EVIDENCE_STATES = new Set(["verified", "retained", "legal_hold"]);
+const EVIDENCE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function evidenceStorageRoot(): string {
+  return resolve(process.env.EVIDENCE_STORAGE_DIR ?? resolve(process.cwd(), ".evidence-storage"));
+}
+
+function evidenceFilePath(organizationId: string, assetId: string): { dir: string; filePath: string } {
+  if (!EVIDENCE_UUID_RE.test(organizationId) || !EVIDENCE_UUID_RE.test(assetId)) {
+    throw new AppError("VALIDATION_ERROR", "EVIDENCE_ID_INVALID");
+  }
+  const root = evidenceStorageRoot();
+  const dir = resolve(root, organizationId);
+  const filePath = resolve(dir, `${assetId}.bin`);
+  if (!dir.startsWith(root + sep) || !filePath.startsWith(dir + sep)) {
+    throw new AppError("VALIDATION_ERROR", "EVIDENCE_PATH_INVALID");
+  }
+  return { dir, filePath };
+}
+
+async function writeEvidenceBytes(organizationId: string, assetId: string, bytes: Buffer): Promise<void> {
+  const { dir, filePath } = evidenceFilePath(organizationId, assetId);
+  await mkdir(dir, { recursive: true });
+  const tmpPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmpPath, bytes);
+    await rename(tmpPath, filePath);
+  } catch (err) {
+    await unlink(tmpPath).catch(() => undefined);
+    throw err;
+  }
+}
+
+async function readEvidenceBytes(organizationId: string, assetId: string): Promise<Buffer> {
+  const { filePath } = evidenceFilePath(organizationId, assetId);
+  try {
+    return await readFile(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw errors.notFound("evidence");
+    }
+    throw err;
+  }
+}
 
 type EvidenceOrderScope = { customerId: string; assignedPartnerId: string | null };
 
@@ -324,6 +369,7 @@ export async function uploadEvidence(
       });
     }
     if (asset.status === "pending_upload") {
+      await writeEvidenceBytes(asset.organizationId, asset.id, payloadBytes);
       await tx.update(evidenceAssets).set({
         status: "verified",
         mimeType: effectiveMime,
@@ -432,10 +478,7 @@ export async function listGarmentEvidence(db: Db, principal: Principal, garmentI
   return rows;
 }
 
-/**
- * Single-asset read with the same object-scoped rule as the listing, and without the storage key.
- */
-export async function readEvidence(db: Db, principal: Principal, evidenceId: string) {
+async function loadServableEvidence(db: Db, principal: Principal, evidenceId: string) {
   assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
   const [asset] = await db.select({
     id: evidenceAssets.id,
@@ -459,6 +502,14 @@ export async function readEvidence(db: Db, principal: Principal, evidenceId: str
   if (!SERVABLE_EVIDENCE_STATES.has(asset.status)) {
     throw new AppError("FORBIDDEN", "EVIDENCE_NOT_VERIFIED", { status: asset.status });
   }
+  return asset;
+}
+
+/**
+ * Single-asset read with the same object-scoped rule as the listing, and without the storage key.
+ */
+export async function readEvidence(db: Db, principal: Principal, evidenceId: string) {
+  const asset = await loadServableEvidence(db, principal, evidenceId);
   await db.insert(evidenceAccessEvents).values({
     assetId: asset.id, actorId: principal.userId, purpose: "owner_read",
   });
@@ -472,6 +523,29 @@ export async function readEvidence(db: Db, principal: Principal, evidenceId: str
     sizeBytes: asset.sizeBytes,
     status: asset.status,
     createdAt: asset.capturedAt,
+  };
+}
+
+/**
+ * Authorized binary download of a verified/retained/legal_hold evidence asset, verifying SHA-256
+ * integrity on read and recording an access audit event.
+ */
+export async function readEvidenceContent(db: Db, principal: Principal, evidenceId: string) {
+  const asset = await loadServableEvidence(db, principal, evidenceId);
+  const bytes = await readEvidenceBytes(asset.organizationId, asset.id);
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (actualSha256 !== asset.sha256) {
+    throw new AppError("DEPENDENCY_UNAVAILABLE", "EVIDENCE_INTEGRITY_MISMATCH", {
+      evidenceId: asset.id,
+    });
+  }
+  await db.insert(evidenceAccessEvents).values({
+    assetId: asset.id, actorId: principal.userId, purpose: "content_download",
+  });
+  return {
+    bytes,
+    mimeType: asset.mimeType,
+    sha256: asset.sha256,
   };
 }
 
@@ -744,14 +818,26 @@ export async function decideCompensation(
     const [compensation] = await tx.select().from(compensations).where(and(
       eq(compensations.id, input.compensationId),
       eq(compensations.organizationId, principal.organizationId),
-    )).limit(1);
+    )).limit(1).for("update");
     if (!compensation) throw errors.notFound("compensation");
     if (compensation.state !== "proposed") {
       return { compensationId: compensation.id, state: compensation.state, alreadyDecided: true as const };
     }
     const state = input.approve ? "approved" : "denied";
-    await tx.update(compensations).set({ state, approvedBy: principal.userId })
-      .where(eq(compensations.id, compensation.id));
+    const [updated] = await tx.update(compensations).set({ state, approvedBy: principal.userId })
+      .where(and(
+        eq(compensations.id, compensation.id),
+        eq(compensations.organizationId, principal.organizationId),
+        eq(compensations.state, "proposed"),
+      ))
+      .returning({ id: compensations.id });
+    if (!updated) {
+      const [current] = await tx.select({ state: compensations.state }).from(compensations).where(and(
+        eq(compensations.id, compensation.id),
+        eq(compensations.organizationId, principal.organizationId),
+      )).limit(1);
+      return { compensationId: compensation.id, state: current?.state ?? compensation.state, alreadyDecided: true as const };
+    }
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: compensation.claimId,
       eventType: `claim.compensation_${state}`, payload: { compensationId: compensation.id, amountKopeks: compensation.amountKopeks },

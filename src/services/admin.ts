@@ -98,6 +98,31 @@ export async function grantRole(
   });
 }
 
+async function assertNotLastActiveAdmin(
+  tx: Db,
+  organizationId: string,
+  targetMembershipId: string,
+) {
+  // Lock active platform_admin memberships before counting so concurrent revocations or suspensions
+  // serialize instead of leaving the tenant without a single active administrator.
+  const activeAdmins = await tx.select({
+    id: membershipRoles.id,
+    membershipId: memberships.id,
+  }).from(membershipRoles)
+    .innerJoin(memberships, eq(memberships.id, membershipRoles.membershipId))
+    .where(and(
+      eq(memberships.organizationId, organizationId),
+      eq(memberships.state, "active"),
+      eq(membershipRoles.role, "platform_admin"),
+    ))
+    .for("update");
+  const targetIsActiveAdmin = activeAdmins.some(row => row.membershipId === targetMembershipId);
+  const remaining = targetIsActiveAdmin ? activeAdmins.length - 1 : activeAdmins.length;
+  if (remaining < 1) {
+    throw new AppError("FORBIDDEN", "LAST_ADMIN");
+  }
+}
+
 export async function revokeRole(
   db: Db,
   principal: Principal,
@@ -110,15 +135,7 @@ export async function revokeRole(
   }, async tx => {
     const membership = await membershipFor(tx, principal, input.userId);
     if (input.role === "platform_admin") {
-      // Lock admin rows before counting so concurrent revocations serialize instead of leaving zero admins.
-      const adminRoles = await tx.select({ id: membershipRoles.id }).from(membershipRoles)
-        .innerJoin(memberships, eq(memberships.id, membershipRoles.membershipId))
-        .where(and(
-          eq(memberships.organizationId, principal.organizationId),
-          eq(membershipRoles.role, "platform_admin"),
-        ))
-        .for("update");
-      if (adminRoles.length <= 1) throw new AppError("FORBIDDEN", "LAST_ADMIN");
+      await assertNotLastActiveAdmin(tx, principal.organizationId, membership.id);
     }
     const removed = await tx.delete(membershipRoles).where(and(
       eq(membershipRoles.membershipId, membership.id),
@@ -153,21 +170,7 @@ export async function setMembershipState(
   }, async tx => {
     const membership = await membershipFor(tx, principal, input.userId);
     if (input.state !== "active") {
-      // Lock the admin rows before counting so two administrators cannot suspend each other at the
-      // same time and leave the tenant without a single active administrator.
-      const adminRows = await tx.select({ membershipId: memberships.id, state: memberships.state })
-        .from(membershipRoles)
-        .innerJoin(memberships, eq(memberships.id, membershipRoles.membershipId))
-        .where(and(
-          eq(memberships.organizationId, principal.organizationId),
-          eq(membershipRoles.role, "platform_admin"),
-        ))
-        .for("update");
-      const activeAdmins = adminRows.filter(row => row.state === "active");
-      const targetIsActiveAdmin = activeAdmins.some(row => row.membershipId === membership.id);
-      if (targetIsActiveAdmin && activeAdmins.length <= 1) {
-        throw new AppError("FORBIDDEN", "LAST_ADMIN");
-      }
+      await assertNotLastActiveAdmin(tx, principal.organizationId, membership.id);
     }
     await tx.update(memberships)
       .set({ state: input.state })
