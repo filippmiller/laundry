@@ -260,9 +260,10 @@ export async function migrateLegacyQueueForActor(
     ownershipByDevice.set(devId, owned);
   }
 
-  const eligibleScans = inspection.scans.filter(
-    scan => ownershipByDevice.get(scan.deviceId) === true || Boolean(options.forceClaimUnverified),
+  const verifiedScans = inspection.scans.filter(
+    scan => ownershipByDevice.get(scan.deviceId) === true,
   );
+  const eligibleScans = options.forceClaimUnverified ? inspection.scans : verifiedScans;
   const unverifiedScans = inspection.scans.filter(
     scan => ownershipByDevice.get(scan.deviceId) !== true && !options.forceClaimUnverified,
   );
@@ -353,8 +354,13 @@ export async function migrateLegacyQueueForActor(
   // Deterministic crash/interruption hook for tests.
   options.beforeLegacyCleanup?.();
 
-  // Step 3: remove ONLY migrated IDs from the legacy DB after scoped write has committed.
-  await removeScans(migratedIds, undefined);
+  // Step 3: remove ONLY ownership-verified migrated IDs from the legacy DB after scoped write has committed.
+  // Unverified scans copied via explicit `forceClaimUnverified` recovery remain intact in legacy IndexedDB
+  // so another courier's scans on a shared device can never be stranded.
+  const verifiedMigratedIds = verifiedScans.map(scan => scan.clientEventId);
+  if (verifiedMigratedIds.length > 0) {
+    await removeScans(verifiedMigratedIds, undefined);
+  }
 
   const remainingLegacy = await queuedScans(undefined);
   const finalStatus = remainingLegacy.length === 0 ? "completed" : "partial";

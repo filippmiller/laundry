@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
-import { buildings, orders, serviceWindows, slotReservations } from "../db/schema.js";
+import { buildings, orders, quotes, serviceWindows, slotReservations } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
@@ -270,6 +270,21 @@ export async function holdSlotPair(db: Db, input: HoldPairRequest): Promise<Hold
     actorId: input.principal.userId,
     requestHash,
   }, async tx => {
+    if (input.quoteId) {
+      const [quote] = await tx.select({ id: quotes.id, customerId: quotes.customerId })
+        .from(quotes)
+        .where(and(
+          eq(quotes.id, input.quoteId),
+          eq(quotes.organizationId, input.principal.organizationId),
+        ))
+        .limit(1);
+      if (!quote) throw errors.notFound("quote");
+      const isStaff = hasRole(input.principal, ...ROLE_GROUPS.dispatcher, "system_worker");
+      if (!isStaff && quote.customerId !== input.principal.userId) {
+        throw errors.notFound("quote");
+      }
+    }
+
     // Lock ALL involved service_windows (prior holds being released + new pickup & delivery
     // windows) in a single sorted ORDER BY id FOR UPDATE query before mutating any window
     // counters, preventing AB-BA lock inversion between concurrent paired holds.

@@ -491,7 +491,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     }
   }
 
-  const [quoteRows, adjustmentRows, garmentRows, assignmentRows, manifestLines] = await Promise.all([
+  const [quoteRows, adjustmentRows, garmentRows, assignmentRows, manifestLines, addressRows] = await Promise.all([
     db.select({ totalKopeks: quotes.totalKopeks, snapshotJson: quotes.snapshotJson }).from(quotes).where(and(
       eq(quotes.id, order.quoteId),
       eq(quotes.organizationId, principal.organizationId),
@@ -549,6 +549,15 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
         eq(intakeManifests.organizationId, principal.organizationId),
         eq(intakeManifests.orderId, order.id),
       )),
+    (isOwnerCustomer || staff) && order.addressId
+      ? db.select({ id: customerAddresses.id, buildingId: customerAddresses.buildingId })
+        .from(customerAddresses)
+        .where(and(
+          eq(customerAddresses.id, order.addressId),
+          eq(customerAddresses.organizationId, principal.organizationId),
+        ))
+        .limit(1)
+      : Promise.resolve([]),
   ]);
 
   const acceptedDelta = adjustmentRows
@@ -655,7 +664,13 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
     assignedPartnerId: order.assignedPartnerId,
     termsVersion: order.termsVersion,
     returnReason: order.returnReason ?? null,
-    ...(canSeeRetailFinancials ? { totalKopeks } : {}),
+    ...(canSeeRetailFinancials
+      ? {
+        totalKopeks,
+        addressId: order.addressId ?? null,
+        buildingId: addressRows[0]?.buildingId ?? null,
+      }
+      : {}),
     garments: garmentsView,
     declaredItems,
     containers: containersView,

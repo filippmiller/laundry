@@ -482,6 +482,12 @@ export async function settlePendingRefundTx(
     eq(paymentIntents.organizationId, principal.organizationId),
   )).limit(1);
   if (!intent) throw errors.notFound("payment intent");
+  if (intent.state === "disputed" || intent.state === "chargeback_lost") {
+    throw new AppError("CONFLICT_VERSION", "PAYMENT_INTENT_DISPUTED", {
+      paymentIntentId: intent.id,
+      state: intent.state,
+    });
+  }
 
   await tx.update(refunds).set({ state: "completed" }).where(eq(refunds.id, refund.id));
   await postRefundJournalTx(tx, {
@@ -811,6 +817,14 @@ export async function disputePartnerLine(
     if (hasRole(principal, "partner_finance") && !hasRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin)) {
       if (invoice.partnerId !== principal.partnerId) throw errors.notFound("invoice");
     }
+    // Serialize with createPartnerPayout / approvePartnerPayout using the same partners FOR UPDATE lock
+    // so a concurrent dispute cannot invalidate a partner's payable balance mid-approval.
+    const lockedPartner = await tx.execute(sql`
+      SELECT id FROM partners
+      WHERE id = ${invoice.partnerId} AND organization_id = ${principal.organizationId}
+      FOR UPDATE
+    `);
+    if (!(lockedPartner.rows as unknown[]).length) throw errors.notFound("partner");
     const [dispute] = await tx.insert(partnerDisputes).values({
       organizationId: principal.organizationId,
       invoiceLineId: line.id,
@@ -842,10 +856,12 @@ function encodeQueueCursor(cursor: QueueCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
 
+const QUEUE_CURSOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function decodeQueueCursor(raw: string): { createdAt: string; id: string; priority?: 0 | 1 } {
   try {
     const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<QueueCursor>;
-    if (typeof parsed.createdAt !== "string" || typeof parsed.id !== "string" || !parsed.id) {
+    if (typeof parsed.createdAt !== "string" || typeof parsed.id !== "string" || !QUEUE_CURSOR_UUID_RE.test(parsed.id)) {
       throw new Error("INVALID_CURSOR");
     }
     const createdAt = assertCursorTimestamp(parsed.createdAt);

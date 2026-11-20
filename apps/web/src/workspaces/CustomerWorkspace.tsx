@@ -638,8 +638,8 @@ function NewOrderTab({
       if (windowsReqRef.current !== reqId) return;
       setPickupWindows(pickup);
       setDeliveryWindows(delivery);
-      setPickupWindowId(pickup[0]?.id ?? "");
-      setDeliveryWindowId(delivery[0]?.id ?? "");
+      setPickupWindowId((prev) => (prev && pickup.some((window) => window.id === prev) ? prev : pickup[0]?.id ?? ""));
+      setDeliveryWindowId((prev) => (prev && delivery.some((window) => window.id === prev) ? prev : delivery[0]?.id ?? ""));
       setWindowsBuildingId(targetBuildingId);
     } catch (err) {
       if (windowsReqRef.current !== reqId) return;

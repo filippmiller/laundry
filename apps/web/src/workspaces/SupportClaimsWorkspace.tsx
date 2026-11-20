@@ -355,6 +355,8 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
 
   const threadReqRef = useRef(0);
   const claimReqRef = useRef(0);
+  const threadsListReqRef = useRef(0);
+  const claimsListReqRef = useRef(0);
 
   const activeThreadId = threadDetail && threadDetail.thread.id === selectedThreadId ? selectedThreadId : null;
   const replyText = activeThreadId ? (replyDrafts[activeThreadId] ?? "") : "";
@@ -423,6 +425,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   );
 
   const loadThreads = useCallback(async (queryOverride?: string) => {
+    const reqId = ++threadsListReqRef.current;
     const queryText = queryOverride !== undefined ? queryOverride : appliedThreadsSearch;
     setLoadingThreads(true);
     try {
@@ -431,22 +434,27 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         ["threads", "items", "data"],
         { query: queryText },
       );
+      if (threadsListReqRef.current !== reqId) return;
       setThreads(page.items);
       setThreadsTotalCount(page.totalCount);
       setThreadsNextCursor(page.nextCursor);
       setThreadsHasMore(page.hasMore);
       setThreadsLoadError(null);
     } catch (err) {
+      if (threadsListReqRef.current !== reqId) return;
       const msg = formatError(err);
       setThreadsLoadError(msg);
       notify({ kind: "error", text: msg });
     } finally {
-      setLoadingThreads(false);
+      if (threadsListReqRef.current === reqId) {
+        setLoadingThreads(false);
+      }
     }
   }, [appliedThreadsSearch, notify]);
 
   const loadMoreThreads = useCallback(async () => {
     if (!threadsNextCursor) return;
+    const reqId = ++threadsListReqRef.current;
     setLoadingMoreThreads(true);
     try {
       const page = await fetchPaginatedList<SupportThread>(
@@ -454,6 +462,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         ["threads", "items", "data"],
         { cursor: threadsNextCursor, query: appliedThreadsSearch },
       );
+      if (threadsListReqRef.current !== reqId) return;
       setThreads((prev) => {
         const seen = new Set(prev.map((item) => item.id));
         return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
@@ -463,9 +472,12 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       setThreadsHasMore(page.hasMore);
       setThreadsLoadError(null);
     } catch (err) {
+      if (threadsListReqRef.current !== reqId) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setLoadingMoreThreads(false);
+      if (threadsListReqRef.current === reqId) {
+        setLoadingMoreThreads(false);
+      }
     }
   }, [threadsNextCursor, appliedThreadsSearch, notify]);
 
@@ -531,6 +543,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   }, [threadDetail, selectedThreadId, notify]);
 
   const loadClaims = useCallback(async (queryOverride?: string) => {
+    const reqId = ++claimsListReqRef.current;
     const queryText = queryOverride !== undefined ? queryOverride : appliedClaimsSearch;
     setLoadingClaims(true);
     try {
@@ -539,22 +552,27 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         ["claims", "items", "data"],
         { query: queryText },
       );
+      if (claimsListReqRef.current !== reqId) return;
       setClaims(page.items);
       setClaimsTotalCount(page.totalCount);
       setClaimsNextCursor(page.nextCursor);
       setClaimsHasMore(page.hasMore);
       setClaimsLoadError(null);
     } catch (err) {
+      if (claimsListReqRef.current !== reqId) return;
       const msg = formatError(err);
       setClaimsLoadError(msg);
       notify({ kind: "error", text: msg });
     } finally {
-      setLoadingClaims(false);
+      if (claimsListReqRef.current === reqId) {
+        setLoadingClaims(false);
+      }
     }
   }, [appliedClaimsSearch, notify]);
 
   const loadMoreClaims = useCallback(async () => {
     if (!claimsNextCursor) return;
+    const reqId = ++claimsListReqRef.current;
     setLoadingMoreClaims(true);
     try {
       const page = await fetchPaginatedList<ClaimSummary>(
@@ -562,6 +580,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         ["claims", "items", "data"],
         { cursor: claimsNextCursor, query: appliedClaimsSearch },
       );
+      if (claimsListReqRef.current !== reqId) return;
       setClaims((prev) => {
         const seen = new Set(prev.map((item) => item.id));
         return [...prev, ...page.items.filter((item) => !seen.has(item.id))];
@@ -571,9 +590,12 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       setClaimsHasMore(page.hasMore);
       setClaimsLoadError(null);
     } catch (err) {
+      if (claimsListReqRef.current !== reqId) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setLoadingMoreClaims(false);
+      if (claimsListReqRef.current === reqId) {
+        setLoadingMoreClaims(false);
+      }
     }
   }, [claimsNextCursor, appliedClaimsSearch, notify]);
 

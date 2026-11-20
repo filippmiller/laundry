@@ -280,14 +280,29 @@ describe("W3-CD-01 / N-CD-03: legacy courier IndexedDB migration & per-actor nam
     expect(await queuedScans(scopeA)).toEqual([]);
     expect((await inspectLegacyQueue()).scans).toHaveLength(1);
 
-    // Explicit user-confirmed recovery migrates the scan verbatim.
+    // Explicit user-confirmed recovery copies the unverified scan to scopeA WITHOUT deleting
+    // the unverified row from legacy IndexedDB, so another courier's scans can never be stranded.
     const recovered = await migrateLegacyQueueForActor(scopeA, {
       verifyDeviceOwner: async () => false,
       forceClaimUnverified: true,
     });
-    expect(recovered.status).toBe("migrated");
+    expect(recovered.status).toBe("partial");
     expect(recovered.migratedCount).toBe(1);
+    expect(recovered.unverifiedCount).toBe(0);
+    expect(recovered.remainingLegacyCount).toBe(1);
     expect(await queuedScans(scopeA)).toEqual([scan]);
+    expect((await inspectLegacyQueue()).scans).toEqual([scan]);
+
+    // When the rightful owner (scopeB) later signs in and verifies device ownership,
+    // they can still migrate the preserved legacy scan and only then is it removed from legacy DB.
+    const scopeB = "org-1:courier-B";
+    const ownerMigrated = await migrateLegacyQueueForActor(scopeB, {
+      verifyDeviceOwner: async devId => devId === unknownDevice,
+    });
+    expect(ownerMigrated.status).toBe("migrated");
+    expect(ownerMigrated.migratedCount).toBe(1);
+    expect(ownerMigrated.remainingLegacyCount).toBe(0);
+    expect(await queuedScans(scopeB)).toEqual([scan]);
     expect((await inspectLegacyQueue()).scans).toEqual([]);
   });
 

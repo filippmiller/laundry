@@ -149,6 +149,7 @@ export function EvidenceUploader({
     active: false,
   });
   const [uploadSnapshot, setUploadSnapshot] = useState(() => getOwnerUploadSnapshot(currentOwnerKey));
+  const lastCompletionVersionRef = useRef(uploadSnapshot.completionVersion);
   const [deletingState, setDeletingState] = useState<{ ownerKey: string; id: string | null }>({
     ownerKey: currentOwnerKey,
     id: null,
@@ -162,7 +163,9 @@ export function EvidenceUploader({
   });
 
   useEffect(() => {
-    setUploadSnapshot(getOwnerUploadSnapshot(currentOwnerKey));
+    const initial = getOwnerUploadSnapshot(currentOwnerKey);
+    lastCompletionVersionRef.current = initial.completionVersion;
+    setUploadSnapshot(initial);
     return subscribeEvidenceUploads(() => {
       setUploadSnapshot(getOwnerUploadSnapshot(currentOwnerKey));
     });
@@ -251,6 +254,19 @@ export function EvidenceUploader({
   useEffect(() => {
     void loadAssets();
   }, [loadAssets, refreshKey]);
+
+  // When a background upload batch finishes for this owner (including after A -> B -> A remount),
+  // automatically re-fetch assets so uploadedIds / onUploadStateChange reflect the newly verified files.
+  useEffect(() => {
+    if (
+      currentOwnerKey
+      && uploadSnapshot.ownerKey === currentOwnerKey
+      && uploadSnapshot.completionVersion > lastCompletionVersionRef.current
+    ) {
+      lastCompletionVersionRef.current = uploadSnapshot.completionVersion;
+      void loadAssets();
+    }
+  }, [currentOwnerKey, uploadSnapshot.ownerKey, uploadSnapshot.completionVersion, loadAssets]);
 
   const handleCancelUploads = () => {
     if (!currentOwnerKey) return;

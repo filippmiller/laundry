@@ -36,6 +36,28 @@ describe("W3-EV-02 / W2-EV-02: EvidenceUploadBatchStore owner+generation isolati
 
     finishEvidenceUploadBatch(ownerA, batchA1.generation);
     expect(getOwnerUploadSnapshot(ownerA).uploadingCount).toBe(0);
+    expect(getOwnerUploadSnapshot(ownerA).completionVersion).toBe(1);
+    expect(getOwnerUploadSnapshot(ownerB).completionVersion).toBe(0);
+  });
+
+  it("increments completionVersion per owner on each finished batch and ignores duplicate finishes", () => {
+    const ownerA = evidenceOwnerKey("order", "order-a");
+    const ownerB = evidenceOwnerKey("order", "order-b");
+
+    expect(getOwnerUploadSnapshot(ownerA).completionVersion).toBe(0);
+    const b1 = startEvidenceUploadBatch(ownerA, 1);
+    const b2 = startEvidenceUploadBatch(ownerA, 2);
+    expect(getOwnerUploadSnapshot(ownerA).completionVersion).toBe(0);
+
+    finishEvidenceUploadBatch(ownerA, b1.generation);
+    expect(getOwnerUploadSnapshot(ownerA).completionVersion).toBe(1);
+    // Duplicate finish of already-completed generation does not bump completionVersion.
+    finishEvidenceUploadBatch(ownerA, b1.generation);
+    expect(getOwnerUploadSnapshot(ownerA).completionVersion).toBe(1);
+
+    finishEvidenceUploadBatch(ownerA, b2.generation);
+    expect(getOwnerUploadSnapshot(ownerA).completionVersion).toBe(2);
+    expect(getOwnerUploadSnapshot(ownerB).completionVersion).toBe(0);
   });
 
   it("completion of an older batch never decrements or clears a newer batch for the same owner", () => {

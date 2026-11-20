@@ -1,17 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { buildApp } from "../../src/api/server.js";
 import { createDb, type Db } from "../../src/db/client.js";
 import {
   containerAssignments, containers, garmentEvidence, garments,
-  organizations, refunds, seals,
+  ledgerJournals, orderLines, orders, organizations, partnerInvoiceLines, partnerInvoices,
+  partnerServiceAccruals, paymentIntents, refunds, seals,
 } from "../../src/db/schema.js";
 import { canonicalScanHash } from "../../src/core/scan-hash.js";
 import { holdSlotPair } from "../../src/domain/slot-reservation.js";
 import { completeShift } from "../../src/services/courier-shift.js";
 import { listNotificationsPage } from "../../src/services/customer.js";
-import { capturePayment, createCustomerInvoice } from "../../src/services/finance.js";
+import {
+  capturePayment, createCustomerInvoice, createPartnerPayout,
+  disputePartnerLine, listPartnerCreditNotes, listPartnerPayouts,
+  processPendingRefunds,
+} from "../../src/services/finance.js";
 import { syncScanEvents, type ScanEventInput } from "../../src/services/intake.js";
 import { cancelOrder, getOrderTimeline, loadOrderView } from "../../src/services/orders.js";
 import {
@@ -19,7 +24,7 @@ import {
 } from "../../src/services/workspace.js";
 import { runOnceWithDb } from "../../src/workers/index.js";
 import { makePrincipal, seedDeliveryWindow, seedUser, seedWindow } from "../fixtures.js";
-import { seedFullOrder } from "../operations-fixtures.js";
+import { seedFullOrder, seedPartnerForOrder } from "../operations-fixtures.js";
 
 const rid = () => randomUUID();
 
@@ -321,5 +326,192 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Red-Team Backend Remedia
       headers: { cookie: session.cookie },
     });
     expect(validRes.statusCode).toBe(200);
+  });
+
+  it("13. processPendingRefunds refuses to settle refund or post journal when payment_intent is disputed", async () => {
+    const f = await seedFullOrder(db, { state: "scheduled" });
+    const finance = makePrincipal(f.organizationId, await seedUser(db, f.organizationId), ["platform_finance"]);
+
+    const inv = await createCustomerInvoice(db, finance, { orderId: f.orderId, key: `inv-disp-${rid()}` });
+    await capturePayment(db, finance, {
+      orderId: f.orderId,
+      amountKopeks: inv.totalKopeks,
+      key: `cap-disp-${rid()}`,
+    });
+    const cancelled = await cancelOrder(db, f.dispatcher, {
+      orderId: f.orderId,
+      reason: "Cancel before dispute",
+      deferRefundSettlement: true,
+      key: `cancel-disp-${rid()}`,
+    });
+    expect(cancelled.refundIds.length).toBe(1);
+    const refundId = cancelled.refundIds[0];
+
+    // Transition the payment intent to `disputed` before the refund worker runs.
+    await db.update(paymentIntents)
+      .set({ state: "disputed" })
+      .where(and(
+        eq(paymentIntents.orderId, f.orderId),
+        eq(paymentIntents.organizationId, f.organizationId),
+      ));
+
+    const processed = await processPendingRefunds(db, finance, { refundId });
+    expect(processed.completed).toBe(0);
+    expect(processed.errored).toBe(1);
+
+    const [refundRow] = await db.select({ state: refunds.state })
+      .from(refunds)
+      .where(eq(refunds.id, refundId));
+    expect(refundRow?.state).toBe("error");
+
+    const journals = await db.select({ id: ledgerJournals.id })
+      .from(ledgerJournals)
+      .where(and(
+        eq(ledgerJournals.organizationId, f.organizationId),
+        eq(ledgerJournals.sourceType, "payment_refund"),
+        eq(ledgerJournals.sourceId, refundId),
+      ));
+    expect(journals).toEqual([]);
+  });
+
+  it("14. disputePartnerLine locks partner row and reduces available payable balance for payouts", async () => {
+    const f = await seedFullOrder(db, { state: "pickup_assigned" });
+    const partner = await seedPartnerForOrder(db, f);
+    const finance = makePrincipal(f.organizationId, await seedUser(db, f.organizationId), ["platform_finance"]);
+    const [orderLine] = await db.select().from(orderLines).where(eq(orderLines.orderId, f.orderId)).limit(1);
+
+    const [accrual] = await db.insert(partnerServiceAccruals).values({
+      organizationId: f.organizationId,
+      partnerId: partner.partnerId,
+      orderLineId: orderLine.id,
+      contractId: partner.contractId,
+      quantity: 1_000,
+      amountKopeks: 50_000,
+      status: "accrued",
+      disputed: false,
+    }).returning();
+    const [pInv] = await db.insert(partnerInvoices).values({
+      organizationId: f.organizationId,
+      partnerId: partner.partnerId,
+      number: `PINV-RT-${rid().slice(0, 8)}`,
+      periodStart: new Date("2026-11-01T00:00:00Z"),
+      periodEnd: new Date("2026-11-30T23:59:59Z"),
+      totalKopeks: 50_000,
+    }).returning();
+    const [pLine] = await db.insert(partnerInvoiceLines).values({
+      invoiceId: pInv.id,
+      accrualId: accrual.id,
+      amountKopeks: 50_000,
+    }).returning();
+
+    // Disputing the line acquires partners FOR UPDATE and marks the accrual disputed.
+    const disputed = await disputePartnerLine(db, finance, {
+      lineId: pLine.id,
+      reason: "Weight discrepancy on partner invoice line",
+      key: `disp-line-${rid()}`,
+    });
+    expect(disputed.state).toBe("open");
+
+    // Subsequent payout for the disputed amount must be rejected as exceeding payable balance.
+    await expect(createPartnerPayout(db, finance, {
+      partnerId: partner.partnerId,
+      amountKopeks: 50_000,
+      key: `payout-after-disp-${rid()}`,
+    })).rejects.toMatchObject({ code: "FINANCIAL_HOLD", message: "PAYOUT_EXCEEDS_PAYABLE" });
+  });
+
+  it("15. Finance queue pagination rejects non-UUID cursor.id with 400 VALIDATION_ERROR instead of 500", async () => {
+    const seed = await seedWindow(db, { capacity: 1 });
+    const finance = makePrincipal(seed.organizationId, seed.userId, ["platform_finance"]);
+    const badCursor = Buffer.from(
+      JSON.stringify({ createdAt: "2026-11-20T12:00:00.000000Z", id: "not-a-uuid" }),
+      "utf8",
+    ).toString("base64url");
+
+    await expect(listPartnerPayouts(db, finance, { cursor: badCursor }))
+      .rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "INVALID_CURSOR" });
+    await expect(listPartnerCreditNotes(db, finance, { cursor: badCursor }))
+      .rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "INVALID_CURSOR" });
+  });
+
+  it("16. holdSlotPair validates quoteId ownership and tenant scoping", async () => {
+    const f = await seedFullOrder(db, { state: "scheduled" });
+    const otherCustomerId = await seedUser(db, f.organizationId);
+    const otherCustomer = makePrincipal(f.organizationId, otherCustomerId, ["customer"]);
+
+    const [foreignOrg] = await db.insert(organizations).values({
+      name: `Foreign Quote Org ${rid().slice(0, 8)}`,
+    }).returning();
+    const foreignCustomer = makePrincipal(foreignOrg.id, await seedUser(db, foreignOrg.id), ["customer"]);
+
+    const seed = await seedWindow(db, { capacity: 4 });
+    const deliveryWindowId = await seedDeliveryWindow(db, seed, 4);
+
+    // Nonexistent quoteId -> 404 NOT_FOUND.
+    await expect(holdSlotPair(db, {
+      principal: f.principal,
+      pickupWindowId: f.windowId,
+      deliveryWindowId: f.deliveryWindowId,
+      quoteId: rid(),
+      key: `hold-missing-quote-${rid()}`,
+      ttlMinutes: 10,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // Another customer in the same org trying to attach f.quoteId -> 404 NOT_FOUND.
+    await expect(holdSlotPair(db, {
+      principal: otherCustomer,
+      pickupWindowId: f.windowId,
+      deliveryWindowId: f.deliveryWindowId,
+      quoteId: f.quoteId,
+      key: `hold-other-cust-quote-${rid()}`,
+      ttlMinutes: 10,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // Foreign-org customer trying to attach f.quoteId on their own windows -> 404 NOT_FOUND.
+    await expect(holdSlotPair(db, {
+      principal: foreignCustomer,
+      pickupWindowId: seed.windowId,
+      deliveryWindowId,
+      quoteId: f.quoteId,
+      key: `hold-foreign-org-quote-${rid()}`,
+      ttlMinutes: 10,
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // Owner customer holding with their own quoteId succeeds.
+    const ownHold = await holdSlotPair(db, {
+      principal: f.principal,
+      pickupWindowId: f.windowId,
+      deliveryWindowId: f.deliveryWindowId,
+      quoteId: f.quoteId,
+      key: `hold-own-quote-${rid()}`,
+      ttlMinutes: 10,
+    });
+    expect(ownHold.pickup.state).toBe("held");
+    expect(ownHold.delivery.state).toBe("held");
+  });
+
+  it("17. loadOrderView exposes buildingId and addressId only to owner customer and staff, never to partner or courier", async () => {
+    const f = await seedFullOrder(db, { state: "pickup_assigned" });
+    const partner = await seedPartnerForOrder(db, f);
+    const [orderRow] = await db.select({ addressId: orders.addressId })
+      .from(orders)
+      .where(eq(orders.id, f.orderId))
+      .limit(1);
+
+    const customerView = await loadOrderView(db, f.principal, f.orderId);
+    expect(customerView.buildingId).toBe(f.buildingId);
+    expect(customerView.addressId).toBe(orderRow?.addressId);
+
+    const staffView = await loadOrderView(db, f.dispatcher, f.orderId);
+    expect(staffView.buildingId).toBe(f.buildingId);
+    expect(staffView.addressId).toBe(orderRow?.addressId);
+
+    const partnerView = await loadOrderView(db, partner.principal, f.orderId);
+    expect("buildingId" in partnerView).toBe(false);
+    expect("addressId" in partnerView).toBe(false);
+
+    const courierView = await loadOrderView(db, f.courier, f.orderId);
+    expect("buildingId" in courierView).toBe(false);
+    expect("addressId" in courierView).toBe(false);
   });
 });

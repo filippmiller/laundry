@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -138,6 +138,10 @@ function unwrapList<T>(res: unknown, keys: string[]): T[] {
   return [];
 }
 
+function getMemberRowKey(member: AdminMember): string {
+  return member.id ?? member.userId ?? member.phone;
+}
+
 function getMemberId(member: AdminMember): string {
   return member.userId ?? member.id ?? member.phone;
 }
@@ -217,15 +221,20 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
   const [adminSessionId, setAdminSessionId] = useState("");
   const [adminSessionReason, setAdminSessionReason] = useState("");
 
+  const membersReqRef = useRef(0);
+
   const loadMembers = useCallback(async (queryText: string) => {
+    const reqId = ++membersReqRef.current;
     try {
       const page = await fetchMembersPage({ query: queryText });
+      if (membersReqRef.current !== reqId) return;
       setMembers(page.items);
       setMembersTotalCount(page.totalCount);
       setMembersNextCursor(page.nextCursor);
       setMembersHasMore(page.hasMore);
       setMembersLoadError(null);
     } catch (err) {
+      if (membersReqRef.current !== reqId) return;
       const msg = formatError(err);
       setMembersLoadError(msg);
       throw err;
@@ -234,12 +243,14 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
 
   const loadMoreMembers = useCallback(async () => {
     if (!membersNextCursor) return;
+    const reqId = ++membersReqRef.current;
     setMembersLoadingMore(true);
     try {
       const page = await fetchMembersPage({ cursor: membersNextCursor, query: appliedMembersSearch });
+      if (membersReqRef.current !== reqId) return;
       setMembers((prev) => {
-        const seen = new Set(prev.map((m) => getMemberId(m)));
-        const appended = page.items.filter((m) => !seen.has(getMemberId(m)));
+        const seen = new Set(prev.map((m) => getMemberRowKey(m)));
+        const appended = page.items.filter((m) => !seen.has(getMemberRowKey(m)));
         return [...prev, ...appended];
       });
       setMembersTotalCount(page.totalCount);
@@ -247,9 +258,12 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
       setMembersHasMore(page.hasMore);
       setMembersLoadError(null);
     } catch (err) {
+      if (membersReqRef.current !== reqId) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setMembersLoadingMore(false);
+      if (membersReqRef.current === reqId) {
+        setMembersLoadingMore(false);
+      }
     }
   }, [membersNextCursor, appliedMembersSearch, notify]);
 
@@ -705,7 +719,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
             <DataTable
               columns={memberColumns}
               rows={members}
-              rowKey={(member) => getMemberId(member)}
+              rowKey={(member) => getMemberRowKey(member)}
               caption="Участники платформы, их роли и статус доступа"
             />
             {membersHasMore && (

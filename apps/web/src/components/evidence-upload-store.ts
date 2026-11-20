@@ -2,6 +2,7 @@ export type OwnerUploadEntry = {
   activeBatches: Map<number, { abortController: AbortController; fileCount: number }>;
   lastError: string | null;
   cancelled: boolean;
+  completionVersion: number;
 };
 
 export type OwnerUploadSnapshot = {
@@ -10,6 +11,7 @@ export type OwnerUploadSnapshot = {
   lastError: string | null;
   cancelled: boolean;
   activeBatchGenerations: number[];
+  completionVersion: number;
 };
 
 const ownerEntries = new Map<string, OwnerUploadEntry>();
@@ -29,6 +31,7 @@ function getOrCreateEntry(ownerKey: string): OwnerUploadEntry {
       activeBatches: new Map(),
       lastError: null,
       cancelled: false,
+      completionVersion: 0,
     };
     ownerEntries.set(ownerKey, entry);
   }
@@ -54,6 +57,7 @@ export function getOwnerUploadSnapshot(ownerKey: string): OwnerUploadSnapshot {
       lastError: null,
       cancelled: false,
       activeBatchGenerations: [],
+      completionVersion: 0,
     };
   }
   const entry = ownerEntries.get(ownerKey);
@@ -64,6 +68,7 @@ export function getOwnerUploadSnapshot(ownerKey: string): OwnerUploadSnapshot {
       lastError: null,
       cancelled: false,
       activeBatchGenerations: [],
+      completionVersion: 0,
     };
   }
   return {
@@ -72,6 +77,7 @@ export function getOwnerUploadSnapshot(ownerKey: string): OwnerUploadSnapshot {
     lastError: entry.lastError,
     cancelled: entry.cancelled,
     activeBatchGenerations: [...entry.activeBatches.keys()],
+    completionVersion: entry.completionVersion,
   };
 }
 
@@ -112,6 +118,7 @@ export function finishEvidenceUploadBatch(ownerKey: string, generation: number):
   const entry = ownerEntries.get(ownerKey);
   if (!entry) return;
   if (entry.activeBatches.delete(generation)) {
+    entry.completionVersion += 1;
     notifyListeners();
   }
 }
