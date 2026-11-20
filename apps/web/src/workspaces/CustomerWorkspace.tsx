@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { api, dt, money } from "../api";
 import { DocumentPrintModal, type DocumentKind } from "../components/DocumentPrintModal";
+import { EvidenceUploader } from "../components/EvidenceUploader";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
 import { findSubtype } from "@shared/garment-taxonomy";
 import { ModalDialog } from "../components/ModalDialog";
@@ -1098,6 +1099,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   const [claimType, setClaimType] = useState("damage");
   const [claimDescription, setClaimDescription] = useState("");
   const [claimGarments, setClaimGarments] = useState<string[]>([]);
+  const [claimEvidenceIds, setClaimEvidenceIds] = useState<string[]>([]);
   const [rating, setRating] = useState("5");
   const [reviewBody, setReviewBody] = useState("");
 
@@ -1313,10 +1315,12 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             claimType,
             description: claimDescription.trim(),
             ...(claimGarments.length ? { garmentIds: claimGarments } : {}),
+            ...(claimEvidenceIds.length ? { evidenceIds: claimEvidenceIds } : {}),
           },
         });
         setClaimDescription("");
         setClaimGarments([]);
+        setClaimEvidenceIds([]);
         await loadClaims();
       },
       "Претензия открыта",
@@ -1765,6 +1769,17 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 ))}
               </fieldset>
             )}
+
+            <div style={{ marginBlockStart: 12 }}>
+              <EvidenceUploader
+                ownerType="order"
+                ownerId={detail.id}
+                purpose="claim_evidence"
+                title="Фотографии к претензии (необязательно)"
+                notify={notify}
+                onUploadedIdsChange={setClaimEvidenceIds}
+              />
+            </div>
 
             <div className="button-row">
               <button type="button" className="ghost" disabled={isBusy} onClick={() => void handleClaim()}>

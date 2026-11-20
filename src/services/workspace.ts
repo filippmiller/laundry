@@ -4,7 +4,7 @@ import type { Db } from "../db/client.js";
 import {
   buildings, claims, compensations, courierShifts, custodyEvents, customerAddresses,
   evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
-  garmentEvidence, garments, notifications, orders, outboxEvents, sessions, supportThreads, users,
+  garmentEvidence, garments, notifications, orders, outboxEvents, routeStops, sessions, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -141,6 +141,17 @@ function entitledToOrder(principal: Principal, order: EvidenceOrderScope | undef
  * type without a resolved rule, an object outside the principal's tenant, and a principal without a
  * matching entitlement are all refused.
  */
+async function isAssignedCourierForOrder(db: Db, principal: Principal, orderId: string): Promise<boolean> {
+  if (!hasRole(principal, "courier")) return false;
+  const [stop] = await db.select({ id: routeStops.id }).from(routeStops).where(and(
+    eq(routeStops.organizationId, principal.organizationId),
+    eq(routeStops.orderId, orderId),
+    eq(routeStops.assignedCourierId, principal.userId),
+    inArray(routeStops.state, ["pending", "en_route", "arrived"]),
+  )).limit(1);
+  return Boolean(stop);
+}
+
 async function resolveEvidenceOwnership(
   db: Db,
   principal: Principal,
@@ -148,7 +159,10 @@ async function resolveEvidenceOwnership(
   ownerId: string,
 ): Promise<boolean> {
   if (ownerType === "order") {
-    return entitledToOrder(principal, await loadScopedOrder(db, principal, ownerId));
+    const order = await loadScopedOrder(db, principal, ownerId);
+    if (entitledToOrder(principal, order)) return true;
+    if (order && await isAssignedCourierForOrder(db, principal, ownerId)) return true;
+    return false;
   }
   if (ownerType === "claim") {
     const [claim] = await db.select({ openedBy: claims.openedBy, orderId: claims.orderId }).from(claims).where(and(
@@ -214,7 +228,7 @@ export async function registerEvidence(
     objectKey: string; sha256: string; purpose: string; mimeType?: string; sizeBytes?: number; key: string;
   },
 ) {
-  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
   if (!/^[a-f0-9]{64}$/.test(input.sha256)) {
     throw new AppError("VALIDATION_ERROR", "SHA256_FORMAT_INVALID");
   }
@@ -264,7 +278,7 @@ export async function uploadEvidence(
     key: string;
   },
 ) {
-  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
   const payloadBytes = input.bytes ?? (input.contentBase64 !== undefined ? Buffer.from(input.contentBase64, "base64") : null);
   if (!payloadBytes || payloadBytes.byteLength === 0 || payloadBytes.byteLength > MAX_EVIDENCE_BYTES) {
     throw new AppError("VALIDATION_ERROR", "EVIDENCE_SIZE_INVALID", {
@@ -340,7 +354,7 @@ export async function uploadEvidence(
 }
 
 export async function listEvidence(db: Db, principal: Principal, ownerType: string, ownerId: string) {
-  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
   if (!await resolveEvidenceOwnership(db, principal, ownerType, ownerId)) {
     throw errors.notFound("evidence");
   }
@@ -375,7 +389,7 @@ export async function listEvidence(db: Db, principal: Principal, ownerType: stri
  * enforcing the owning order's ABAC rules and never exposing `objectKey`.
  */
 export async function listGarmentEvidence(db: Db, principal: Principal, garmentId: string) {
-  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
   const [garment] = await db.select({
     id: garments.id,
     organizationId: garments.organizationId,
@@ -422,7 +436,7 @@ export async function listGarmentEvidence(db: Db, principal: Principal, garmentI
  * Single-asset read with the same object-scoped rule as the listing, and without the storage key.
  */
 export async function readEvidence(db: Db, principal: Principal, evidenceId: string) {
-  assertRole(principal, "customer", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
+  assertRole(principal, "customer", "courier", ...SUPPORT_ROLES, "laundry_operator", ...ROLE_GROUPS.dispatcher);
   const [asset] = await db.select({
     id: evidenceAssets.id,
     organizationId: evidenceAssets.organizationId,
@@ -466,7 +480,7 @@ export async function deleteEvidence(
   principal: Principal,
   input: { evidenceId: string; key: string },
 ) {
-  assertRole(principal, "customer", ...SUPPORT_ROLES);
+  assertRole(principal, "customer", "courier", ...SUPPORT_ROLES);
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId,
     scope: "evidence:delete",
