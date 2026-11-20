@@ -413,11 +413,38 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
   const duplicate: string[] = [];
   const rejected: Array<{ clientEventId: string; reason: string }> = [];
   for (const event of events) {
-    const [device] = await db.select().from(scanEvents).where(and(
+    const [existing] = await db.select().from(scanEvents).where(and(
       eq(scanEvents.deviceId, event.deviceId),
       eq(scanEvents.clientEventId, event.clientEventId),
     )).limit(1);
-    if (device) {
+    if (existing) {
+      if (existing.syncStatus === "rejected") {
+        // Re-evaluate previously rejected scans (e.g., courier opened shift or registered device since then).
+        const reason = existing.organizationId === principal.organizationId && existing.actorId === principal.userId
+          ? await scanRejection(db, principal, event)
+          : "DEVICE_NOT_OWNED";
+        if (reason) {
+          rejected.push({ clientEventId: event.clientEventId, reason });
+        } else {
+          const updated = await db.update(scanEvents)
+            .set({ syncStatus: "accepted", receivedAt: new Date() })
+            .where(and(
+              eq(scanEvents.id, existing.id),
+              eq(scanEvents.syncStatus, "rejected"),
+            ))
+            .returning({ id: scanEvents.id });
+          if (updated.length > 0) {
+            accepted.push(event.clientEventId);
+            await db.update(courierDevices).set({ lastSeenAt: new Date() }).where(and(
+              eq(courierDevices.id, event.deviceId),
+              eq(courierDevices.organizationId, principal.organizationId),
+            ));
+          } else {
+            duplicate.push(event.clientEventId);
+          }
+        }
+        continue;
+      }
       duplicate.push(event.clientEventId);
       continue;
     }

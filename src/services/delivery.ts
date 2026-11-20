@@ -80,8 +80,13 @@ export async function currentCourierStops(db: Db, principal: Principal) {
     sequence: routeStops.sequence,
     windowStart: routeStops.windowStart,
     windowEnd: routeStops.windowEnd,
+    address: buildings.address,
+    apartment: customerAddresses.apartment,
+    notes: customerAddresses.notes,
   }).from(routeStops)
     .innerJoin(orders, eq(orders.id, routeStops.orderId))
+    .leftJoin(customerAddresses, eq(customerAddresses.id, orders.addressId))
+    .leftJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
     .where(and(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.assignedCourierId, principal.userId),
@@ -149,8 +154,8 @@ export async function assignDelivery(
       organizationId: principal.organizationId,
       shiftId: shift.id,
       kind: "delivery",
-      plannedStart: input.windowStart ?? new Date("2026-12-02T10:00:00Z"),
-      plannedEnd: input.windowEnd ?? new Date("2026-12-02T12:00:00Z"),
+      plannedStart: input.windowStart ?? shift.startsAt,
+      plannedEnd: input.windowEnd ?? shift.endsAt,
     }).returning();
     const [stop] = await tx.insert(routeStops).values({
       organizationId: principal.organizationId,

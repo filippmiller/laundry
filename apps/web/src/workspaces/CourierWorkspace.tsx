@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -475,6 +475,8 @@ export function CourierWorkspace({
   const [pendingQueueCount, setPendingQueueCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState<SyncSummary | null>(null);
+  const syncingRef = useRef(false);
+  const prevOnlineRef = useRef(isOnline);
 
   // Route & stops state
   const [stops, setStops] = useState<RouteStop[]>([]);
@@ -624,6 +626,7 @@ export function CourierWorkspace({
   }, [selectedStop?.stopId]);
 
   const syncQueue = useCallback(async () => {
+    if (syncingRef.current) return;
     if (!isOnline) {
       notify({
         kind: "error",
@@ -632,6 +635,7 @@ export function CourierWorkspace({
       return;
     }
 
+    syncingRef.current = true;
     setSyncing(true);
     try {
       const scans = await queuedScans();
@@ -642,7 +646,7 @@ export function CourierWorkspace({
         method: "POST",
         body: {
           deviceId,
-          platform: "web",
+          label: "web",
         },
       });
 
@@ -651,38 +655,88 @@ export function CourierWorkspace({
         return;
       }
 
-      const res = await api<unknown>("/courier/scan-events/sync", {
-        method: "POST",
-        body: {
-          deviceId,
-          events: scans,
-        },
-      });
+      const SYNC_BATCH_SIZE = 500;
+      let totalAccepted = 0;
+      let totalDuplicate = 0;
+      let totalRejected = 0;
+      const allRejectedReasons: RejectedScanInfo[] = [];
 
-      const { idsToRemove, summary } = parseSyncResponse(res, scans);
-      if (idsToRemove.length > 0) {
-        await removeScans(idsToRemove);
+      for (let i = 0; i < scans.length; i += SYNC_BATCH_SIZE) {
+        const chunk = scans.slice(i, i + SYNC_BATCH_SIZE);
+        const res = await api<unknown>("/courier/scan-events/sync", {
+          method: "POST",
+          body: {
+            events: chunk,
+          },
+        });
+
+        const { idsToRemove, summary } = parseSyncResponse(res, chunk);
+        if (idsToRemove.length > 0) {
+          await removeScans(idsToRemove);
+        }
+        totalAccepted += summary.accepted;
+        totalDuplicate += summary.duplicate;
+        totalRejected += summary.rejected;
+        allRejectedReasons.push(...summary.rejectedReasons);
       }
-      await refreshQueue();
-      setLastSync(summary);
 
-      if (summary.rejected > 0) {
+      await refreshQueue();
+      const combinedSummary: SyncSummary = {
+        accepted: totalAccepted,
+        duplicate: totalDuplicate,
+        rejected: totalRejected,
+        rejectedReasons: allRejectedReasons,
+        syncedAt: new Date().toISOString(),
+      };
+      setLastSync(combinedSummary);
+
+      if (combinedSummary.rejected > 0) {
         notify({
           kind: "error",
-          text: `Синхронизация завершена с замечаниями: принято ${summary.accepted}, дубликатов ${summary.duplicate}, отклонено ${summary.rejected}.`,
+          text: `Синхронизация завершена с замечаниями: принято ${combinedSummary.accepted}, дубликатов ${combinedSummary.duplicate}, отклонено ${combinedSummary.rejected}.`,
         });
       } else {
         notify({
           kind: "ok",
-          text: `Очередь синхронизирована: принято ${summary.accepted}, дубликатов ${summary.duplicate}.`,
+          text: `Очередь синхронизирована: принято ${combinedSummary.accepted}, дубликатов ${combinedSummary.duplicate}.`,
         });
       }
     } catch (err) {
+      await refreshQueue().catch(() => {});
       notify({ kind: "error", text: formatError(err) });
     } finally {
+      syncingRef.current = false;
       setSyncing(false);
     }
   }, [deviceId, isOnline, notify, refreshQueue]);
+
+  useEffect(() => {
+    const wasOnline = prevOnlineRef.current;
+    prevOnlineRef.current = isOnline;
+    if (!wasOnline && isOnline && pendingQueueCount > 0 && !syncingRef.current) {
+      void syncQueue();
+    }
+  }, [isOnline, pendingQueueCount, syncQueue]);
+
+  const handleRemoveScan = useCallback(
+    async (clientEventId: string) => {
+      try {
+        await removeScans([clientEventId]);
+        setLastSync(prev =>
+          prev
+            ? {
+                ...prev,
+                rejectedReasons: prev.rejectedReasons.filter(r => r.clientEventId !== clientEventId),
+              }
+            : prev,
+        );
+        await refreshQueue();
+      } catch (err) {
+        notify({ kind: "error", text: formatError(err) });
+      }
+    },
+    [notify, refreshQueue],
+  );
 
   const enqueueAndMaybeFlush = useCallback(
     async (
@@ -984,7 +1038,7 @@ export function CourierWorkspace({
 
   const handleSubmitDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedStop || selectedStop.kind !== "delivery") return;
+    if (!selectedStop || selectedStop.kind !== "delivery" || selectedStop.state !== "arrived") return;
 
     const orderGarments = orderDetails?.garments ?? [];
     const selectedGarmentIds = orderGarments
@@ -1175,17 +1229,34 @@ export function CourierWorkspace({
               <div className="stack stack--tight">
                 <span className="muted">Ожидают синхронизации ({pendingScans.length}):</span>
                 <ul className="list">
-                  {pendingScans.map(scan => (
-                    <li key={scan.clientEventId} className="list-item">
-                      <span>
-                        <Badge tone="neutral">
-                          {stateLabel(SCAN_TYPE_LABELS, scan.scannedType)}
-                        </Badge>
-                        : {scan.scannedId}
-                      </span>
-                      <span className="muted">{dt(scan.capturedAt)}</span>
-                    </li>
-                  ))}
+                  {pendingScans.map(scan => {
+                    const rejectedInfo = lastSync?.rejectedReasons.find(
+                      r => r.clientEventId === scan.clientEventId,
+                    );
+                    return (
+                      <li key={scan.clientEventId} className="list-item">
+                        <span className="row row--tight">
+                          <Badge tone={rejectedInfo ? "danger" : "neutral"}>
+                            {stateLabel(SCAN_TYPE_LABELS, scan.scannedType)}
+                          </Badge>
+                          <span>{scan.scannedId}</span>
+                          {rejectedInfo && (
+                            <span className="muted">· {rejectedInfo.reason}</span>
+                          )}
+                        </span>
+                        <span className="row row--tight">
+                          <span className="muted">{dt(scan.capturedAt)}</span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleRemoveScan(scan.clientEventId)}
+                          >
+                            Удалить из очереди
+                          </Button>
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             )}
@@ -1310,13 +1381,22 @@ export function CourierWorkspace({
                       {stateLabel(ORDER_STATE_LABELS, selectedStop.orderState)}
                     </Badge>
                   </span>
+                  {(selectedStop.address || selectedStop.apartment) && (
+                    <span>
+                      Адрес: {selectedStop.address ?? "—"}
+                      {selectedStop.apartment ? `, кв. ${selectedStop.apartment}` : ""}
+                    </span>
+                  )}
+                  {selectedStop.notes && (
+                    <span className="muted">Примечание к адресу: {selectedStop.notes}</span>
+                  )}
                 </div>
 
                 <div className="button-row">
                   <Button
                     variant="secondary"
                     leadingIcon={<Navigation size={16} aria-hidden="true" />}
-                    disabled={stopActionBusy}
+                    disabled={stopActionBusy || selectedStop.state !== "pending"}
                     onClick={() => void handleStopTransition("start")}
                   >
                     Выехал
@@ -1325,7 +1405,10 @@ export function CourierWorkspace({
                   <Button
                     variant="primary"
                     leadingIcon={<Clock size={16} aria-hidden="true" />}
-                    disabled={stopActionBusy}
+                    disabled={
+                      stopActionBusy ||
+                      (selectedStop.state !== "pending" && selectedStop.state !== "en_route")
+                    }
                     onClick={() => void handleStopTransition("arrive")}
                   >
                     Прибыл
@@ -1619,12 +1702,18 @@ export function CourierWorkspace({
                   />
                 </div>
 
+                {selectedStop.state !== "arrived" && (
+                  <p className="muted" role="note">
+                    Сначала зафиксируйте прибытие по адресу кнопкой «Прибыл», чтобы оформить попытку доставки.
+                  </p>
+                )}
+
                 <div className="button-row">
                   <Button
                     type="submit"
                     variant="primary"
                     leadingIcon={<PackageCheck size={18} aria-hidden="true" />}
-                    disabled={deliveryBusy}
+                    disabled={deliveryBusy || selectedStop.state !== "arrived"}
                   >
                     {deliveryBusy ? "Сохранение..." : "Зафиксировать попытку доставки"}
                   </Button>
