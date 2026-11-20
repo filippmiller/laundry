@@ -4,7 +4,7 @@ import {
   buildings, claims, courierShifts, custodyDiscrepancies, custodyEvents, customerAddresses,
   deliveryAttempts, garments, notifications, orders, partners, routes, routeStops, users, vehicles,
 } from "../db/schema.js";
-import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -68,6 +68,24 @@ export async function assignPickup(
   });
 }
 
+type DbTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+async function assertStopShiftActive(tx: DbTx, principal: Principal, routeId: string) {
+  if (hasRole(principal, ...ROLE_GROUPS.dispatcher)) return;
+  const [shiftRow] = await tx.select({ state: courierShifts.state })
+    .from(routes)
+    .innerJoin(courierShifts, eq(courierShifts.id, routes.shiftId))
+    .where(and(
+      eq(routes.id, routeId),
+      eq(routes.organizationId, principal.organizationId),
+      eq(courierShifts.organizationId, principal.organizationId),
+    ))
+    .limit(1);
+  if (!shiftRow || shiftRow.state !== "active") {
+    throw new AppError("FORBIDDEN", "SHIFT_NOT_ACTIVE");
+  }
+}
+
 export async function currentCourierStops(db: Db, principal: Principal) {
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   return db.select({
@@ -84,12 +102,16 @@ export async function currentCourierStops(db: Db, principal: Principal) {
     apartment: customerAddresses.apartment,
     notes: customerAddresses.notes,
   }).from(routeStops)
+    .innerJoin(routes, eq(routes.id, routeStops.routeId))
+    .innerJoin(courierShifts, eq(courierShifts.id, routes.shiftId))
     .innerJoin(orders, eq(orders.id, routeStops.orderId))
     .leftJoin(customerAddresses, eq(customerAddresses.id, orders.addressId))
     .leftJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
     .where(and(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.assignedCourierId, principal.userId),
+      eq(courierShifts.organizationId, principal.organizationId),
+      eq(courierShifts.state, "active"),
       inArray(routeStops.state, ["pending", "en_route", "arrived"]),
     ))
     .orderBy(routeStops.sequence)
@@ -106,12 +128,15 @@ export async function startStop(db: Db, principal: Principal, input: { stopId: s
       eq(routeStops.id, input.stopId), eq(routeStops.organizationId, principal.organizationId),
     )).limit(1);
     if (!stop) throw errors.notFound("stop");
-    if (stop.assignedCourierId !== principal.userId && !principal.roles.includes("dispatcher")) {
+    if (stop.assignedCourierId !== principal.userId && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
       throw errors.forbidden("courier is not assigned to this stop");
     }
+    await assertStopShiftActive(tx, principal, stop.routeId);
     if (stop.state !== "pending") throw errors.transition(stop.state, "start");
-    await tx.update(routeStops).set({ state: "en_route", version: stop.version + 1 })
-      .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
+    const [updated] = await tx.update(routeStops).set({ state: "en_route", version: stop.version + 1 })
+      .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)))
+      .returning({ id: routeStops.id });
+    if (!updated) throw errors.version(stop.version);
     await appendEvent(tx, {
       principal, aggregateType: "route_stop", aggregateId: stop.id,
       eventType: "delivery.en_route", payload: { orderId: stop.orderId },
@@ -193,12 +218,15 @@ export async function arriveStop(db: Db, principal: Principal, input: { stopId: 
       eq(routeStops.id, input.stopId), eq(routeStops.organizationId, principal.organizationId),
     )).limit(1);
     if (!stop) throw errors.notFound("stop");
-    if (stop.assignedCourierId !== principal.userId && !principal.roles.includes("dispatcher")) {
+    if (stop.assignedCourierId !== principal.userId && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
       throw errors.forbidden("courier is not assigned to this stop");
     }
+    await assertStopShiftActive(tx, principal, stop.routeId);
     if (stop.state !== "pending" && stop.state !== "en_route") throw errors.transition(stop.state, "arrive");
-    await tx.update(routeStops).set({ state: "arrived", version: stop.version + 1 })
-      .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)));
+    const [updated] = await tx.update(routeStops).set({ state: "arrived", version: stop.version + 1 })
+      .where(and(eq(routeStops.id, stop.id), eq(routeStops.version, stop.version)))
+      .returning({ id: routeStops.id });
+    if (!updated) throw errors.version(stop.version);
     await appendEvent(tx, {
       principal, aggregateType: "route_stop", aggregateId: stop.id, eventType: "delivery.arrived",
       payload: { orderId: stop.orderId },
@@ -226,9 +254,10 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
       eq(routeStops.id, input.stopId), eq(routeStops.organizationId, principal.organizationId),
     )).limit(1);
     if (!stop) throw errors.notFound("stop");
-    if (stop.assignedCourierId !== principal.userId && !principal.roles.includes("dispatcher")) {
+    if (stop.assignedCourierId !== principal.userId && !hasRole(principal, ...ROLE_GROUPS.dispatcher)) {
       throw errors.forbidden("courier is not assigned to this stop");
     }
+    await assertStopShiftActive(tx, principal, stop.routeId);
     if (stop.state !== "arrived") throw errors.transition(stop.state, "attempt");
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, stop.orderId), eq(orders.organizationId, principal.organizationId),
@@ -405,12 +434,14 @@ export async function closeOrder(db: Db, principal: Principal, input: { orderId:
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
-    const unaccounted = await tx.select({ id: garments.id }).from(garments).where(and(
+    const orderGarments = await tx.select({ id: garments.id, status: garments.status }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId),
       eq(garments.orderId, order.id),
-      inArray(garments.status, ["accepted", "inspected", "processing", "packed"]),
-    )).limit(1);
-    if (unaccounted.length) throw new AppError("CUSTODY_CONFLICT", "UNACCOUNTED_ITEMS", { garmentId: unaccounted[0].id });
+    ));
+    const unaccounted = orderGarments.find(garment =>
+      ["accepted", "inspected", "processing", "packed"].includes(garment.status),
+    );
+    if (unaccounted) throw new AppError("CUSTODY_CONFLICT", "UNACCOUNTED_ITEMS", { garmentId: unaccounted.id });
     const openClaims = await tx.select({ id: claims.id }).from(claims).where(and(
       eq(claims.organizationId, principal.organizationId),
       eq(claims.orderId, order.id),
@@ -422,13 +453,26 @@ export async function closeOrder(db: Db, principal: Principal, input: { orderId:
         eq(deliveryAttempts.orderId, order.id),
         eq(deliveryAttempts.outcome, "partial"),
       )).limit(1);
-    if (partialAttempt.length && !openClaims.length) {
+    const deliveredAttempt = orderGarments.length === 0 && partialAttempt.length > 0
+      ? await tx.select({ id: deliveryAttempts.id }).from(deliveryAttempts)
+        .where(and(
+          eq(deliveryAttempts.organizationId, principal.organizationId),
+          eq(deliveryAttempts.orderId, order.id),
+          eq(deliveryAttempts.outcome, "delivered"),
+        )).limit(1)
+      : [];
+    const allGarmentsDelivered = orderGarments.length > 0
+      ? orderGarments.every(garment => garment.status === "delivered")
+      : deliveredAttempt.length > 0;
+    if (partialAttempt.length && !allGarmentsDelivered && !openClaims.length) {
       throw new AppError("CUSTODY_CONFLICT", "PARTIAL_DELIVERY_REQUIRES_EXCEPTION", { attemptId: partialAttempt[0].id });
     }
-    // An open claim does not block closure, but is required to explain a partial delivery.
+    // An open claim does not block closure, and a full recovery delivery clears an earlier partial.
     const to = nextState(order.lifecycleState as "delivered", "close", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [closed] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ id: orders.id });
+    if (!closed) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.closed",
       payload: { openClaimCount: openClaims.length },

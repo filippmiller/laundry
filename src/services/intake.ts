@@ -3,7 +3,7 @@ import type { Db } from "../db/client.js";
 import {
   claims, containerAssignments, containers, courierDevices, courierShifts, custodyEvents, evidenceAssets,
   garmentEvidence, garments, intakeManifestLines, intakeManifests, notifications, orders, quotes,
-  routeStops, scanEvents, seals,
+  routes, routeStops, scanEvents, seals,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -72,13 +72,28 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
     if (order.lifecycleState !== "pickup_assigned") {
       throw new AppError("INVALID_TRANSITION", "ORDER_NOT_READY_FOR_INTAKE", { state: order.lifecycleState });
     }
+    const isDispatcher = hasRole(principal, ...ROLE_GROUPS.dispatcher);
     const [stop] = await tx.select().from(routeStops).where(and(
       eq(routeStops.organizationId, principal.organizationId),
       eq(routeStops.orderId, input.orderId),
       eq(routeStops.assignedCourierId, principal.userId),
       inArray(routeStops.state, ["pending", "en_route", "arrived"]),
     )).limit(1);
-    if (!stop) throw errors.forbidden("courier is not assigned to this stop");
+    if (!stop && !isDispatcher) throw errors.forbidden("courier is not assigned to this stop");
+    if (!isDispatcher) {
+      const [shiftRow] = await tx.select({ state: courierShifts.state })
+        .from(routes)
+        .innerJoin(courierShifts, eq(courierShifts.id, routes.shiftId))
+        .where(and(
+          eq(routes.id, stop!.routeId),
+          eq(routes.organizationId, principal.organizationId),
+          eq(courierShifts.organizationId, principal.organizationId),
+        ))
+        .limit(1);
+      if (!shiftRow || shiftRow.state !== "active") {
+        throw new AppError("FORBIDDEN", "SHIFT_NOT_ACTIVE");
+      }
+    }
 
     const [quote] = await tx.select({ snapshotJson: quotes.snapshotJson }).from(quotes).where(and(
       eq(quotes.id, order.quoteId),

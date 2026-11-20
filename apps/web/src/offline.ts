@@ -17,9 +17,19 @@ const DB_NAME = "laundry-courier";
 const STORE = "scans";
 const DEVICE_KEY = "laundry.courier.device";
 
-function openDb(): Promise<IDBDatabase> {
+function normalizeScope(scope?: string): string | undefined {
+  const trimmed = scope?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function dbName(scope?: string): string {
+  const normalized = normalizeScope(scope);
+  return normalized ? `${DB_NAME}:${normalized}` : DB_NAME;
+}
+
+function openDb(scope?: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
+    const request = indexedDB.open(dbName(scope), 1);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: "clientEventId" });
@@ -55,8 +65,10 @@ export async function scanHash(scan: Omit<QueuedScan, "payloadHash">): Promise<s
   return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export function localDeviceId(): string {
-  const existing = localStorage.getItem(DEVICE_KEY);
+export function localDeviceId(scope?: string): string {
+  const normalized = normalizeScope(scope);
+  const key = normalized ? `${DEVICE_KEY}.${normalized}` : DEVICE_KEY;
+  const existing = localStorage.getItem(key);
   if (existing) return existing;
   // `crypto.randomUUID` only exists in a secure context. Without a fallback the whole courier
   // workspace failed to mount outside one, so this mirrors the guard in `api.ts`.
@@ -64,12 +76,12 @@ export function localDeviceId(): string {
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  localStorage.setItem(DEVICE_KEY, created);
+  localStorage.setItem(key, created);
   return created;
 }
 
-export async function enqueueScan(scan: QueuedScan): Promise<void> {
-  const db = await openDb();
+export async function enqueueScan(scan: QueuedScan, scope?: string): Promise<void> {
+  const db = await openDb(scope);
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put(scan);
@@ -79,8 +91,8 @@ export async function enqueueScan(scan: QueuedScan): Promise<void> {
   db.close();
 }
 
-export async function queuedScans(): Promise<QueuedScan[]> {
-  const db = await openDb();
+export async function queuedScans(scope?: string): Promise<QueuedScan[]> {
+  const db = await openDb(scope);
   const rows = await new Promise<QueuedScan[]>((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
     const request = tx.objectStore(STORE).getAll();
@@ -91,9 +103,9 @@ export async function queuedScans(): Promise<QueuedScan[]> {
   return rows;
 }
 
-export async function removeScans(ids: string[]): Promise<void> {
+export async function removeScans(ids: string[], scope?: string): Promise<void> {
   if (!ids.length) return;
-  const db = await openDb();
+  const db = await openDb(scope);
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
     for (const id of ids) tx.objectStore(STORE).delete(id);
@@ -103,6 +115,6 @@ export async function removeScans(ids: string[]): Promise<void> {
   db.close();
 }
 
-export async function queuedCount(): Promise<number> {
-  return (await queuedScans()).length;
+export async function queuedCount(scope?: string): Promise<number> {
+  return (await queuedScans(scope)).length;
 }

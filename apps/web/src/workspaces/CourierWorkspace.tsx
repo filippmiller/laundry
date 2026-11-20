@@ -19,6 +19,7 @@ import {
   WifiOff,
 } from "lucide-react";
 import { ApiError, DemoConfig, api, dt, money, newKey } from "../api";
+import type { Me } from "../types";
 import { GarmentIcon } from "../components/garment-icons";
 import { EvidenceUploader } from "../components/EvidenceUploader";
 import { GarmentPicker, type PickedGarment } from "../components/GarmentPicker";
@@ -456,7 +457,11 @@ export function CourierWorkspace({
   demo: DemoConfig | null;
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
 }) {
-  const deviceId = useMemo(() => localDeviceId(), []);
+  const [actorScope, setActorScope] = useState<string | null>(null);
+  const deviceId = useMemo(
+    () => (actorScope ? localDeviceId(actorScope) : ""),
+    [actorScope],
+  );
 
   // Network & simulated offline mode
   const [browserOnline, setBrowserOnline] = useState<boolean>(() =>
@@ -512,14 +517,19 @@ export function CourierWorkspace({
   );
 
   const refreshQueue = useCallback(async () => {
+    if (!actorScope) {
+      setPendingScans([]);
+      setPendingQueueCount(0);
+      return;
+    }
     try {
-      const [items, count] = await Promise.all([queuedScans(), queuedCount()]);
+      const [items, count] = await Promise.all([queuedScans(actorScope), queuedCount(actorScope)]);
       setPendingScans(items);
       setPendingQueueCount(count);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     }
-  }, [notify]);
+  }, [actorScope, notify]);
 
   const loadShift = useCallback(async () => {
     setShiftLoading(true);
@@ -561,10 +571,28 @@ export function CourierWorkspace({
   }, [notify]);
 
   useEffect(() => {
+    let cancelled = false;
+    api<Me>("/me")
+      .then(me => {
+        if (cancelled) return;
+        if (me?.userId && me?.organizationId) {
+          setActorScope(`${me.organizationId}:${me.userId}`);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     void loadShift();
     void loadRoute();
+  }, [loadShift, loadRoute]);
+
+  useEffect(() => {
     void refreshQueue();
-  }, [loadShift, loadRoute, refreshQueue]);
+  }, [refreshQueue]);
 
   useEffect(() => {
     function handleOnline() {
@@ -629,7 +657,7 @@ export function CourierWorkspace({
   }, [selectedStop?.stopId]);
 
   const syncQueue = useCallback(async () => {
-    if (syncingRef.current) return;
+    if (syncingRef.current || !actorScope || !deviceId) return;
     if (!isOnline) {
       notify({
         kind: "error",
@@ -641,7 +669,7 @@ export function CourierWorkspace({
     syncingRef.current = true;
     setSyncing(true);
     try {
-      const scans = await queuedScans();
+      const scans = await queuedScans(actorScope);
       setPendingScans(scans);
       setPendingQueueCount(scans.length);
 
@@ -675,7 +703,7 @@ export function CourierWorkspace({
 
         const { idsToRemove, summary } = parseSyncResponse(res, chunk);
         if (idsToRemove.length > 0) {
-          await removeScans(idsToRemove);
+          await removeScans(idsToRemove, actorScope);
         }
         totalAccepted += summary.accepted;
         totalDuplicate += summary.duplicate;
@@ -711,7 +739,7 @@ export function CourierWorkspace({
       syncingRef.current = false;
       setSyncing(false);
     }
-  }, [deviceId, isOnline, notify, refreshQueue]);
+  }, [actorScope, deviceId, isOnline, notify, refreshQueue]);
 
   useEffect(() => {
     const wasOnline = prevOnlineRef.current;
@@ -723,8 +751,9 @@ export function CourierWorkspace({
 
   const handleRemoveScan = useCallback(
     async (clientEventId: string) => {
+      if (!actorScope) return;
       try {
-        await removeScans([clientEventId]);
+        await removeScans([clientEventId], actorScope);
         setLastSync(prev =>
           prev
             ? {
@@ -738,7 +767,7 @@ export function CourierWorkspace({
         notify({ kind: "error", text: formatError(err) });
       }
     },
-    [notify, refreshQueue],
+    [actorScope, notify, refreshQueue],
   );
 
   const enqueueAndMaybeFlush = useCallback(
@@ -747,6 +776,10 @@ export function CourierWorkspace({
       scannedId: string,
       context: Record<string, unknown>,
     ) => {
+      if (!actorScope || !deviceId) {
+        notify({ kind: "error", text: "Профиль курьера ещё загружается, повторите сканирование." });
+        return;
+      }
       const base = {
         clientEventId: newKey(),
         deviceId,
@@ -756,7 +789,7 @@ export function CourierWorkspace({
         context,
       };
       const payloadHash = await scanHash(base);
-      await enqueueScan({ ...base, payloadHash });
+      await enqueueScan({ ...base, payloadHash }, actorScope);
       await refreshQueue();
 
       if (isOnline) {
@@ -768,7 +801,7 @@ export function CourierWorkspace({
         });
       }
     },
-    [deviceId, isOnline, notify, refreshQueue, syncQueue],
+    [actorScope, deviceId, isOnline, notify, refreshQueue, syncQueue],
   );
 
   const handleOpenShift = async () => {
@@ -1139,7 +1172,7 @@ export function CourierWorkspace({
                 >
                   Обновить смену
                 </Button>
-                {!shift ? (
+                {!shift || shift.state !== "active" ? (
                   <Button
                     variant="primary"
                     leadingIcon={<Play size={16} aria-hidden="true" />}
@@ -1195,7 +1228,7 @@ export function CourierWorkspace({
                 <span>Офлайн-очередь и сканер QR</span>
               </span>
             }
-            subtitle={`Связь: ${isOnline ? "В сети" : "Офлайн (сохранение в IndexedDB)"} · Устройство: ${deviceId.slice(0, 8)} · В очереди: ${pendingQueueCount}`}
+            subtitle={`Связь: ${isOnline ? "В сети" : "Офлайн (сохранение в IndexedDB)"} · Устройство: ${deviceId ? deviceId.slice(0, 8) : "…"} · В очереди: ${pendingQueueCount}`}
             actions={
               <Checkbox
                 label="Офлайн-режим (тест без сети)"
