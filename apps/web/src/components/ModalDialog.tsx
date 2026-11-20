@@ -16,14 +16,17 @@ type ModalDialogProps = {
  */
 export function ModalDialog({ open, title, onClose, children }: ModalDialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
+  const closingProgrammaticallyRef = useRef(false);
   const titleId = useId();
 
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
     if (open && !dialog.open) {
+      closingProgrammaticallyRef.current = false;
       dialog.showModal();
     } else if (!open && dialog.open) {
+      closingProgrammaticallyRef.current = true;
       dialog.close();
       dialog.returnValue = "";
     }
@@ -34,6 +37,10 @@ export function ModalDialog({ open, title, onClose, children }: ModalDialogProps
     if (!dialog) return;
     const handleClose = () => {
       dialog.returnValue = "";
+      if (closingProgrammaticallyRef.current) {
+        closingProgrammaticallyRef.current = false;
+        return;
+      }
       onClose();
     };
     dialog.addEventListener("close", handleClose);
@@ -41,7 +48,14 @@ export function ModalDialog({ open, title, onClose, children }: ModalDialogProps
   }, [onClose]);
 
   return (
-    <dialog ref={ref} className="modal-dialog" aria-labelledby={titleId}>
+    <dialog
+      ref={ref}
+      className="modal-dialog"
+      aria-labelledby={titleId}
+      onClick={event => {
+        if (event.target === ref.current) onClose();
+      }}
+    >
       <div className="dialog-head">
         <h2 id={titleId} className="panel-title">{title}</h2>
         <IconButton

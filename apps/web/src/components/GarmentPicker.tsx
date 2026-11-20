@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, Minus, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, Minus, Pencil, Plus, Trash2 } from "lucide-react";
 import { ModalDialog } from "./ModalDialog";
 import { GarmentIcon } from "./garment-icons";
 import {
   GARMENT_CATEGORIES,
+  MAX_DECLARED_ROWS,
   MAX_PICKED_QUANTITY,
   findSubtype,
   type GarmentCategory,
@@ -62,8 +63,10 @@ export function GarmentPicker({
   const [subtype, setSubtype] = useState<GarmentSubtype | null>(null);
   const [quantity, setQuantity] = useState(1);
   const wheelRef = useRef<HTMLDivElement>(null);
+  const touchYRef = useRef<number | null>(null);
 
   const total = useMemo(() => value.reduce((sum, item) => sum + item.quantity, 0), [value]);
+  const atRowLimit = value.length >= MAX_DECLARED_ROWS;
 
   const openCategory = (next: GarmentCategory) => {
     setCategory(next);
@@ -82,14 +85,17 @@ export function GarmentPicker({
   };
 
   const chooseSubtype = (next: GarmentSubtype) => {
-    setSubtype(next);
     const existing = value.find(item => item.subtypeId === next.id);
+    if (!existing && atRowLimit) return;
+    setSubtype(next);
     setQuantity(existing?.quantity ?? 1);
   };
 
   const commit = () => {
     if (!subtype) return;
-    const next = value.some(item => item.subtypeId === subtype.id)
+    const isExisting = value.some(item => item.subtypeId === subtype.id);
+    if (!isExisting && atRowLimit) return;
+    const next = isExisting
       ? value.map(item => (item.subtypeId === subtype.id
         ? { ...item, quantity: Math.min(MAX_PICKED_QUANTITY, quantity) }
         : item))
@@ -153,6 +159,12 @@ export function GarmentPicker({
         ))}
       </div>
 
+      {atRowLimit ? (
+        <p className="muted" role="status" style={{ marginBlockStart: 8 }}>
+          Достигнут лимит позиций ({MAX_DECLARED_ROWS}). Удалите или измените существующую позицию.
+        </p>
+      ) : null}
+
       {value.length > 0 ? (
         <>
           <p className="muted garment-total">
@@ -204,6 +216,23 @@ export function GarmentPicker({
               className="garment-qty-value"
               aria-live="polite"
               aria-label={`Количество: ${quantity}`}
+              onTouchStart={event => {
+                touchYRef.current = event.touches[0]?.clientY ?? null;
+              }}
+              onTouchMove={event => {
+                if (touchYRef.current === null) return;
+                const currentY = event.touches[0]?.clientY;
+                if (currentY === undefined) return;
+                const diff = touchYRef.current - currentY;
+                if (Math.abs(diff) >= 18) {
+                  const step = diff > 0 ? 1 : -1;
+                  setQuantity(current => Math.min(MAX_PICKED_QUANTITY, Math.max(1, current + step)));
+                  touchYRef.current = currentY;
+                }
+              }}
+              onTouchEnd={() => {
+                touchYRef.current = null;
+              }}
             >
               {quantity}
             </div>
@@ -249,24 +278,39 @@ export function GarmentPicker({
               ))}
             </div>
 
-            <button type="button" className="primary" onClick={commit}>
-              <Check size={18} aria-hidden="true" />
-              <span>Готово</span>
-            </button>
+            <div className="button-row" style={{ marginBlockStart: 4 }}>
+              <button type="button" className="secondary" onClick={() => setSubtype(null)}>
+                <ArrowLeft size={18} aria-hidden="true" />
+                <span>Назад</span>
+              </button>
+              <button type="button" className="primary" onClick={commit}>
+                <Check size={18} aria-hidden="true" />
+                <span>Готово</span>
+              </button>
+            </div>
           </div>
         ) : (
           <div className="garment-subtypes">
-            {category?.subtypes.map(item => (
-              <button
-                key={item.id}
-                type="button"
-                className="garment-subtype"
-                onClick={() => chooseSubtype(item)}
-              >
-                <GarmentIcon icon={item.icon} size={24} />
-                <span>{item.label}</span>
-              </button>
-            ))}
+            {atRowLimit ? (
+              <p className="muted" role="status" style={{ gridColumn: "1 / -1", margin: 0 }}>
+                Достигнут лимит позиций ({MAX_DECLARED_ROWS}). Можно изменить только уже добавленные виды.
+              </p>
+            ) : null}
+            {category?.subtypes.map(item => {
+              const isExisting = value.some(v => v.subtypeId === item.id);
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className="garment-subtype"
+                  disabled={atRowLimit && !isExisting}
+                  onClick={() => chooseSubtype(item)}
+                >
+                  <GarmentIcon icon={item.icon} size={24} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
           </div>
         )}
       </ModalDialog>

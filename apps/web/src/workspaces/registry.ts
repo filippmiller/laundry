@@ -60,7 +60,7 @@ export const WORKSPACES: readonly WorkspaceDef[] = [
     title: "Диспетчерская",
     description: "Рейсы, слоты и расхождения",
     icon: Radio,
-    roles: ["dispatcher"],
+    roles: ["dispatcher", "platform_admin"],
   },
   {
     key: "support",
@@ -74,14 +74,14 @@ export const WORKSPACES: readonly WorkspaceDef[] = [
     title: "Финансы",
     description: "Денежные разрезы платформы",
     icon: Wallet,
-    roles: ["platform_finance"],
+    roles: ["platform_finance", "platform_admin"],
   },
   {
     key: "admin",
     title: "Администрирование",
     description: "Участники, роли и аудит",
     icon: ShieldCheck,
-    roles: ["platform_admin"],
+    roles: ["platform_admin", "security_auditor"],
   },
 ];
 
