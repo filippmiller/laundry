@@ -420,9 +420,12 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
     if (existing) {
       if (existing.syncStatus === "rejected") {
         // Re-evaluate previously rejected scans (e.g., courier opened shift or registered device since then).
-        const reason = existing.organizationId === principal.organizationId && existing.actorId === principal.userId
-          ? await scanRejection(db, principal, event)
-          : "DEVICE_NOT_OWNED";
+        // Verify payloadHash matches the original rejected event so a client cannot tamper with fields.
+        const reason = existing.organizationId !== principal.organizationId || existing.actorId !== principal.userId
+          ? "DEVICE_NOT_OWNED"
+          : existing.payloadHash !== event.payloadHash
+            ? "HASH_MISMATCH"
+            : await scanRejection(db, principal, event);
         if (reason) {
           rejected.push({ clientEventId: event.clientEventId, reason });
         } else {

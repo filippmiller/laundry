@@ -68,7 +68,7 @@ export function Router({
       case "dispatcher":
         return <DispatcherWorkspace notify={setNotice} />;
       case "admin":
-        return <AdminWorkspace notify={setNotice} />;
+        return <AdminWorkspace notify={setNotice} roles={me.roles} />;
       case "finance":
         return <FinanceWorkspace demo={demo} notify={setNotice} />;
       case "support":

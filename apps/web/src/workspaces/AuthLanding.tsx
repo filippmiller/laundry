@@ -472,8 +472,11 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                   id={demoRoleId}
                   value={demoRole}
                   onChange={(e) => {
+                    const nextRole = e.target.value;
                     demoTouchedRef.current = true;
-                    setDemoRole(e.target.value);
+                    setDemoRole(nextRole);
+                    const matched = demo?.demoUsers?.find((u) => u.role === nextRole);
+                    if (matched) setDemoPhone(matched.phone);
                   }}
                   style={INPUT_STYLE}
                 >

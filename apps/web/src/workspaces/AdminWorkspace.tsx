@@ -155,7 +155,9 @@ function getMemberStateTone(state: string): BadgeTone {
   return "info";
 }
 
-export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
+export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles?: string[] }) {
+  const canAdminWrite = roles.includes("platform_admin");
+  const canViewFinance = roles.includes("platform_admin") || roles.includes("platform_finance");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -403,45 +405,51 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
             {member.roles.map((role) => (
               <span key={role} className="row row--tight">
                 <Badge tone="info">{stateLabel(ROLE_LABELS, role)}</Badge>
-                <IconButton
-                  size="sm"
-                  label={`Отозвать роль ${stateLabel(ROLE_LABELS, role)} у ${member.phone}`}
-                  title="Отозвать роль"
-                  icon={<UserMinus size={12} aria-hidden="true" />}
-                  disabled={busy}
-                  onClick={() => openRevokeRoleModal(member, role)}
-                />
+                {canAdminWrite && (
+                  <IconButton
+                    size="sm"
+                    label={`Отозвать роль ${stateLabel(ROLE_LABELS, role)} у ${member.phone}`}
+                    title="Отозвать роль"
+                    icon={<UserMinus size={12} aria-hidden="true" />}
+                    disabled={busy}
+                    onClick={() => openRevokeRoleModal(member, role)}
+                  />
+                )}
               </span>
             ))}
           </div>
         ),
     },
-    {
-      key: "actions",
-      header: "Действия",
-      render: (member) => (
-        <div className="row row--tight">
-          <Button
-            variant="ghost"
-            size="sm"
-            leadingIcon={<UserPlus size={14} aria-hidden="true" />}
-            disabled={busy}
-            onClick={() => openGrantRoleModal(member)}
-          >
-            Выдать роль
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            leadingIcon={<UserCog size={14} aria-hidden="true" />}
-            disabled={busy}
-            onClick={() => openChangeStateModal(member)}
-          >
-            Статус доступа
-          </Button>
-        </div>
-      ),
-    },
+    ...(canAdminWrite
+      ? [
+          {
+            key: "actions",
+            header: "Действия",
+            render: (member: AdminMember) => (
+              <div className="row row--tight">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leadingIcon={<UserPlus size={14} aria-hidden="true" />}
+                  disabled={busy}
+                  onClick={() => openGrantRoleModal(member)}
+                >
+                  Выдать роль
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leadingIcon={<UserCog size={14} aria-hidden="true" />}
+                  disabled={busy}
+                  onClick={() => openChangeStateModal(member)}
+                >
+                  Статус доступа
+                </Button>
+              </div>
+            ),
+          },
+        ]
+      : []),
   ];
 
   const signalColumns: DataTableColumn<FraudSignal>[] = [
@@ -501,7 +509,7 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
       <PageHeader eyebrow="Администрирование" title="Участники, роли и аудит" />
 
       {/* 0. Денежный контур: сколько нам должны и сколько должны мы */}
-      <FinanceMoneyPanel notify={notify} />
+      {canViewFinance && <FinanceMoneyPanel notify={notify} />}
 
       {/* 1. Сводка и метрики платформы */}
       <Card as="section">
@@ -623,36 +631,38 @@ export function AdminWorkspace({ notify }: { notify: NotifyFn }) {
             )}
           </div>
 
-          <form className="stack" onSubmit={(e) => void handleAdminRevokeSession(e)}>
-            <h3 className="section-title">Принудительный отзыв сессии (Админ)</h3>
-            <Input
-              label="ID сессии"
-              type="text"
-              value={adminSessionId}
-              onChange={(e) => setAdminSessionId(e.target.value)}
-              placeholder="00000000-0000-4000-8000-000000000000"
-              required
-            />
-            <Input
-              label="Причина отзыва для аудита (от 5 символов)"
-              type="text"
-              value={adminSessionReason}
-              onChange={(e) => setAdminSessionReason(e.target.value)}
-              placeholder="Компрометация устройства или проверка безопасности"
-              minLength={5}
-              required
-            />
-            <div className="button-row">
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={busy}
-                leadingIcon={<Shield size={16} aria-hidden="true" />}
-              >
-                Отозвать сессию
-              </Button>
-            </div>
-          </form>
+          {canAdminWrite && (
+            <form className="stack" onSubmit={(e) => void handleAdminRevokeSession(e)}>
+              <h3 className="section-title">Принудительный отзыв сессии (Админ)</h3>
+              <Input
+                label="ID сессии"
+                type="text"
+                value={adminSessionId}
+                onChange={(e) => setAdminSessionId(e.target.value)}
+                placeholder="00000000-0000-4000-8000-000000000000"
+                required
+              />
+              <Input
+                label="Причина отзыва для аудита (от 5 символов)"
+                type="text"
+                value={adminSessionReason}
+                onChange={(e) => setAdminSessionReason(e.target.value)}
+                placeholder="Компрометация устройства или проверка безопасности"
+                minLength={5}
+                required
+              />
+              <div className="button-row">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={busy}
+                  leadingIcon={<Shield size={16} aria-hidden="true" />}
+                >
+                  Отозвать сессию
+                </Button>
+              </div>
+            </form>
+          )}
         </div>
       </Card>
 
