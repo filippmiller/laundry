@@ -2,7 +2,7 @@ import { randomBytes, randomInt } from "node:crypto";
 import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  containerAssignments, containers, customerAddresses, documentVersions, evidenceAssets,
+  containerAssignments, containers, customerAddresses, customerInvoices, documentVersions, evidenceAssets,
   garmentEvidence, garments, intakeManifestLines, intakeManifests, orderAdjustments, orderLines,
   orders, quotes, routeStops, seals, serviceWindows, slotReservations,
 } from "../db/schema.js";
@@ -227,9 +227,22 @@ export async function cancelOrder(
     }).where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
       .returning({ id: orders.id });
     if (!updated.length) throw errors.version(order.version);
+    // Cancel any open unpaid customer invoices in the same tx so a cancelled order can never be captured.
+    const cancelledInvoices = await tx.update(customerInvoices).set({
+      state: "cancelled",
+    }).where(and(
+      eq(customerInvoices.organizationId, principal.organizationId),
+      eq(customerInvoices.orderId, order.id),
+      eq(customerInvoices.state, "open"),
+    )).returning({ id: customerInvoices.id });
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.cancelled",
-      payload: { from: order.lifecycleState, releasedReservations: released }, reason: input.reason,
+      payload: {
+        from: order.lifecycleState,
+        releasedReservations: released,
+        cancelledInvoices: cancelledInvoices.length,
+      },
+      reason: input.reason,
     });
     return { orderId: order.id, state: "cancelled" as const, releasedReservations: released };
   });

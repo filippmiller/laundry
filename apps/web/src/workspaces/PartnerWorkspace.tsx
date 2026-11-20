@@ -404,19 +404,37 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
       // schema, so every receipt was rejected with 400 before it reached the service.
       actualWeightGrams: Number(row.weightGrams) || 0,
     }));
-    await runAction(
-      "receive",
-      () =>
-        api("/partner/receipts", {
+    setBusyAction("receive");
+    notify(null);
+    try {
+      const res = await api<{ status?: string; receiptId?: string; discrepancies?: unknown[] }>(
+        "/partner/receipts",
+        {
           method: "POST",
           body: {
             orderId: selectedOrder.orderId,
             manifestId,
             actual,
           },
-        }),
-      `Партия по заказу ${selectedOrder.publicNumber} принята на фабрику`,
-    );
+        },
+      );
+      if (res.status === "discrepancy") {
+        notify({
+          kind: "error",
+          text: `Зафиксировано расхождение при приёмке заказа ${selectedOrder.publicNumber} — партия не переведена в обработку`,
+        });
+      } else {
+        notify({
+          kind: "ok",
+          text: `Партия по заказу ${selectedOrder.publicNumber} принята на фабрику`,
+        });
+      }
+      await loadData();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const openBrokenSealModal = () => {

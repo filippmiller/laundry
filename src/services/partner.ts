@@ -1,11 +1,11 @@
-import { and, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, ne, notInArray, or, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
   customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifestLines, intakeManifests,
   orderAdjustments, orderLines, orders, partnerContracts, partnerCreditNotes, partnerInvoiceLines,
   partnerPriceVersions, partners, partnerReceiptLines, partnerReceipts, partnerServiceAccruals,
-  paymentIntents, processingOperations, qualityChecks, routeStops, seals, slotReservations,
+  paymentIntents, processingOperations, qualityChecks, refunds, routeStops, seals, slotReservations,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -106,7 +106,7 @@ async function reconcilePartnerAccrualsForOrder(tx: Tx, organizationId: string, 
     const accruals = await tx.select().from(partnerServiceAccruals).where(and(
       eq(partnerServiceAccruals.organizationId, organizationId),
       eq(partnerServiceAccruals.orderLineId, line.id),
-      ne(partnerServiceAccruals.status, "voided"),
+      notInArray(partnerServiceAccruals.status, ["voided", "credited"]),
     ));
     if (!accruals.length) continue;
 
@@ -170,7 +170,7 @@ async function voidPartnerAccrualsForOrder(
   const accruals = await tx.select().from(partnerServiceAccruals).where(and(
     eq(partnerServiceAccruals.organizationId, organizationId),
     inArray(partnerServiceAccruals.orderLineId, lineIds),
-    ne(partnerServiceAccruals.status, "voided"),
+    notInArray(partnerServiceAccruals.status, ["voided", "credited"]),
   ));
 
   let voidedAccruals = 0;
@@ -192,6 +192,7 @@ async function voidPartnerAccrualsForOrder(
     if (accrual.amountKopeks !== 0) {
       const [invoiceLine] = await tx.select().from(partnerInvoiceLines)
         .where(eq(partnerInvoiceLines.accrualId, accrual.id)).limit(1);
+      let createdCreditNote = false;
       if (invoiceLine && accrual.amountKopeks > 0) {
         await tx.insert(partnerCreditNotes).values({
           organizationId,
@@ -201,7 +202,10 @@ async function voidPartnerAccrualsForOrder(
           reason,
           state: "draft",
         });
+        createdCreditNote = true;
       }
+      // When a credit note carries the reversal, mark the offsetting accrual row as "credited"
+      // so createPartnerInvoice never claims it a second time and double-reverses partner_payable.
       await tx.insert(partnerServiceAccruals).values({
         organizationId,
         partnerId: accrual.partnerId,
@@ -210,12 +214,43 @@ async function voidPartnerAccrualsForOrder(
         contractPriceVersionId: accrual.contractPriceVersionId,
         quantity: -accrual.quantity,
         amountKopeks: -accrual.amountKopeks,
-        status: "estimated",
+        status: createdCreditNote ? "credited" : "estimated",
       });
       creditedAccruals += 1;
     }
   }
   return { voidedAccruals, creditedAccruals };
+}
+
+/**
+ * Blocks unprocessed return only when the order still has positive net captured funds
+ * (captured intents minus completed refunds > 0). Fully refunded orders are allowed through.
+ */
+async function assertOrderNotNetCharged(tx: Tx, organizationId: string, orderId: string) {
+  const [capturedRow] = await tx.select({ total: sum(paymentIntents.amountKopeks) })
+    .from(paymentIntents)
+    .where(and(
+      eq(paymentIntents.organizationId, organizationId),
+      eq(paymentIntents.orderId, orderId),
+      inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
+    ));
+  const capturedKopeks = Number(capturedRow?.total ?? 0);
+  if (capturedKopeks <= 0) return;
+
+  const [refundedRow] = await tx.select({ total: sum(refunds.amountKopeks) })
+    .from(refunds)
+    .innerJoin(paymentIntents, eq(refunds.paymentIntentId, paymentIntents.id))
+    .where(and(
+      eq(refunds.organizationId, organizationId),
+      eq(paymentIntents.organizationId, organizationId),
+      eq(paymentIntents.orderId, orderId),
+      eq(refunds.state, "completed"),
+    ));
+  const refundedKopeks = Number(refundedRow?.total ?? 0);
+  const netCapturedKopeks = capturedKopeks - refundedKopeks;
+  if (netCapturedKopeks > 0) {
+    throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CHARGED", { orderId, netCapturedKopeks });
+  }
 }
 
 /**
@@ -517,16 +552,24 @@ export async function reportSealBroken(
     organizationId: principal.organizationId, scope: "custody:seal_broken",
     key: input.key, actorId: principal.userId, requestHash: hashRequest(input),
   }, async tx => {
-    const [seal] = await tx.select().from(seals).where(and(
-      eq(seals.serialNumber, input.sealSerial),
-      eq(seals.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!seal) throw errors.notFound("seal");
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, ...ROLE_GROUPS.partner)) assertAssignedPartner(order, principal);
+    const [seal] = await tx.select().from(seals).where(and(
+      eq(seals.serialNumber, input.sealSerial),
+      eq(seals.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!seal) throw errors.notFound("seal");
+    // Enforce seal-to-order binding so one partner cannot break another partner's seal by passing its own orderId.
+    const [assignment] = await tx.select({ id: containerAssignments.id }).from(containerAssignments).where(and(
+      eq(containerAssignments.organizationId, principal.organizationId),
+      eq(containerAssignments.orderId, order.id),
+      eq(containerAssignments.sealId, seal.id),
+      isNull(containerAssignments.unassignedAt),
+    )).limit(1);
+    if (!assignment) throw errors.notFound("seal");
     await tx.update(seals).set({ state: "broken" }).where(eq(seals.id, seal.id));
     const [incident] = await tx.insert(custodyDiscrepancies).values({
       organizationId: principal.organizationId,
@@ -820,14 +863,7 @@ export async function decideAdjustment(
     const inspected = nextState(order.lifecycleState as "awaiting_approval", "decline_change", principal);
     await applyWeightDecision(tx as Db, adjustment, false);
     if (input.returnUnprocessed === true) {
-      const captured = await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(and(
-        eq(paymentIntents.organizationId, principal.organizationId),
-        eq(paymentIntents.orderId, order.id),
-        inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
-      )).limit(1);
-      if (captured.length) {
-        throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CHARGED", { orderId: order.id });
-      }
+      await assertOrderNotNetCharged(tx, principal.organizationId, order.id);
       const openInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
         eq(customerInvoices.organizationId, principal.organizationId),
         eq(customerInvoices.orderId, order.id),
@@ -931,6 +967,9 @@ export async function returnUnprocessedOrder(
     organizationId: principal.organizationId, scope: "order:return_unprocessed", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
@@ -941,16 +980,9 @@ export async function returnUnprocessedOrder(
     if (order.lifecycleState !== "inspection") {
       throw errors.transition(order.lifecycleState, "return_unprocessed");
     }
-    // An order that was never processed must never leave the customer payable: an existing capture
-    // is refused so finance resolves the money explicitly, and an open invoice is voided.
-    const captured = await tx.select({ id: paymentIntents.id }).from(paymentIntents).where(and(
-      eq(paymentIntents.organizationId, principal.organizationId),
-      eq(paymentIntents.orderId, order.id),
-      inArray(paymentIntents.state, ["captured", "partially_refunded", "refunded"]),
-    )).limit(1);
-    if (captured.length) {
-      throw new AppError("FINANCIAL_HOLD", "ORDER_ALREADY_CHARGED", { orderId: order.id });
-    }
+    // An order that was never processed must never leave the customer payable: a positive net
+    // capture is refused so finance resolves the money explicitly, and an open invoice is voided.
+    await assertOrderNotNetCharged(tx, principal.organizationId, order.id);
     const openInvoices = await tx.select({ id: customerInvoices.id }).from(customerInvoices).where(and(
       eq(customerInvoices.organizationId, principal.organizationId),
       eq(customerInvoices.orderId, order.id),
@@ -1072,7 +1104,13 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
 export async function recordQualityCheck(
   db: Db,
   principal: Principal,
-  input: { orderId: string; results: Array<{ garmentId: string; passed: boolean; note?: string }>; key: string },
+  input: {
+    orderId: string;
+    results: Array<{ garmentId: string; passed: boolean; note?: string }>;
+    bagPassed?: boolean;
+    note?: string;
+    key: string;
+  },
 ) {
   assertRole(principal, ...ROLE_GROUPS.partner);
   return withIdempotencyFlat(db, {
@@ -1088,35 +1126,49 @@ export async function recordQualityCheck(
     const garmentRows = await tx.select({ id: garments.id }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId), eq(garments.orderId, order.id),
     ));
-    // Economy bags have no per-item inventory, so QC is recorded at bag level.
+    // Economy bags have no per-item inventory, so QC is recorded at order/bag level.
     if (garmentRows.length && !input.results.length) throw new AppError("VALIDATION_ERROR", "QC_RESULTS_REQUIRED");
-    const garmentIds = input.results.map(result => result.garmentId);
-    const owned = await tx.select({ id: garments.id }).from(garments).where(and(
-      eq(garments.organizationId, principal.organizationId),
-      eq(garments.orderId, order.id),
-      inArray(garments.id, garmentIds),
-    ));
-    if (owned.length !== new Set(garmentIds).size) throw errors.notFound("garment");
+    if (input.results.length) {
+      const garmentIds = input.results.map(result => result.garmentId);
+      const owned = await tx.select({ id: garments.id }).from(garments).where(and(
+        eq(garments.organizationId, principal.organizationId),
+        eq(garments.orderId, order.id),
+        inArray(garments.id, garmentIds),
+      ));
+      if (owned.length !== new Set(garmentIds).size) throw errors.notFound("garment");
+    }
     // QC must cover every accepted garment of the order exactly once.
     if (garmentRows.length) {
-      const covered = new Set(garmentIds);
+      const covered = new Set(input.results.map(result => result.garmentId));
       if (covered.size !== garmentRows.length || !garmentRows.every(row => covered.has(row.id))) {
         throw new AppError("VALIDATION_ERROR", "QC_INCOMPLETE_COVERAGE", {
           required: garmentRows.length, covered: covered.size,
         });
       }
-    }
-    for (const result of input.results) {
+      for (const result of input.results) {
+        await tx.insert(qualityChecks).values({
+          organizationId: principal.organizationId,
+          orderId: order.id,
+          garmentId: result.garmentId,
+          result: result.passed ? "passed" : "failed",
+          note: result.note ?? null,
+          actorId: principal.userId,
+        });
+      }
+    } else {
+      const bagPassed = input.bagPassed ?? true;
       await tx.insert(qualityChecks).values({
         organizationId: principal.organizationId,
         orderId: order.id,
-        garmentId: result.garmentId,
-        result: result.passed ? "passed" : "failed",
-        note: result.note ?? null,
+        garmentId: null,
+        result: bagPassed ? "passed" : "failed",
+        note: input.note ?? null,
         actorId: principal.userId,
       });
     }
-    const allPassed = input.results.every(result => result.passed);
+    const allPassed = garmentRows.length
+      ? input.results.every(result => result.passed)
+      : (input.bagPassed ?? true);
     const to = nextState("processing", allPassed ? "qc_start" : "qc_start", principal);
     let finalState: OrderState = to;
     await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })

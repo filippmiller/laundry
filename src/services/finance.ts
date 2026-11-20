@@ -129,14 +129,17 @@ export async function createCustomerInvoice(db: Db, principal: Principal, input:
     organizationId: principal.organizationId, scope: "invoice:create", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
-    await tx.execute(sql`
-      SELECT id FROM orders WHERE id = ${order.id} AND organization_id = ${principal.organizationId} FOR UPDATE
-    `);
+    if (order.lifecycleState === "cancelled") {
+      throw new AppError("INVALID_TRANSITION", "ORDER_CANCELLED", { orderId: order.id });
+    }
     const [returnedGarment] = await tx.select({ id: garments.id }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId),
       eq(garments.orderId, order.id),
@@ -251,16 +254,19 @@ export async function capturePayment(
     organizationId: principal.organizationId, scope: "finance:capture", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
+    // Serialize captures for one order: a second key must not double-capture the same invoice,
+    // while an open supplemental invoice issued for an accepted adjustment remains collectible.
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
-    // Serialize captures for one order: a second key must not double-capture the same invoice,
-    // while an open supplemental invoice issued for an accepted adjustment remains collectible.
-    await tx.execute(sql`
-      SELECT id FROM orders WHERE id = ${order.id} AND organization_id = ${principal.organizationId} FOR UPDATE
-    `);
+    if (order.lifecycleState === "cancelled") {
+      throw new AppError("INVALID_TRANSITION", "ORDER_CANCELLED", { orderId: order.id });
+    }
     const invoices = await tx.select().from(customerInvoices).where(and(
       eq(customerInvoices.organizationId, principal.organizationId),
       eq(customerInvoices.orderId, order.id),
