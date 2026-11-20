@@ -228,7 +228,7 @@ export function FinanceWorkspace({
   const chargebackReasonId = useId();
 
   const partners = useMemo<PartnerOption[]>(
-    () => (overview.partners && overview.partners.length > 0 ? overview.partners : (demo?.partners ?? [])),
+    () => (overview.partners !== undefined ? overview.partners : (demo?.partners ?? [])),
     [overview.partners, demo?.partners],
   );
   const partnerNames = useMemo(
@@ -238,8 +238,8 @@ export function FinanceWorkspace({
 
   useEffect(() => {
     if (partners.length > 0) {
-      if (!partnerId) setPartnerId(partners[0].id);
-      if (!payoutPartnerId) setPayoutPartnerId(partners[0].id);
+      if (!partners.some(p => p.id === partnerId)) setPartnerId(partners[0].id);
+      if (!partners.some(p => p.id === payoutPartnerId)) setPayoutPartnerId(partners[0].id);
     }
   }, [partners, partnerId, payoutPartnerId]);
 
@@ -347,14 +347,24 @@ export function FinanceWorkspace({
   const decideCompensation = async (comp: CompensationItem, approve: boolean) => {
     setBusyAction(`comp-${comp.id}`);
     try {
-      await api(`/compensations/${comp.id}/decision`, {
-        method: "POST",
-        body: { approve },
-      });
-      notify({
-        kind: "ok",
-        text: approve ? "Компенсация одобрена" : "Компенсация отклонена",
-      });
+      const res = await api<{ state: string; alreadyDecided?: boolean }>(
+        `/compensations/${comp.id}/decision`,
+        {
+          method: "POST",
+          body: { approve },
+        },
+      );
+      if (res.alreadyDecided) {
+        notify({
+          kind: "ok",
+          text: `Решение по компенсации уже было принято ранее (${stateLabel(COMPENSATION_STATE_LABELS, res.state)})`,
+        });
+      } else {
+        notify({
+          kind: "ok",
+          text: approve ? "Компенсация одобрена" : "Компенсация отклонена",
+        });
+      }
       await loadFinance();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -463,10 +473,13 @@ export function FinanceWorkspace({
       notify({ kind: "ok", text: "Выплата партнёру одобрена" });
       await loadFinance();
     } catch (err) {
-      if (err instanceof ApiError && err.code === "DUAL_CONTROL_REQUIRED") {
+      if (
+        err instanceof ApiError &&
+        (err.code === "DUAL_CONTROL_REQUIRED" || err.serverMessage === "DUAL_CONTROL_REQUIRED")
+      ) {
         notify({
           kind: "error",
-          text: "Требуется двойной контроль: выплату должен одобрить другой финансист или администратор",
+          text: "Выплату должен одобрить второй финансист (принцип двойного контроля).",
         });
       } else {
         notify({ kind: "error", text: formatError(err) });
@@ -856,7 +869,10 @@ export function FinanceWorkspace({
             <Button
               type="submit"
               variant="primary"
-              disabled={busyAction === "partner-invoice"}
+              disabled={
+                busyAction === "partner-invoice" ||
+                (partners.length > 0 && !partners.some(p => p.id === partnerId))
+              }
               leadingIcon={<FileText size={16} aria-hidden="true" />}
             >
               Сформировать акт партнёру
@@ -966,7 +982,10 @@ export function FinanceWorkspace({
             <Button
               type="submit"
               variant="primary"
-              disabled={busyAction === "partner-payout"}
+              disabled={
+                busyAction === "partner-payout" ||
+                (partners.length > 0 && !partners.some(p => p.id === payoutPartnerId))
+              }
               leadingIcon={<Wallet size={16} aria-hidden="true" />}
             >
               Запланировать выплату
@@ -1046,7 +1065,7 @@ export function FinanceWorkspace({
               <tbody>
                 {partnerCreditNotes.map(cn => {
                   const isBusy = busyAction === `credit-note-${cn.id}`;
-                  const canApprove = cn.state !== "approved";
+                  const canApprove = cn.state === "draft";
                   return (
                     <tr key={cn.id}>
                       <td className="mono">{cn.invoiceId.slice(0, 8)}</td>
