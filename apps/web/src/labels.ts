@@ -336,6 +336,7 @@ export function providerLabel(provider: string | null | undefined): string {
 export const EVIDENCE_PURPOSE_LABELS: Record<string, string> = {
   intake: "Приёмка курьером",
   intake_photo: "Фото приёмки",
+  intake_condition: "Состояние при приёмке",
   pickup: "Забор заказа",
   inspection: "Осмотр технологом",
   inspection_photo: "Фото осмотра",
@@ -343,8 +344,10 @@ export const EVIDENCE_PURPOSE_LABELS: Record<string, string> = {
   qc_photo: "Фото ОТК",
   delivery: "Выдача клиенту",
   delivery_photo: "Фото доставки",
+  delivery_proof: "Подтверждение выдачи",
   claim: "Материалы претензии",
   claim_photo: "Фото по претензии",
+  claim_evidence: "Материалы по претензии",
   damage: "Фиксация повреждения",
   seal: "Фото пломбы",
   other: "Прочее",
@@ -358,6 +361,7 @@ export const GARMENT_STATUS_LABELS: Record<string, string> = {
   packed: "Упакована",
   delivered: "Выдана клиенту",
   returned_unprocessed: "Возвращена без обработки",
+  missing_reported: "Заявлена недостача",
   lost: "Утрачена",
 };
 
@@ -402,6 +406,7 @@ export const FISCAL_STATE_LABELS: Record<string, string> = {
 export const COMPENSATION_STATE_LABELS: Record<string, string> = {
   proposed: "Предложена",
   approved: "Одобрена",
+  denied: "Отклонена",
   rejected: "Отклонена",
   paid: "Выплачена",
 };
@@ -498,6 +503,7 @@ export function garmentStateTone(state: string): StatusTone {
     case "packed":
       return "ok";
     case "lost":
+    case "missing_reported":
       return "danger";
     case "returned_unprocessed":
       return "warn";
@@ -568,6 +574,13 @@ export const ERROR_LABELS: Record<string, string> = {
   IDEMPOTENCY_OWNER_MISMATCH: "Ключ идемпотентности принадлежит другому пользователю",
   EVIDENCE_ON_LEGAL_HOLD: "Доказательство защищено юридическим удержанием по претензии",
   ORDER_ALREADY_ASSIGNED: "Заказ уже закреплён за другой фабрикой-прачечной",
+  PAYMENT_NOT_REFUNDABLE: "Платёж в текущем статусе не подлежит возврату",
+  PAYMENT_NOT_DISPUTABLE: "Платёж в текущем статусе нельзя оспорить",
+  SELF_ROLE_GRANT: "Нельзя изменять собственные роли",
+  LAST_ADMIN: "Нельзя лишить прав единственного администратора",
+  SELF_SUSPENSION: "Нельзя заблокировать собственную учётную запись",
+  CLAIM_NOT_DECIDABLE: "По претензии в текущем статусе нельзя вынести решение",
+  THREAD_CLOSED: "Обращение уже закрыто",
 };
 
 export function formatError(err: unknown): string {

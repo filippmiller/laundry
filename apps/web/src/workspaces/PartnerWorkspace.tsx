@@ -89,13 +89,14 @@ type PartnerWorkspaceResponse = {
 
 type AccrualItemDto = {
   id?: string;
-  orderId?: string;
-  orderPublicNumber?: string;
-  publicNumber?: string;
-  serviceName?: string;
-  description?: string;
+  orderId?: string | null;
+  orderPublicNumber?: string | null;
+  publicNumber?: string | null;
+  serviceName?: string | null;
+  description?: string | null;
   qty?: number;
-  unit?: string;
+  quantity?: number;
+  unit?: string | null;
   amountKopeks?: number;
   totalKopeks?: number;
   createdAt?: string;
@@ -103,11 +104,12 @@ type AccrualItemDto = {
 
 type PartnerInvoiceLineDto = {
   id: string;
+  accrualId?: string;
   description?: string;
   name?: string;
-  serviceName?: string;
+  serviceName?: string | null;
   qty?: number;
-  unit?: string;
+  unit?: string | null;
   amountKopeks?: number;
   totalKopeks?: number;
   status?: string;
@@ -214,7 +216,7 @@ const UNIT_LABELS: Record<string, string> = {
   item: "шт.",
 };
 
-function unitLabel(unit: string | undefined): string {
+function unitLabel(unit: string | null | undefined): string {
   if (!unit) return "";
   return stateLabel(UNIT_LABELS, unit);
 }
@@ -252,7 +254,7 @@ const ACCRUAL_COLUMNS: DataTableColumn<AccrualItemDto>[] = [
     key: "order",
     header: "Заказ",
     render: (item) => (
-      <span className="mono">{item.orderPublicNumber ?? item.publicNumber ?? item.orderId ?? "—"}</span>
+      <span className="mono">{item.publicNumber ?? item.orderPublicNumber ?? item.orderId ?? "—"}</span>
     ),
   },
   {
@@ -260,7 +262,12 @@ const ACCRUAL_COLUMNS: DataTableColumn<AccrualItemDto>[] = [
     header: "Услуга / позиция",
     render: (item) => item.serviceName ?? item.description ?? "Оптовая обработка",
   },
-  { key: "qty", header: "Кол-во", render: (item) => `${item.qty ?? 1} ${unitLabel(item.unit)}`, numeric: true },
+  {
+    key: "qty",
+    header: "Кол-во",
+    render: (item) => `${item.quantity ?? item.qty ?? 1} ${unitLabel(item.unit)}`,
+    numeric: true,
+  },
   { key: "date", header: "Дата", render: (item) => <span className="mono">{dt(item.createdAt)}</span> },
   {
     key: "amount",
@@ -341,8 +348,8 @@ export function PartnerWorkspace({ notify }: { notify: NotifyFn }) {
   const filteredOrders = useMemo(() => ordersForFilter(orders, queueFilter), [orders, queueFilter]);
 
   const selectedOrder = useMemo(
-    () => orders.find((o) => o.orderId === selectedOrderId) ?? filteredOrders[0] ?? null,
-    [orders, filteredOrders, selectedOrderId],
+    () => filteredOrders.find((o) => o.orderId === selectedOrderId) ?? filteredOrders[0] ?? null,
+    [filteredOrders, selectedOrderId],
   );
 
   // Sync per-order drafts whenever selected order changes or refreshes

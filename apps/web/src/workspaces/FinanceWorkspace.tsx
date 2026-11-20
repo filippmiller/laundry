@@ -102,6 +102,9 @@ type ReconciliationResponse = {
 type DriftItem = {
   paymentIntentId?: string;
   id?: string;
+  state?: string;
+  amountKopeks?: number;
+  refundedKopeks?: number;
   expectedState?: string;
   actualState?: string;
   reason?: string;
@@ -133,6 +136,7 @@ export function FinanceWorkspace({
   const [drift, setDrift] = useState<DriftItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   const [printDoc, setPrintDoc] = useState<{ kind: DocumentKind; id: string } | null>(null);
 
@@ -164,6 +168,7 @@ export function FinanceWorkspace({
 
   const loadFinance = useCallback(async () => {
     setLoading(true);
+    setRefreshNonce(n => n + 1);
     try {
       const [ov, rec, dr] = await Promise.all([
         api<FinanceOverviewResponse>("/finance/overview"),
@@ -281,6 +286,22 @@ export function FinanceWorkspace({
     }
   };
 
+  const settleCompensation = async (comp: CompensationItem) => {
+    setBusyAction(`comp-${comp.id}`);
+    try {
+      await api(`/claims/${comp.claimId}/compensation/settle`, {
+        method: "POST",
+        body: { compensationId: comp.id },
+      });
+      notify({ kind: "ok", text: "Компенсация выплачена" });
+      await loadFinance();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const createPartnerInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedPartner = partnerId.trim();
@@ -357,7 +378,7 @@ export function FinanceWorkspace({
       />
 
       {/* 0. Денежный контур: дебиторка, кредиторка, вклад */}
-      <FinanceMoneyPanel notify={notify} />
+      <FinanceMoneyPanel key={refreshNonce} notify={notify} />
 
       {/* 1. Финансовая сверка и дрифт */}
       <section className="panel" aria-labelledby="finance-reconciliation-heading">
@@ -389,10 +410,15 @@ export function FinanceWorkspace({
             <ul style={{ margin: 0, paddingInlineStart: 18 }}>
               {drift.map((item, idx) => {
                 const intentId = item.paymentIntentId ?? item.id ?? `drift-${idx + 1}`;
+                const details: string[] = [];
+                if (item.state) details.push(`статус: ${stateLabel(PAYMENT_STATE_LABELS, item.state)}`);
+                if (typeof item.amountKopeks === "number") details.push(`сумма: ${money(item.amountKopeks)}`);
+                if (typeof item.refundedKopeks === "number") details.push(`возвращено: ${money(item.refundedKopeks)}`);
+                if (item.reason) details.push(item.reason);
                 return (
                   <li key={`${intentId}-${idx}`} className="mono">
                     {intentId}
-                    {item.reason ? ` — ${item.reason}` : ""}
+                    {details.length > 0 ? ` — ${details.join(", ")}` : ""}
                   </li>
                 );
               })}
@@ -486,6 +512,7 @@ export function FinanceWorkspace({
                         <Button
                           variant="ghost"
                           size="sm"
+                          disabled={!["captured", "partially_refunded"].includes(intent.state)}
                           leadingIcon={<RotateCcw size={15} aria-hidden="true" />}
                           onClick={() => openRefundModal(intent)}
                         >
@@ -494,6 +521,7 @@ export function FinanceWorkspace({
                         <Button
                           variant="ghost"
                           size="sm"
+                          disabled={!["captured", "partially_refunded", "refunded"].includes(intent.state)}
                           leadingIcon={<ShieldAlert size={15} aria-hidden="true" />}
                           onClick={() => openChargebackModal(intent)}
                         >
@@ -537,30 +565,53 @@ export function FinanceWorkspace({
                       <td className="mono">{comp.claimId}</td>
                       <td className="mono">{money(comp.amountKopeks)}</td>
                       <td>
-                        <Badge tone={comp.state === "approved" ? "ok" : comp.state === "rejected" ? "danger" : "warn"}>
+                        <Badge
+                          tone={
+                            comp.state === "approved"
+                              ? "ok"
+                              : comp.state === "denied" || comp.state === "rejected"
+                                ? "danger"
+                                : "warn"
+                          }
+                        >
                           {stateLabel(COMPENSATION_STATE_LABELS, comp.state)}
                         </Badge>
                       </td>
                       <td>
                         <div className="button-row" style={{ marginBlock: 0 }}>
-                          <Button
-                            variant="primary"
-                            size="sm"
-                            disabled={isBusy}
-                            leadingIcon={<CheckCircle2 size={15} aria-hidden="true" />}
-                            onClick={() => void decideCompensation(comp, true)}
-                          >
-                            Одобрить
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={isBusy}
-                            leadingIcon={<XCircle size={15} aria-hidden="true" />}
-                            onClick={() => void decideCompensation(comp, false)}
-                          >
-                            Отклонить
-                          </Button>
+                          {comp.state === "proposed" && (
+                            <>
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                disabled={isBusy}
+                                leadingIcon={<CheckCircle2 size={15} aria-hidden="true" />}
+                                onClick={() => void decideCompensation(comp, true)}
+                              >
+                                Одобрить
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={isBusy}
+                                leadingIcon={<XCircle size={15} aria-hidden="true" />}
+                                onClick={() => void decideCompensation(comp, false)}
+                              >
+                                Отклонить
+                              </Button>
+                            </>
+                          )}
+                          {comp.state === "approved" && (
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              disabled={isBusy}
+                              leadingIcon={<CheckCircle2 size={15} aria-hidden="true" />}
+                              onClick={() => void settleCompensation(comp)}
+                            >
+                              Выплатить
+                            </Button>
+                          )}
                         </div>
                       </td>
                     </tr>
