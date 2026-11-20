@@ -484,13 +484,25 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
   if (!principal.partnerId) throw errors.forbidden("partner scope required");
   const limit = Math.min(input.limit ?? 50, 100);
   const accruals = await db.select({
-    id: partnerServiceAccruals.id, orderLineId: partnerServiceAccruals.orderLineId,
-    quantity: partnerServiceAccruals.quantity, amountKopeks: partnerServiceAccruals.amountKopeks,
-    status: partnerServiceAccruals.status, createdAt: partnerServiceAccruals.createdAt,
-  }).from(partnerServiceAccruals).where(and(
-    eq(partnerServiceAccruals.organizationId, principal.organizationId),
-    eq(partnerServiceAccruals.partnerId, principal.partnerId),
-  )).orderBy(desc(partnerServiceAccruals.createdAt)).limit(limit);
+    id: partnerServiceAccruals.id,
+    orderLineId: partnerServiceAccruals.orderLineId,
+    orderId: orders.id,
+    publicNumber: orders.publicNumber,
+    serviceName: services.name,
+    unit: orderLines.unit,
+    qty: partnerServiceAccruals.quantity,
+    quantity: partnerServiceAccruals.quantity,
+    amountKopeks: partnerServiceAccruals.amountKopeks,
+    status: partnerServiceAccruals.status,
+    createdAt: partnerServiceAccruals.createdAt,
+  }).from(partnerServiceAccruals)
+    .leftJoin(orderLines, eq(partnerServiceAccruals.orderLineId, orderLines.id))
+    .leftJoin(orders, eq(orderLines.orderId, orders.id))
+    .leftJoin(services, eq(orderLines.serviceId, services.id))
+    .where(and(
+      eq(partnerServiceAccruals.organizationId, principal.organizationId),
+      eq(partnerServiceAccruals.partnerId, principal.partnerId),
+    )).orderBy(desc(partnerServiceAccruals.createdAt)).limit(limit);
   const invoices = await db.select({
     id: partnerInvoices.id, number: partnerInvoices.number, periodStart: partnerInvoices.periodStart,
     periodEnd: partnerInvoices.periodEnd, totalKopeks: partnerInvoices.totalKopeks,
@@ -499,10 +511,61 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
     eq(partnerInvoices.organizationId, principal.organizationId),
     eq(partnerInvoices.partnerId, principal.partnerId),
   )).orderBy(desc(partnerInvoices.createdAt)).limit(limit);
+  const invoiceIds = invoices.map(inv => inv.id);
+  const lineRows = invoiceIds.length
+    ? await db.select({
+      id: partnerInvoiceLines.id,
+      invoiceId: partnerInvoiceLines.invoiceId,
+      accrualId: partnerInvoiceLines.accrualId,
+      amountKopeks: partnerInvoiceLines.amountKopeks,
+      state: partnerInvoiceLines.state,
+      qty: partnerServiceAccruals.quantity,
+      accrualDisputed: partnerServiceAccruals.disputed,
+      unit: orderLines.unit,
+      serviceName: services.name,
+      publicNumber: orders.publicNumber,
+    }).from(partnerInvoiceLines)
+      .innerJoin(partnerServiceAccruals, eq(partnerInvoiceLines.accrualId, partnerServiceAccruals.id))
+      .leftJoin(orderLines, eq(partnerServiceAccruals.orderLineId, orderLines.id))
+      .leftJoin(orders, eq(orderLines.orderId, orders.id))
+      .leftJoin(services, eq(orderLines.serviceId, services.id))
+      .where(inArray(partnerInvoiceLines.invoiceId, invoiceIds))
+    : [];
+  const linesByInvoice = new Map<string, Array<{
+    id: string;
+    accrualId: string;
+    description: string;
+    serviceName: string | null;
+    qty: number;
+    unit: string | null;
+    amountKopeks: number;
+    status: string;
+    disputed: boolean;
+  }>>();
+  for (const row of lineRows) {
+    const list = linesByInvoice.get(row.invoiceId) ?? [];
+    list.push({
+      id: row.id,
+      accrualId: row.accrualId,
+      description: row.serviceName
+        ? (row.publicNumber ? `${row.serviceName} · ${row.publicNumber}` : row.serviceName)
+        : `Начисление ${row.accrualId.slice(0, 8)}`,
+      serviceName: row.serviceName,
+      qty: row.qty,
+      unit: row.unit,
+      amountKopeks: row.amountKopeks,
+      status: row.state,
+      disputed: row.accrualDisputed || row.state === "disputed",
+    });
+    linesByInvoice.set(row.invoiceId, list);
+  }
   return {
     partnerId: principal.partnerId,
     accruals,
-    invoices,
+    invoices: invoices.map(inv => ({
+      ...inv,
+      lines: linesByInvoice.get(inv.id) ?? [],
+    })),
     estimatedTotalKopeks: accruals
       .filter(accrual => accrual.status !== "voided")
       .reduce((total, accrual) => total + accrual.amountKopeks, 0),
@@ -644,7 +707,7 @@ export async function financeOverview(db: Db, principal: Principal) {
     db.select().from(compensations)
       .where(and(
         eq(compensations.organizationId, principal.organizationId),
-        notInArray(compensations.state, ["paid", "rejected", "cancelled"]),
+        notInArray(compensations.state, ["paid", "denied", "rejected", "cancelled"]),
       ))
       .orderBy(desc(compensations.createdAt))
       .limit(50),
