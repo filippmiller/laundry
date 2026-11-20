@@ -98,7 +98,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-d03" });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-d03" });
-    const qc = await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: "qc-d03" });
+    const qc = await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: "qc-d03" });
     expect(qc.state).toBe("ready");
 
     const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-d03" });

@@ -167,7 +167,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-close" });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-close" });
-    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: "qc-close" });
+    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: "qc-close" });
     const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-close" });
     await arriveStop(db, f.courier, { stopId: assigned.stopId, key: "arrive-close" });
     await recordDeliveryAttempt(db, f.courier, {
@@ -190,7 +190,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-proof" });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-proof" });
-    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: "qc-proof" });
+    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: "qc-proof" });
     const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-proof" });
     await arriveStop(db, f.courier, { stopId: assigned.stopId, key: "arrive-proof" });
     await expect(recordDeliveryAttempt(db, f.courier, {

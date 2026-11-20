@@ -223,7 +223,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Track 2B: Orders, Intake, Capac
                                   get(qTarget, qProp, qReceiver) {
                                     if (qProp === "returning") {
                                       return async (...retArgs: unknown[]) => {
-                                        await db.update(orders).set({ version: sql`${orders.version} + 1` }).where(eq(orders.id, orderId));
+                                        await target.update(orders).set({ version: sql`${orders.version} + 1` }).where(eq(orders.id, orderId));
                                         return (qTarget.returning as (...r: unknown[]) => Promise<unknown>)(...retArgs);
                                       };
                                     }
@@ -383,7 +383,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Track 2B: Orders, Intake, Capac
     expect(partnerRes.statusCode).toBe(200);
     const partnerBody = partnerRes.json() as { totalKopeks?: number; garments: Array<{ declaredValueKopeks?: number }> };
     expect(partnerBody.totalKopeks).toBeUndefined();
-    expect(partnerBody.garments[0].declaredValueKopeks).toBeUndefined();
+    // FP-N10: assigned partner receives declaredValueKopeks for garment care/liability, while totalKopeks remains stripped.
+    expect(partnerBody.garments[0].declaredValueKopeks).toBe(1_200_000);
 
     const courierRes = await app.inject({ method: "GET", url: `/api/v1/orders/${f.orderId}`, headers: { cookie: courierSession.cookie } });
     expect(courierRes.statusCode).toBe(200);

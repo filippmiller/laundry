@@ -563,7 +563,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PR3 P0/P1 security regressions"
       });
       await startInspection(db, partner.principal, { orderId: f.orderId, key: `inspect-${rid()}` });
       await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `batch-${rid()}` });
-      await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: `qc-${rid()}` });
+      await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: `qc-${rid()}` });
       const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: `deliver-${rid()}` });
       await arriveStop(db, f.courier, { stopId: assigned.stopId, key: `arrive-${rid()}` });
 

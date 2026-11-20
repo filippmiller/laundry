@@ -632,9 +632,11 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
     const garmentIds = await db.execute(sql`
       SELECT id FROM garments WHERE order_id = ${order.id} AND organization_id = ${context.organizationId}
     `);
+    const garmentRows = garmentIds.rows as unknown as Array<{ id: string }>;
     await recordQualityCheck(db, context.principals.partner, {
       orderId: order.id,
-      results: (garmentIds.rows as unknown as Array<{ id: string }>).map(row => ({ garmentId: row.id, passed: true })),
+      results: garmentRows.map(row => ({ garmentId: row.id, passed: true })),
+      ...(garmentRows.length === 0 ? { bagPassed: true } : {}),
       key: key("qc"),
     });
 

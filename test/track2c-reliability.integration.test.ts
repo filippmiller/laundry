@@ -5,8 +5,8 @@ import { buildApp } from "../src/api/server.js";
 import { createDb, type Db } from "../src/db/client.js";
 import {
   buildings, compensations, evidenceAccessEvents, evidenceAssets, evidenceLegalHolds,
-  ledgerJournals, outboxEvents, partnerCreditNotes, partnerInvoices, partnerPayouts,
-  partners, paymentEvents, paymentIntents,
+  ledgerJournals, orderLines, outboxEvents, partnerContracts, partnerCreditNotes, partnerInvoices, partnerPayouts,
+  partners, partnerServiceAccruals, paymentEvents, paymentIntents,
 } from "../src/db/schema.js";
 import { makePrincipal, seedUser } from "./fixtures.js";
 import { seedFullOrder } from "./operations-fixtures.js";
@@ -497,6 +497,23 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Track 2C Reliability, Evidence,
         periodEnd: new Date(),
         totalKopeks: 50_000,
       }).returning();
+      const [orderLine] = await db.select().from(orderLines).where(eq(orderLines.orderId, f.orderId)).limit(1);
+      const [pContract] = await db.insert(partnerContracts).values({
+        partnerId: partner.id,
+        version: "1.0",
+        effectiveFrom: new Date(Date.now() - 86_400_000),
+        signed: true,
+      }).returning();
+      await db.insert(partnerServiceAccruals).values({
+        organizationId: f.organizationId,
+        partnerId: partner.id,
+        orderLineId: orderLine.id,
+        contractId: pContract.id,
+        quantity: 1_000,
+        amountKopeks: 50_000,
+        status: "invoiced",
+        disputed: false,
+      });
       const [cn] = await db.insert(partnerCreditNotes).values({
         organizationId: f.organizationId,
         invoiceId: pInv.id,

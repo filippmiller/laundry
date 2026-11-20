@@ -486,7 +486,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4B Backend Red-Team Remedi
     // Progress to ready and test delivery reassignment stop version bump
     await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-${rid()}` });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `proc-${rid()}` });
-    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: `qc-${rid()}` });
+    await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: `qc-${rid()}` });
 
     const del1 = await assignDelivery(db, f.dispatcher, {
       orderId: f.orderId,
