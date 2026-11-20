@@ -14,7 +14,7 @@ import {
   Wallet,
   XCircle,
 } from "lucide-react";
-import { api, ApiError, DemoConfig, dt, money } from "../api";
+import { api, ApiError, DemoConfig, dt, money, newKey } from "../api";
 import { DocumentKind, DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
 import { Badge } from "../components/ui/Badge";
@@ -208,6 +208,7 @@ export function FinanceWorkspace({
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [pendingRefundKopeks, setPendingRefundKopeks] = useState(0);
 
   const [printDoc, setPrintDoc] = useState<{ kind: DocumentKind; id: string } | null>(null);
 
@@ -356,6 +357,31 @@ export function FinanceWorkspace({
       });
       notify({ kind: "ok", text: "Возврат оформлен" });
       setRefundTarget(null);
+      await loadFinance();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const processPendingRefunds = async () => {
+    setBusyAction("process-pending-refunds");
+    try {
+      const res = await api<{ scanned: number; completed: number; errored: number }>(
+        "/finance/refunds/process-pending",
+        {
+          method: "POST",
+          key: newKey(),
+          body: {},
+        },
+      );
+      notify({
+        kind: res.errored > 0 ? "error" : "ok",
+        text: res.scanned === 0
+          ? "Ожидающих проведения возвратов нет"
+          : `Проведено возвратов: ${res.completed} из ${res.scanned}${res.errored > 0 ? ` (ошибок: ${res.errored})` : ""}`,
+      });
       await loadFinance();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -641,6 +667,8 @@ export function FinanceWorkspace({
   const journalsCount = countMetric(reconciliation.journals);
   const paymentEventsCount = countMetric(reconciliation.payment_events);
   const refundsCount = countMetric(reconciliation.refunds ?? overview.refunds);
+  const pendingRefundCount = (overview.refunds ?? []).filter(r => r.state === "pending" || r.state === "error").length;
+  const hasPendingRefunds = pendingRefundKopeks > 0 || pendingRefundCount > 0;
   const driftCount = drift.length;
 
   return (
@@ -667,7 +695,11 @@ export function FinanceWorkspace({
       />
 
       {/* 0. Денежный контур: дебиторка, кредиторка, вклад */}
-      <FinanceMoneyPanel key={refreshNonce} notify={notify} />
+      <FinanceMoneyPanel
+        key={refreshNonce}
+        notify={notify}
+        onPendingRefundsChange={setPendingRefundKopeks}
+      />
 
       {/* 1. Финансовая сверка и дрифт */}
       <section className="panel" aria-labelledby="finance-reconciliation-heading">
@@ -718,10 +750,25 @@ export function FinanceWorkspace({
 
       {/* 2. Счета клиентов, оплаты, возвраты и чарджбэки */}
       <section className="panel" aria-labelledby="finance-invoices-intents-heading">
-        <h3 id="finance-invoices-intents-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Receipt size={18} aria-hidden="true" />
-          <span>Счета клиентов, оплаты, возвраты и чарджбэки</span>
-        </h3>
+        <div className="panel-head">
+          <h3 id="finance-invoices-intents-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+            <Receipt size={18} aria-hidden="true" />
+            <span>Счета клиентов, оплаты, возвраты и чарджбэки</span>
+          </h3>
+          <Button
+            variant={hasPendingRefunds ? "primary" : "ghost"}
+            size="sm"
+            disabled={busyAction === "process-pending-refunds" || loading}
+            leadingIcon={<RotateCcw size={15} aria-hidden="true" />}
+            onClick={() => void processPendingRefunds()}
+          >
+            {busyAction === "process-pending-refunds"
+              ? "Проведение возвратов…"
+              : pendingRefundKopeks > 0
+                ? `Провести ожидающие возвраты (${money(pendingRefundKopeks)})`
+                : "Провести ожидающие возвраты"}
+          </Button>
+        </div>
 
         <h4 style={{ marginBlock: "8px 10px" }}>Счета клиентов</h4>
         {invoices.length === 0 ? (

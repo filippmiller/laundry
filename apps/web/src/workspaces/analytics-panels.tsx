@@ -92,6 +92,7 @@ type FinanceAnalyticsDto = {
     invoicedKopeks: number;
     netCollectedKopeks: number;
     refundedKopeks: number;
+    pendingRefundKopeks?: number;
     receivableKopeks: number;
     creditKopeks: number;
     invoiceCount: number;
@@ -154,7 +155,13 @@ type FinanceAnalyticsDto = {
   monthly: Array<{ month: string; invoicedKopeks: number; netCollectedKopeks: number }>;
 };
 
-export function FinanceMoneyPanel({ notify }: { notify: NotifyFn }) {
+export function FinanceMoneyPanel({
+  notify,
+  onPendingRefundsChange,
+}: {
+  notify: NotifyFn;
+  onPendingRefundsChange?: (pendingRefundKopeks: number) => void;
+}) {
   const [data, setData] = useState<FinanceAnalyticsDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -163,14 +170,16 @@ export function FinanceMoneyPanel({ notify }: { notify: NotifyFn }) {
     setBusy(true);
     setError(null);
     try {
-      setData(await api<FinanceAnalyticsDto>("/finance/analytics"));
+      const analytics = await api<FinanceAnalyticsDto>("/finance/analytics");
+      setData(analytics);
+      onPendingRefundsChange?.(analytics.receivables.pendingRefundKopeks ?? 0);
     } catch (err) {
       setError(formatError(err));
       notify({ kind: "error", text: formatError(err) });
     } finally {
       setBusy(false);
     }
-  }, [notify]);
+  }, [notify, onPendingRefundsChange]);
 
   useEffect(() => {
     void load();
@@ -199,6 +208,11 @@ export function FinanceMoneyPanel({ notify }: { notify: NotifyFn }) {
         <Metric label="Собрано" value={money(r.netCollectedKopeks)} tone="good" />
         <Metric label="К оплате" value={money(r.receivableKopeks)} tone={r.receivableKopeks > 0 ? "warn" : "default"} />
         <Metric label="Возвращено" value={money(r.refundedKopeks)} />
+        <Metric
+          label="Возвраты в обработке"
+          value={money(r.pendingRefundKopeks ?? 0)}
+          tone={(r.pendingRefundKopeks ?? 0) > 0 ? "warn" : "default"}
+        />
         {r.creditKopeks > 0 && <Metric label="Переплата клиентов" value={money(r.creditKopeks)} tone="bad" />}
       </div>
 
@@ -381,6 +395,7 @@ type CustomerFinanceDto = {
     chargedKopeks: number;
     netPaidKopeks: number;
     refundedKopeks: number;
+    pendingRefundKopeks?: number;
     outstandingKopeks: number;
     creditKopeks: number;
     averageOrderKopeks: number;
@@ -405,7 +420,9 @@ type CustomerFinanceDto = {
     chargedKopeks: number;
     netPaidKopeks: number;
     refundedKopeks: number;
+    pendingRefundKopeks?: number;
     outstandingKopeks: number;
+    creditKopeks?: number;
     sharedWindowSavingsKopeks: number;
   }>;
 };
@@ -453,6 +470,12 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
         <Metric label="Оплачено" value={money(t.netPaidKopeks)} tone="good" />
         <Metric label="К оплате" value={money(t.outstandingKopeks)} tone={t.outstandingKopeks > 0 ? "warn" : "default"} />
         <Metric label="Возвращено" value={money(t.refundedKopeks)} />
+        {(t.pendingRefundKopeks ?? 0) > 0 && (
+          <Metric label="Возврат в обработке" value={money(t.pendingRefundKopeks ?? 0)} tone="warn" />
+        )}
+        {(t.creditKopeks ?? 0) > 0 && (
+          <Metric label="Переплата / баланс" value={money(t.creditKopeks ?? 0)} tone="good" />
+        )}
         <Metric label="Средний чек" value={money(t.averageOrderKopeks)} />
         <Metric
           label="Экономия на групповом окне"
