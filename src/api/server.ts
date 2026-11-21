@@ -985,6 +985,8 @@ export function buildApp(db: Db) {
       results: z.array(z.object({ garmentId: z.uuid(), passed: z.boolean(), note: z.string().optional() })),
       bagPassed: z.boolean().optional(),
       note: z.string().max(500).optional(),
+      outboundContainerCode: z.string().min(1).max(120).optional(),
+      outboundSealCode: z.string().min(1).max(120).optional(),
       key: z.string().optional(),
     }),
     handler: ctx => recordQualityCheck(db, ctx.principal, { orderId: ctx.params.id, ...ctx.body, key: idempotencyKey(ctx) }),
@@ -1177,18 +1179,39 @@ export function buildApp(db: Db) {
   });
   add({
     method: "POST", path: "/dispatch/pickups/assign", summary: "Assign a pickup stop to an active courier shift", tags: ["Dispatch"],
-    body: z.object({ orderId: z.uuid(), shiftId: z.uuid(), key: z.string().optional() }),
+    body: z.object({
+      orderId: z.uuid(),
+      shiftId: z.uuid(),
+      windowStart: z.iso.datetime().optional(),
+      windowEnd: z.iso.datetime().optional(),
+      enforceShiftWindowOverlap: z.boolean().optional(),
+      key: z.string().optional(),
+    }),
     handler: ctx => assignPickup(db, ctx.principal, {
-      orderId: ctx.body.orderId, shiftId: ctx.body.shiftId, key: idempotencyKey(ctx),
+      orderId: ctx.body.orderId,
+      shiftId: ctx.body.shiftId,
+      windowStart: ctx.body.windowStart ? new Date(ctx.body.windowStart) : undefined,
+      windowEnd: ctx.body.windowEnd ? new Date(ctx.body.windowEnd) : undefined,
+      enforceShiftWindowOverlap: ctx.body.enforceShiftWindowOverlap,
+      key: idempotencyKey(ctx),
     }),
   });
   add({
     method: "POST", path: "/dispatch/deliveries", summary: "Assign delivery route", tags: ["Dispatch"],
-    body: z.object({ orderId: z.uuid(), shiftId: z.uuid(), windowStart: z.iso.datetime().optional(), windowEnd: z.iso.datetime().optional(), key: z.string().optional() }),
+    body: z.object({
+      orderId: z.uuid(),
+      shiftId: z.uuid(),
+      windowStart: z.iso.datetime().optional(),
+      windowEnd: z.iso.datetime().optional(),
+      enforceShiftWindowOverlap: z.boolean().optional(),
+      key: z.string().optional(),
+    }),
     handler: ctx => assignDelivery(db, ctx.principal, {
-      orderId: ctx.body.orderId, shiftId: ctx.body.shiftId,
+      orderId: ctx.body.orderId,
+      shiftId: ctx.body.shiftId,
       windowStart: ctx.body.windowStart ? new Date(ctx.body.windowStart) : undefined,
       windowEnd: ctx.body.windowEnd ? new Date(ctx.body.windowEnd) : undefined,
+      enforceShiftWindowOverlap: ctx.body.enforceShiftWindowOverlap,
       key: idempotencyKey(ctx),
     }),
   });
