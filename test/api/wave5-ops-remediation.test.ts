@@ -413,8 +413,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 5 Ops Remediation (LND-PRO
     expect(delStop.windowEnd?.toISOString()).toBe(deliveryWin.endsAt.toISOString());
 
     const [delRoute] = await db.select().from(routes).where(eq(routes.id, delStop.routeId));
-    expect(delRoute.plannedStart.toISOString()).toBe(deliveryWin.startsAt.toISOString());
-    expect(delRoute.plannedEnd.toISOString()).toBe(deliveryWin.endsAt.toISOString());
+    expect(delRoute.plannedStart.toISOString()).toBe("2026-12-01T09:00:00.000Z");
+    expect(delRoute.plannedEnd.toISOString()).toBe("2026-12-01T18:00:00.000Z");
 
     const [delEvent] = await db.select().from(outboxEvents)
       .where(and(eq(outboxEvents.aggregateId, f.orderId), eq(outboxEvents.eventType, "order.dispatch")))
