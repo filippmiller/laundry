@@ -1,0 +1,1 @@
+ALTER TABLE "order_adjustments" ADD COLUMN "details_json" jsonb DEFAULT '{}'::jsonb NOT NULL;

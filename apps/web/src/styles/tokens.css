@@ -1,0 +1,182 @@
+/* ==========================================================================
+   Design tokens — "Architectural Linen & Precision Utility"
+   Every value below is a decision from DESIGN.md. Nothing is invented here:
+   the palette, type scale and density rules are the documented spec.
+   ========================================================================== */
+
+@layer tokens {
+  :root {
+    color-scheme: light;
+
+    /* ------------------------------------------------------------------
+       Canvas & surfaces
+       ------------------------------------------------------------------ */
+    --bg-canvas: #f7f8f7;
+    --bg-surface: #ffffff;
+    --bg-subtle: #eff3f1;
+    --bg-sunken: #f1f4f2;
+    --bg-raised: #ffffff;
+    --bg-topbar: #141920;
+    --bg-rail: #141920;
+    --bg-rail-raised: #1c232c;
+    --bg-overlay: rgba(20, 25, 32, 0.54);
+
+    /* ------------------------------------------------------------------
+       Ink
+       ------------------------------------------------------------------ */
+    --ink-primary: #141920;
+    --ink-secondary: #4e5b6b;
+    --ink-tertiary: #525e6e;
+    --ink-inverse: #f8faf9;
+    --ink-inverse-muted: #b6c3d1;
+    --ink-inverse-faint: #7d8b99;
+
+    /* ------------------------------------------------------------------
+       Borders
+       ------------------------------------------------------------------ */
+    --border-hairline: #d8e1dd;
+    --border-strong: #b8c7c0;
+    --border-subtle: #e8eeeb;
+    --border-inverse: rgba(255, 255, 255, 0.12);
+    --border-inverse-strong: rgba(255, 255, 255, 0.22);
+
+    /* ------------------------------------------------------------------
+       Accent — Botanical Eucalyptus
+       ------------------------------------------------------------------ */
+    --accent: #0b6b58;
+    --accent-hover: #075243;
+    --accent-active: #063f35;
+    --accent-soft: #e6f4f0;
+    --accent-soft-strong: #d3ebe3;
+    --accent-ink: #0a5645;
+    --accent-ring: rgba(11, 107, 88, 0.32);
+    --accent-on-soft: #0b6b58;
+
+    /* ------------------------------------------------------------------
+       Semantic statuses (ink + surface pairs)
+       ------------------------------------------------------------------ */
+    --status-ok-ink: #0a5645;
+    --status-ok-bg: #e3f5ee;
+    --status-ok-border: rgba(10, 86, 69, 0.18);
+
+    --status-warn-ink: #7c4a03;
+    --status-warn-bg: #fef3dc;
+    --status-warn-border: rgba(124, 74, 3, 0.2);
+
+    --status-danger-ink: #9e1c18;
+    --status-danger-bg: #fde8e6;
+    --status-danger-border: rgba(158, 28, 24, 0.2);
+
+    --status-info-ink: #154b7e;
+    --status-info-bg: #e7f1fc;
+    --status-info-border: rgba(21, 75, 126, 0.18);
+
+    --status-neutral-ink: #4e5b6b;
+    --status-neutral-bg: #eff3f1;
+    --status-neutral-border: rgba(78, 91, 107, 0.16);
+
+    /* ------------------------------------------------------------------
+       Radii
+       ------------------------------------------------------------------ */
+    --radius-xs: 6px;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 20px;
+    --radius-pill: 999px;
+
+    /* ------------------------------------------------------------------
+       Elevation — layered, tinted with the ink colour rather than black
+       ------------------------------------------------------------------ */
+    --shadow-xs: 0 1px 2px rgba(20, 25, 32, 0.04);
+    --shadow-sm: 0 1px 2px rgba(20, 25, 32, 0.035), 0 2px 6px rgba(20, 25, 32, 0.035);
+    --shadow-card: 0 1px 2px rgba(20, 25, 32, 0.03), 0 2px 10px rgba(20, 25, 32, 0.045);
+    --shadow-raised: 0 1px 2px rgba(20, 25, 32, 0.04), 0 4px 14px rgba(20, 25, 32, 0.06);
+    --shadow-float: 0 2px 4px rgba(20, 25, 32, 0.04), 0 10px 28px rgba(20, 25, 32, 0.08);
+    --shadow-overlay: 0 4px 12px rgba(20, 25, 32, 0.12), 0 24px 60px rgba(20, 25, 32, 0.2);
+    --shadow-inset-hairline: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+
+    /* ------------------------------------------------------------------
+       Spacing — 4px base rhythm
+       ------------------------------------------------------------------ */
+    --space-0: 0;
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.25rem;
+    --space-6: 1.5rem;
+    --space-7: 1.75rem;
+    --space-8: 2rem;
+    --space-10: 2.5rem;
+    --space-12: 3rem;
+    --space-16: 4rem;
+
+    /* ------------------------------------------------------------------
+       Type
+       ------------------------------------------------------------------ */
+    --font-sans: "Onest", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+    --text-xs: 0.75rem;
+    --text-sm: 0.8125rem;
+    --text-ui: 0.9375rem;
+    --text-base: 1rem;
+    --text-lg: 1.125rem;
+    --text-xl: 1.375rem;
+    --text-2xl: clamp(1.375rem, 2.5vw, 2rem);
+    --text-3xl: clamp(1.75rem, 3.2vw, 2.5rem);
+
+    --leading-tight: 1.2;
+    --leading-snug: 1.35;
+    --leading-normal: 1.55;
+    --leading-relaxed: 1.65;
+
+    --tracking-tight: -0.02em;
+    --tracking-snug: -0.012em;
+    --tracking-wide: 0.04em;
+    --tracking-caps: 0.08em;
+
+    /* ------------------------------------------------------------------
+       Motion — compositor-only transforms and opacity
+       ------------------------------------------------------------------ */
+    --dur-instant: 90ms;
+    --dur-fast: 140ms;
+    --dur-base: 200ms;
+    --dur-slow: 280ms;
+    --dur-slower: 420ms;
+
+    --ease-out: cubic-bezier(0.22, 0.85, 0.28, 1);
+    --ease-in-out: cubic-bezier(0.5, 0, 0.2, 1);
+    --ease-spring: cubic-bezier(0.34, 1.36, 0.64, 1);
+
+    /* ------------------------------------------------------------------
+       Layout
+       ------------------------------------------------------------------ */
+    --rail-width: 264px;
+    --rail-width-collapsed: 72px;
+    --topbar-height: 64px;
+    --content-max: 1240px;
+    --tap-target: 44px;
+
+    /* ------------------------------------------------------------------
+       Z-index scale
+       ------------------------------------------------------------------ */
+    --z-base: 0;
+    --z-sticky: 10;
+    --z-rail: 20;
+    --z-topbar: 30;
+    --z-dropdown: 40;
+    --z-overlay: 50;
+    --z-toast: 60;
+  }
+
+  /* Forced-colors mode: let the OS palette drive, keep structure intact. */
+  @media (forced-colors: active) {
+    :root {
+      --accent: Highlight;
+      --border-hairline: CanvasText;
+      --border-strong: CanvasText;
+    }
+  }
+}

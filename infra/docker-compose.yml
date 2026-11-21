@@ -1,0 +1,98 @@
+name: laundry
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laundry}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-laundry}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laundry} -d ${POSTGRES_DB:-laundry}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: npm run db:migrate
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
+      SESSION_SECRET: ${SESSION_SECRET:?set in .env}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?set in .env}
+      WEB_ORIGIN: ${WEB_ORIGIN:-https://laundry.filippmiller.com}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-fake}
+      FISCAL_PROVIDER: ${FISCAL_PROVIDER:-stub}
+      PREVIEW_MODE: ${PREVIEW_MODE:-disabled}
+      PREVIEW_ACCESS_KEY: ${PREVIEW_ACCESS_KEY:-}
+      VROOM_URL: ${VROOM_URL:-}
+      LOG_LEVEL: warn
+      # Caddy (infra/Caddyfile) is the only hop in front of the API: without this the rate
+      # limiter sees the proxy's address and every client shares one budget.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    command: npm run start:api
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
+      WORKER_INTERVAL_MS: 30000
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: npm run worker
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,37 @@
+﻿id,flow,roles,status
+F01,Economy building pickup → partner wash → QC → shared delivery → close,customer; courier; partner; dispatcher; finance,NOT_RUN_CURRENT_HEAD
+F02,Protected jacket + Economy bag separated → itemized QC → combined return,customer; courier; partner; dispatcher,NOT_RUN_CURRENT_HEAD
+F03,Both +500 RUB illustrative exceptional trips → consent → feasible route → one invoice,customer; dispatcher; courier; finance,NOT_RUN_CURRENT_HEAD
+F04,Two concurrent customers compete for last pickup slot,customer; platform,NOT_RUN_CURRENT_HEAD
+F05,Reservation expires while payment pending; compensation void/refund,customer; finance; platform,NOT_RUN_CURRENT_HEAD
+F06,Client reschedules pickup and delivery; second new hold fails; old holds intact,customer; dispatcher,NOT_RUN_CURRENT_HEAD
+F07,Cancel after dispatch before handoff → remove courier stop + lawful refund,customer; dispatcher; courier; finance,NOT_RUN_CURRENT_HEAD
+F08,Cancelled order scanned later by offline courier → reject stale event,customer; courier; dispatcher,NOT_RUN_CURRENT_HEAD
+F09,Customer missing at door → proof → operator rebooks without false custody,courier; dispatcher; customer,NOT_RUN_CURRENT_HEAD
+F10,"Wrong seal at partner receipt → dispute pending, custody not transferred",courier; partner; dispatcher; support,NOT_RUN_CURRENT_HEAD
+F11,Protected garment mislabelled and moves to another customer's batch → block,partner; dispatcher; claims,NOT_RUN_CURRENT_HEAD
+F12,Partner weight adjustment accepted → revised invoice and processing,partner; customer; finance,NOT_RUN_CURRENT_HEAD
+F13,Partner adjustment declined → return without processing + refund decision,partner; customer; courier; dispatcher; finance,NOT_RUN_CURRENT_HEAD
+F14,QC failure → rewash → new ETA and notification → successful delivery,partner; dispatcher; courier; customer,NOT_RUN_CURRENT_HEAD
+F15,"Partner outage → reassign pending contracted orders, custody safe",partner; dispatcher; admin,NOT_RUN_CURRENT_HEAD
+F16,Item lost while other items ready → partial delivery → claim and compensation,partner; courier; customer; claims; finance,NOT_RUN_CURRENT_HEAD
+F17,Customer recipient unavailable → secure return + repeat delivery,courier; dispatcher; customer,NOT_RUN_CURRENT_HEAD
+F18,Customer reports missing item after closure → reopen claim + legal hold,customer; support; claims,NOT_RUN_CURRENT_HEAD
+F19,Phone/device revoked while courier offline → no unauthorized sync,courier; admin; platform,NOT_RUN_CURRENT_HEAD
+F20,Offline scan captured → browser reload → reconnect unordered → dedup/conflict,courier; platform,NOT_RUN_CURRENT_HEAD
+F21,"Partner B attempts partner A's manifest, evidence and finance dispute",partner; finance; security,NOT_RUN_CURRENT_HEAD
+F22,"Customer B attempts customer A's order, invoice, claim and media IDs",customer; security,NOT_RUN_CURRENT_HEAD
+F23,"Refund two different keys simultaneously, both full; only one granted",finance; platform,NOT_RUN_CURRENT_HEAD
+F24,Refund and chargeback cross at ledger posting; no double payout,finance; platform,NOT_RUN_CURRENT_HEAD
+F25,Payment webhook duplicate and out-of-order; fiscal still pending until provider ACK,finance; platform,NOT_RUN_CURRENT_HEAD
+F26,Partner disputes accrual and gets an approved credit note; history preserved,partner; finance,NOT_RUN_CURRENT_HEAD
+F27,Compensation proposed by support → dual-approved finance → fake settlement,support; finance; customer,NOT_RUN_CURRENT_HEAD
+F28,Data deletion request during active claim hold; lawful held data remains,customer; support; admin; privacy,NOT_RUN_CURRENT_HEAD
+F29,Admin revokes role and session mid-request; next mutation fails,admin; security; platform,NOT_RUN_CURRENT_HEAD
+F30,Two admins concurrently attempt to remove last active admin; lockout prevented,admin; security,NOT_RUN_CURRENT_HEAD
+F31,"Routing engine unavailable; manual plan with true data, no fictitious ETA",dispatcher; courier,NOT_RUN_CURRENT_HEAD
+F32,Large night/off-schedule request exceeds safe route capacity; no charge,customer; dispatcher; finance,NOT_RUN_CURRENT_HEAD
+F33,"Disaster recovery: migrate, pay(fake), claim, backup, destroy, restore, reconcile",platform; finance; support,NOT_RUN_CURRENT_HEAD
+F34,Two tenants share phone number; sessions/orders/media/ledger cannot cross,customer; admin; security,NOT_RUN_CURRENT_HEAD
+F35,Public guest tracking guesses wrong phone; no order existence or PII leak,guest; security,NOT_RUN_CURRENT_HEAD
+F36,"Realistic multi-house pickup load: route, partner capacity, SLA margin and returns",customer; courier; partner; dispatcher; finance,NOT_RUN_CURRENT_HEAD

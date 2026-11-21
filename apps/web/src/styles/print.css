@@ -1,0 +1,81 @@
+/* ==========================================================================
+   Print — Russian accounting documents go to paper in black on white
+   ========================================================================== */
+
+@layer print {
+  @media print {
+    .topbar,
+    .rail,
+    .rail-backdrop,
+    .tab-bar,
+    .footer,
+    .toast-region,
+    .no-print,
+    .page-header__actions,
+    .button-row {
+      display: none !important;
+    }
+
+    body {
+      background: #ffffff !important;
+      color: #000000;
+      font-size: 11pt;
+    }
+
+    .app-frame,
+    .app-main,
+    .workspace {
+      display: block !important;
+      inline-size: 100% !important;
+      max-inline-size: none !important;
+      padding: 0 !important;
+      margin: 0 !important;
+    }
+
+    .panel,
+    .card,
+    .panel-muted {
+      border: 1px solid #000000 !important;
+      box-shadow: none !important;
+      background: #ffffff !important;
+      break-inside: avoid;
+    }
+
+    .pill,
+    .badge {
+      border: 1px solid #000000 !important;
+      background: #ffffff !important;
+      color: #000000 !important;
+    }
+
+    table.clean-table th,
+    table.clean-table td {
+      border-block-end: 1px solid #000000 !important;
+    }
+
+    dialog.modal-dialog {
+      position: static !important;
+      border: 0 !important;
+      box-shadow: none !important;
+      max-block-size: none !important;
+      inline-size: 100% !important;
+      padding: 0 !important;
+    }
+
+    dialog.modal-dialog::backdrop {
+      display: none !important;
+    }
+
+    body:has(dialog.modal-dialog[open]) .app-frame *:not(dialog.modal-dialog[open]):not(:has(dialog.modal-dialog[open])):not(dialog.modal-dialog[open] *) {
+      display: none !important;
+    }
+
+    .dialog-body {
+      padding: 0 !important;
+    }
+
+    a[href]::after {
+      content: "";
+    }
+  }
+}
