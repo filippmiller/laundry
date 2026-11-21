@@ -39,7 +39,16 @@ export async function processPaymentInbox(
   const now = input.now ?? new Date();
   const leaseTimeoutMs = input.leaseTimeoutMs ?? PAYMENT_INBOX_LEASE_MS;
   const staleBefore = new Date(now.getTime() - leaseTimeoutMs);
-  const rows = await db.transaction(async tx => {
+  const { rows, reapedCount } = await db.transaction(async tx => {
+    const reaped = await tx.execute(sql`
+      UPDATE payment_events
+         SET state = 'failed',
+             error = COALESCE(error, 'STALE_LEASE_EXHAUSTED')
+       WHERE state = 'processing'
+         AND COALESCE(processed_at, received_at) <= ${staleBefore}
+         AND attempts >= ${MAX_ATTEMPTS}
+       RETURNING id
+    `);
     const claimed = await tx.execute(sql`
       UPDATE payment_events
          SET state = 'processing',
@@ -62,11 +71,14 @@ export async function processPaymentInbox(
       RETURNING id, organization_id AS "organizationId", event_type AS "eventType",
                 payment_intent_id AS "paymentIntentId", attempts
     `);
-    return claimed.rows as unknown as ClaimedEvent[];
+    return {
+      rows: claimed.rows as unknown as ClaimedEvent[],
+      reapedCount: (reaped.rows as unknown[]).length,
+    };
   });
 
   let processed = 0;
-  let failed = 0;
+  let failed = reapedCount;
 
   for (const row of rows) {
     try {
@@ -153,14 +165,23 @@ async function applyEvent(tx: Tx, eventType: string, intent: Intent) {
   }
 }
 
-/** Re-arms failed events with remaining attempts; used by the worker loop. */
-export async function requeueFailedPaymentEvents(db: Db, input: { limit?: number } = {}) {
+/** Re-arms failed events with remaining attempts (or exhausted rows when `includeExhausted: true`); used by the worker loop. */
+export async function requeueFailedPaymentEvents(
+  db: Db,
+  input: { limit?: number; includeExhausted?: boolean } = {},
+) {
   const limit = Math.min(input.limit ?? 50, 200);
+  const includeExhausted = Boolean(input.includeExhausted);
+  const attemptFilter = includeExhausted ? sql`` : sql`AND attempts < ${MAX_ATTEMPTS}`;
+  const attemptsSet = includeExhausted ? sql`, attempts = 0` : sql``;
   const rows = await db.execute(sql`
-    UPDATE payment_events SET state = 'received', error = NULL
+    UPDATE payment_events
+       SET state = 'received',
+           error = NULL
+           ${attemptsSet}
     WHERE id IN (
       SELECT id FROM payment_events
-      WHERE state = 'failed' AND attempts < ${MAX_ATTEMPTS}
+      WHERE state = 'failed' ${attemptFilter}
       ORDER BY received_at ASC
       LIMIT ${limit}
     )

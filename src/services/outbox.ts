@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { notifications, orders, outboxEvents } from "../db/schema.js";
+import { claims, notifications, orders, outboxEvents, paymentIntents, refunds } from "../db/schema.js";
 
 export const OUTBOX_MAX_ATTEMPTS = 5;
 export const OUTBOX_BACKOFF_BASE_MS = 5_000;
@@ -78,6 +78,36 @@ type ClaimedOutboxRow = {
   providerReceipt: string | null;
 };
 
+async function resolveOutboxOrderId(db: Db, row: ClaimedOutboxRow): Promise<string | null> {
+  if (row.aggregateType === "order") return row.aggregateId;
+  if (typeof row.payload?.orderId === "string" && row.payload.orderId.trim()) {
+    return row.payload.orderId;
+  }
+  if (row.aggregateType === "refund") {
+    const [refundRow] = await db.select({ orderId: paymentIntents.orderId })
+      .from(refunds)
+      .innerJoin(paymentIntents, eq(paymentIntents.id, refunds.paymentIntentId))
+      .where(and(
+        eq(refunds.id, row.aggregateId),
+        eq(refunds.organizationId, row.organizationId),
+        eq(paymentIntents.organizationId, row.organizationId),
+      ))
+      .limit(1);
+    return refundRow?.orderId ?? null;
+  }
+  if (row.aggregateType === "claim") {
+    const [claimRow] = await db.select({ orderId: claims.orderId })
+      .from(claims)
+      .where(and(
+        eq(claims.id, row.aggregateId),
+        eq(claims.organizationId, row.organizationId),
+      ))
+      .limit(1);
+    return claimRow?.orderId ?? null;
+  }
+  return null;
+}
+
 /**
  * Leased outbox drain: rows with `available_at <= now` are claimed with FOR UPDATE SKIP LOCKED
  * so concurrent workers never turn one domain event into two notifications. Each event tracks
@@ -111,7 +141,18 @@ export async function processOutbox(
   const deliver = input.deliver ?? defaultDeliver;
   const orgFilter = input.organizationId ? sql`AND organization_id = ${input.organizationId}` : sql``;
 
-  const rows = await db.transaction(async tx => {
+  const { rows, reapedCount } = await db.transaction(async tx => {
+    const reaped = await tx.execute(sql`
+      UPDATE outbox_events
+         SET state = 'dead_letter',
+             delivery_status = 'dead_letter',
+             error = COALESCE(error, 'STALE_LEASE_EXHAUSTED')
+       WHERE state = 'processing'
+         AND available_at <= ${staleBefore}
+         AND attempts >= ${maxAttempts}
+         ${orgFilter}
+       RETURNING id
+    `);
     const claimed = await tx.execute(sql`
       UPDATE outbox_events
          SET state = 'processing',
@@ -136,20 +177,21 @@ export async function processOutbox(
                 payload_json AS payload, aggregate_type AS "aggregateType", aggregate_id AS "aggregateId",
                 attempts, provider_receipt AS "providerReceipt"
     `);
-    return claimed.rows as unknown as ClaimedOutboxRow[];
+    return {
+      rows: claimed.rows as unknown as ClaimedOutboxRow[],
+      reapedCount: (reaped.rows as unknown[]).length,
+    };
   });
 
   let processed = 0;
   let failed = 0;
-  let deadLettered = 0;
+  let deadLettered = reapedCount;
 
   for (const row of rows) {
     try {
       const template = EVENT_TEMPLATES[row.eventType];
       if (template) {
-        const orderId = row.aggregateType === "order"
-          ? row.aggregateId
-          : typeof row.payload?.orderId === "string" ? row.payload.orderId : null;
+        const orderId = await resolveOutboxOrderId(db, row);
         if (!orderId) throw new Error("ORDER_UNRESOLVABLE");
         const [order] = await db.select({ customerId: orders.customerId }).from(orders).where(and(
           eq(orders.id, orderId),

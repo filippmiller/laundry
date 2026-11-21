@@ -134,6 +134,9 @@ type PaginatedBucket<T> = {
 type FinanceOverviewResponse = {
   invoices?: InvoiceItem[];
   intents?: PaymentIntentItem[];
+  intentsMeta?: { total: number; hasMore: boolean };
+  chargebacks?: PaymentIntentItem[];
+  chargebacksMeta?: { total: number; hasMore: boolean };
   refunds?: RefundItem[];
   partnerInvoices?: PartnerInvoiceItem[];
   pendingCompensations?: CompensationItem[];
@@ -657,6 +660,9 @@ export function FinanceWorkspace({
 
   const invoices = overview.invoices ?? [];
   const intents = overview.intents ?? [];
+  const intentsMeta = overview.intentsMeta;
+  const chargebacks = overview.chargebacks ?? [];
+  const chargebacksMeta = overview.chargebacksMeta;
   const partnerInvoices = overview.partnerInvoices ?? [];
   const visiblePayoutBucket = payoutTab === "active" ? payoutActiveBucket : payoutHistoryBucket;
   const visibleCreditNoteBucket = creditNoteTab === "active" ? creditNoteActiveBucket : creditNoteHistoryBucket;
@@ -821,6 +827,45 @@ export function FinanceWorkspace({
           </div>
         )}
 
+        <h4 style={{ marginBlock: "8px 10px" }}>
+          Оспариваемые платежи и чарджбэки ({chargebacksMeta?.total ?? chargebacks.length})
+        </h4>
+        {chargebacks.length === 0 ? (
+          <p className="muted" style={{ marginBlockEnd: 18 }}>Активных чарджбэков нет.</p>
+        ) : (
+          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>Идентификатор</th>
+                  <th>Сумма</th>
+                  <th>Статус</th>
+                  <th>Провайдер</th>
+                  <th>Создан</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chargebacks.map(cb => (
+                  <tr key={cb.id}>
+                    <td className="mono">{cb.id}</td>
+                    <td className="mono">{money(cb.amountKopeks)}</td>
+                    <td>
+                      <Badge tone="danger">{stateLabel(PAYMENT_STATE_LABELS, cb.state)}</Badge>
+                    </td>
+                    <td>{providerLabel(cb.provider)}</td>
+                    <td className="mono">{dt(cb.createdAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {chargebacksMeta?.hasMore && (
+              <p className="muted" style={{ marginBlockStart: 8 }}>
+                Показаны последние {chargebacks.length} из {chargebacksMeta.total}.
+              </p>
+            )}
+          </div>
+        )}
+
         <h4 style={{ marginBlock: "8px 10px" }}>Платёжные операции</h4>
         {intents.length === 0 ? (
           <p className="muted">Платёжные операции отсутствуют.</p>
@@ -869,6 +914,11 @@ export function FinanceWorkspace({
                 ))}
               </tbody>
             </table>
+            {intentsMeta?.hasMore && (
+              <p className="muted" style={{ marginBlockStart: 8 }}>
+                Показаны последние {intents.length} из {intentsMeta.total}.
+              </p>
+            )}
           </div>
         )}
       </section>

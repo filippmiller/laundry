@@ -449,7 +449,7 @@ export async function refundPayment(
     await tx.update(paymentIntents).set({ state: nextState }).where(eq(paymentIntents.id, intent.id));
     await appendEvent(tx, {
       principal, aggregateType: "refund", aggregateId: refund.id,
-      eventType: "payment.refunded", payload: { amountKopeks: input.amountKopeks, paymentIntentId: intent.id },
+      eventType: "payment.refunded", payload: { orderId: intent.orderId, amountKopeks: input.amountKopeks, paymentIntentId: intent.id },
       reason: input.reason,
     });
     return { refundId: refund.id, amountKopeks: input.amountKopeks, state: nextState };
@@ -844,6 +844,163 @@ export async function disputePartnerLine(
   });
 }
 
+export async function resolvePartnerDispute(
+  db: Db,
+  principal: Principal,
+  input: {
+    disputeId: string;
+    outcome: "upheld" | "rejected" | "partial";
+    creditKopeks?: number;
+    reason: string;
+    key: string;
+  },
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "finance:partner_dispute_resolve",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const [disputeRef] = await tx.select().from(partnerDisputes).where(and(
+      eq(partnerDisputes.id, input.disputeId),
+      eq(partnerDisputes.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!disputeRef) throw errors.notFound("partner dispute");
+    const [lineRef] = await tx.select().from(partnerInvoiceLines)
+      .where(eq(partnerInvoiceLines.id, disputeRef.invoiceLineId)).limit(1);
+    if (!lineRef) throw errors.notFound("invoice line");
+    const [invoice] = await tx.select().from(partnerInvoices).where(and(
+      eq(partnerInvoices.id, lineRef.invoiceId),
+      eq(partnerInvoices.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!invoice) throw errors.notFound("invoice");
+
+    // Lock order: `partners` FOR UPDATE -> `partner_disputes` FOR UPDATE so payout creation/approval
+    // and dispute resolution serialize cleanly on the partner's payable balance.
+    const lockedPartner = await tx.execute(sql`
+      SELECT id FROM partners
+      WHERE id = ${invoice.partnerId} AND organization_id = ${principal.organizationId}
+      FOR UPDATE
+    `);
+    if (!(lockedPartner.rows as unknown[]).length) throw errors.notFound("partner");
+    await tx.execute(sql`
+      SELECT id FROM partner_disputes
+      WHERE id = ${input.disputeId} AND organization_id = ${principal.organizationId}
+      FOR UPDATE
+    `);
+
+    const [dispute] = await tx.select().from(partnerDisputes).where(and(
+      eq(partnerDisputes.id, input.disputeId),
+      eq(partnerDisputes.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!dispute) throw errors.notFound("partner dispute");
+    if (dispute.state !== "open") {
+      throw new AppError("CONFLICT_VERSION", "DISPUTE_NOT_OPEN", { state: dispute.state });
+    }
+    const [line] = await tx.select().from(partnerInvoiceLines)
+      .where(eq(partnerInvoiceLines.id, dispute.invoiceLineId)).limit(1);
+    if (!line) throw errors.notFound("invoice line");
+    const [accrual] = await tx.select().from(partnerServiceAccruals).where(and(
+      eq(partnerServiceAccruals.id, line.accrualId),
+      eq(partnerServiceAccruals.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!accrual) throw errors.notFound("partner service accrual");
+
+    let nextDisputeState: "resolved" | "rejected";
+    let nextLineState: "accepted" | "credited";
+    let creditAmount = 0;
+    let offsetQuantity = 0;
+
+    if (input.outcome === "rejected") {
+      nextDisputeState = "rejected";
+      nextLineState = "accepted";
+    } else if (input.outcome === "upheld") {
+      if (line.amountKopeks <= 0) {
+        throw new AppError("VALIDATION_ERROR", "CREDIT_AMOUNT_INVALID", { lineAmountKopeks: line.amountKopeks });
+      }
+      nextDisputeState = "resolved";
+      nextLineState = "credited";
+      creditAmount = line.amountKopeks;
+      offsetQuantity = -accrual.quantity;
+    } else {
+      if (
+        typeof input.creditKopeks !== "number"
+        || !Number.isInteger(input.creditKopeks)
+        || input.creditKopeks <= 0
+        || input.creditKopeks >= line.amountKopeks
+      ) {
+        throw new AppError("VALIDATION_ERROR", "CREDIT_AMOUNT_INVALID", {
+          creditKopeks: input.creditKopeks,
+          lineAmountKopeks: line.amountKopeks,
+        });
+      }
+      nextDisputeState = "resolved";
+      nextLineState = "accepted";
+      creditAmount = input.creditKopeks;
+      offsetQuantity = 0;
+    }
+
+    await tx.update(partnerDisputes).set({ state: nextDisputeState }).where(eq(partnerDisputes.id, dispute.id));
+    await tx.update(partnerInvoiceLines).set({ state: nextLineState }).where(eq(partnerInvoiceLines.id, line.id));
+    await tx.update(partnerServiceAccruals).set({ disputed: false }).where(eq(partnerServiceAccruals.id, accrual.id));
+
+    let creditNoteId: string | null = null;
+    if (creditAmount > 0) {
+      // Mark offsetting accrual as `credited` so createPartnerInvoice never claims it again and
+      // double-reverses partner_payable when the draft credit note is approved.
+      await tx.insert(partnerServiceAccruals).values({
+        organizationId: principal.organizationId,
+        partnerId: accrual.partnerId,
+        orderLineId: accrual.orderLineId,
+        contractId: accrual.contractId,
+        contractPriceVersionId: accrual.contractPriceVersionId,
+        quantity: offsetQuantity,
+        amountKopeks: -creditAmount,
+        status: "credited",
+        disputed: false,
+      });
+      const [creditNote] = await tx.insert(partnerCreditNotes).values({
+        organizationId: principal.organizationId,
+        invoiceId: invoice.id,
+        originalLineId: line.id,
+        amountKopeks: creditAmount,
+        reason: input.reason,
+        state: "draft",
+      }).returning({ id: partnerCreditNotes.id });
+      creditNoteId = creditNote.id;
+    }
+
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "partner_dispute",
+      aggregateId: dispute.id,
+      eventType: "partner_dispute.resolved",
+      reason: input.reason,
+      payload: {
+        disputeId: dispute.id,
+        invoiceId: invoice.id,
+        lineId: line.id,
+        outcome: input.outcome,
+        creditKopeks: creditAmount,
+        creditNoteId,
+      },
+    });
+
+    return {
+      disputeId: dispute.id,
+      invoiceId: invoice.id,
+      lineId: line.id,
+      outcome: input.outcome,
+      state: nextDisputeState,
+      lineState: nextLineState,
+      creditKopeks: creditAmount,
+      creditNoteId,
+    };
+  });
+}
+
 export type FinanceQueueBucket = "active" | "history" | "all";
 
 type QueueCursor = {
@@ -1017,11 +1174,16 @@ export async function listPartnerCreditNotes(
   };
 }
 
+const CHARGEBACK_STATES = ["disputed", "chargeback_lost"] as const;
+
 export async function financeOverview(db: Db, principal: Principal) {
   assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
   const [
     invoices,
     intents,
+    [intentsCountRow],
+    chargebackRows,
+    [chargebacksCountRow],
     refundRows,
     partnerInvoiceRows,
     pendingCompensations,
@@ -1043,6 +1205,20 @@ export async function financeOverview(db: Db, principal: Principal) {
       .where(eq(paymentIntents.organizationId, principal.organizationId))
       .orderBy(desc(paymentIntents.createdAt))
       .limit(50),
+    db.select({ count: sql<number>`count(*)::int` }).from(paymentIntents)
+      .where(eq(paymentIntents.organizationId, principal.organizationId)),
+    db.select().from(paymentIntents)
+      .where(and(
+        eq(paymentIntents.organizationId, principal.organizationId),
+        inArray(paymentIntents.state, [...CHARGEBACK_STATES]),
+      ))
+      .orderBy(desc(paymentIntents.createdAt), desc(paymentIntents.id))
+      .limit(50),
+    db.select({ count: sql<number>`count(*)::int` }).from(paymentIntents)
+      .where(and(
+        eq(paymentIntents.organizationId, principal.organizationId),
+        inArray(paymentIntents.state, [...CHARGEBACK_STATES]),
+      )),
     db.select().from(refunds)
       .where(eq(refunds.organizationId, principal.organizationId))
       .orderBy(desc(refunds.createdAt))
@@ -1102,9 +1278,14 @@ export async function financeOverview(db: Db, principal: Principal) {
     listPartnerCreditNotes(db, principal, { bucket: "active", limit: 50 }),
     listPartnerCreditNotes(db, principal, { bucket: "history", limit: 50 }),
   ]);
+  const intentsTotal = Number(intentsCountRow?.count ?? intents.length);
+  const chargebacksTotal = Number(chargebacksCountRow?.count ?? chargebackRows.length);
   return {
     invoices,
     intents,
+    intentsMeta: { total: intentsTotal, hasMore: intentsTotal > intents.length },
+    chargebacks: chargebackRows,
+    chargebacksMeta: { total: chargebacksTotal, hasMore: chargebacksTotal > chargebackRows.length },
     refunds: refundRows,
     partnerInvoices: partnerInvoiceRows,
     pendingCompensations,

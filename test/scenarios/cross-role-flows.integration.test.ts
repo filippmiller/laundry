@@ -1489,7 +1489,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
     const [line] = await db.select().from(partnerInvoiceLines).where(eq(partnerInvoiceLines.invoiceId, invoiceId)).limit(1);
     expect(line).toBeDefined();
 
-    // Partner disputes line -> creates credit note -> finance approves credit note
+    // Partner disputes line -> finance resolves dispute (partial credit note) -> finance approves credit note
     const disputeRes = await app.inject({
       method: "POST",
       url: `/api/v1/finance/partner-invoice-lines/${line.id}/disputes`,
@@ -1497,24 +1497,58 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       payload: { reason: "Спор по тарифу обработки" },
     });
     expect(disputeRes.statusCode, disputeRes.body).toBe(200);
+    const { disputeId } = disputeRes.json() as { disputeId: string };
 
-    const [creditNote] = await db.insert(partnerCreditNotes).values({
-      organizationId: seed.organizationId,
-      invoiceId,
-      originalLineId: line.id,
-      amountKopeks: 20000,
-      reason: "Согласованная корректировка акта",
-      state: "draft",
-    }).returning();
+    const partialCreditKopeks = 20000;
+    const resolveRes = await app.inject({
+      method: "POST",
+      url: `/api/v1/finance/partner-disputes/${disputeId}/resolve`,
+      headers: cookieHeader(finance.cookie, { "idempotency-key": `res-disp-${randomUUID()}` }),
+      payload: {
+        outcome: "partial",
+        creditKopeks: partialCreditKopeks,
+        reason: "Согласованная корректировка акта",
+      },
+    });
+    expect(resolveRes.statusCode, resolveRes.body).toBe(200);
+    const resolvedBody = resolveRes.json() as {
+      disputeId: string;
+      state: string;
+      lineState: string;
+      creditKopeks: number;
+      creditNoteId: string;
+    };
+    expect(resolvedBody).toMatchObject({
+      disputeId,
+      state: "resolved",
+      lineState: "accepted",
+      creditKopeks: partialCreditKopeks,
+    });
+    expect(resolvedBody.creditNoteId).toBeTruthy();
 
     const approveCn = await app.inject({
       method: "POST",
-      url: `/api/v1/finance/partner-credit-notes/${creditNote.id}/approve`,
+      url: `/api/v1/finance/partner-credit-notes/${resolvedBody.creditNoteId}/approve`,
       headers: cookieHeader(finance.cookie, { "idempotency-key": `acn-${randomUUID()}` }),
       payload: {},
     });
     expect(approveCn.statusCode, approveCn.body).toBe(200);
     expect(approveCn.json()).toMatchObject({ state: "approved" });
+
+    // Remaining payable equals original line amount minus partial credit note
+    const expectedRemainingPayable = line.amountKopeks - partialCreditKopeks;
+    expect(expectedRemainingPayable).toBeGreaterThan(0);
+    const payoutRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/finance/partner-payouts",
+      headers: cookieHeader(finance.cookie, { "idempotency-key": `pay-rem-${randomUUID()}` }),
+      payload: {
+        partnerId,
+        amountKopeks: expectedRemainingPayable,
+        reference: "F26-REMAINING-PAYABLE",
+      },
+    });
+    expect(payoutRes.statusCode, payoutRes.body).toBe(200);
 
     await assertLedgerBalanced(db, seed.organizationId);
   });
