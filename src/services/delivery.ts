@@ -280,8 +280,8 @@ export async function assignDelivery(
       organizationId: principal.organizationId,
       shiftId: shift.id,
       kind: "delivery",
-      plannedStart: resolvedWindow.windowStart ?? shift.startsAt,
-      plannedEnd: resolvedWindow.windowEnd ?? shift.endsAt,
+      plannedStart: shift.startsAt,
+      plannedEnd: shift.endsAt,
     }).returning();
     const [stop] = await tx.insert(routeStops).values({
       organizationId: principal.organizationId,
