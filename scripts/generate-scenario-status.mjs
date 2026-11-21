@@ -178,17 +178,67 @@ function validateEvidenceEntry(id, entry) {
  * stale. Their previous claim is preserved, but it is never presented as the current
  * status: nothing in this wave re-executed them.
  */
-function readPreviousE2eRows() {
-  if (!fs.existsSync(PREVIOUS_CSV)) return new Map();
-  const lines = fs.readFileSync(PREVIOUS_CSV, "utf8").split(/\r?\n/).filter(line => line.trim());
-  if (lines.length < 2) return new Map();
-  const header = lines[0].split(",");
+/** Minimal RFC-4180 CSV parser preserving commas, escaped quotes, and newlines inside quoted cells. */
+export function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"') {
+        if (text[index + 1] === '"') {
+          cell += '"';
+          index += 1;
+          continue;
+        }
+        quoted = false;
+        continue;
+      }
+      cell += char;
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === ",") {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+    if (char === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    if (char === "\r") continue;
+    cell += char;
+  }
+  if (cell.length || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows.filter(r => r.some(c => c.trim().length > 0));
+}
+
+export function readPreviousE2eRows(csvPath = PREVIOUS_CSV) {
+  if (!fs.existsSync(csvPath)) return new Map();
+  const parsed = parseCsv(fs.readFileSync(csvPath, "utf8"));
+  if (parsed.length < 2) return new Map();
+  const header = parsed[0].map(cell => cell.trim());
   const rows = new Map();
-  for (const line of lines.slice(1)) {
-    const cells = line.split(",");
+  for (const cells of parsed.slice(1)) {
     const id = cells[0]?.trim();
     if (!id || !id.startsWith("E2E-")) continue;
-    const column = name => cells[header.indexOf(name)]?.trim() ?? "";
+    const column = name => {
+      const idx = header.indexOf(name);
+      return idx >= 0 ? (cells[idx]?.trim() ?? "") : "";
+    };
     rows.set(id, {
       title: column("title"),
       status: column("status"),

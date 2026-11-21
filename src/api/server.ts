@@ -26,7 +26,7 @@ import { decideClaim, getClaim, listClaimsPage, openClaim, reopenClaim } from ".
 import {
   approvePartnerCreditNote, approvePartnerPayout, capturePayment, createCustomerInvoice, createPartnerInvoice,
   createPartnerPayout, disputePartnerLine, handlePaymentWebhook, listPartnerCreditNotes, listPartnerPayouts,
-  orderFinance, partnerAccruals, processPendingRefunds, refundPayment, settleClaimCompensation,
+  orderFinance, partnerAccruals, processPendingRefunds, refundPayment, resolvePartnerDispute, settleClaimCompensation,
 } from "../services/finance.js";
 import { holdSlot, holdSlotPair, reconcileCapacity, releaseSlot } from "../domain/slot-reservation.js";
 import { MAX_DECLARED_ROWS, MAX_PICKED_QUANTITY } from "../../shared/garment-taxonomy.js";
@@ -955,7 +955,7 @@ export function buildApp(db: Db) {
   add({
     method: "POST", path: "/partner/orders/:id/adjustments", summary: "Propose price/technology change", tags: ["Partner"],
     params: idSchema,
-    body: z.object({ deltaKopeks: z.number().int(), reason: z.string().min(5), key: z.string().optional() }),
+    body: z.object({ deltaKopeks: z.number().int().positive(), reason: z.string().min(5), key: z.string().optional() }),
     handler: ctx => proposeAdjustment(db, ctx.principal, { orderId: ctx.params.id, ...ctx.body, key: idempotencyKey(ctx) }),
   });
   add({
@@ -1287,6 +1287,24 @@ export function buildApp(db: Db) {
     params: idSchema, body: z.object({ reason: z.string().min(5), key: z.string().optional() }),
     handler: ctx => disputePartnerLine(db, ctx.principal, {
       lineId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/finance/partner-disputes/:id/resolve", summary: "Resolve an open partner invoice line dispute", tags: ["Finance"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    body: z.object({
+      outcome: z.enum(["upheld", "rejected", "partial"]),
+      creditKopeks: z.number().int().positive().optional(),
+      reason: z.string().min(3).max(500),
+      key: z.string().min(1).optional(),
+    }),
+    handler: ctx => resolvePartnerDispute(db, ctx.principal, {
+      disputeId: ctx.params.id,
+      outcome: ctx.body.outcome,
+      creditKopeks: ctx.body.creditKopeks,
+      reason: ctx.body.reason,
+      key: ctx.body.key ?? idempotencyKey(ctx),
     }),
   });
   add({
