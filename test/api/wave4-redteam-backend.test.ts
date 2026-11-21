@@ -178,7 +178,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Red-Team Backend Remedia
       deviceId: f.deviceId,
       scannedType: "order" as const,
       scannedId: f.orderId,
-      capturedAt: "2026-12-01T10:30:00.000Z",
+      capturedAt: new Date().toISOString(),
       context: { stopId: f.stopId },
     };
     const scanEvent: ScanEventInput = {
@@ -287,7 +287,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Red-Team Backend Remedia
       containerId: container.id,
       orderId: newOrder.orderId,
       sealId: newSeal.id,
-      assignedAt: new Date("2026-12-01T09:30:00Z"),
+      assignedAt: new Date(Date.now() - 60_000),
       unassignedAt: null,
     });
 
@@ -297,7 +297,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Red-Team Backend Remedia
       deviceId: newOrder.deviceId,
       scannedType: "container" as const,
       scannedId: containerCode,
-      capturedAt: "2026-12-01T10:15:00.000Z",
+      capturedAt: new Date().toISOString(),
       context: { stopId: newOrder.stopId },
     };
     const res = await syncScanEvents(db, newOrder.courier, [{

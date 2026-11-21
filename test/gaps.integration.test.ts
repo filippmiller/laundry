@@ -8,7 +8,7 @@ import { and, inArray } from "drizzle-orm";
 import { makePrincipal, seedUser } from "./fixtures.js";
 import { seedFullOrder, seedPartner, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
 import { recordIntake, syncScanEvents } from "../src/services/intake.js";
-import { receiveHandoff, reportSealBroken, startInspection, startProcessing, recordQualityCheck } from "../src/services/partner.js";
+import { completeProcessing, receiveHandoff, reportSealBroken, startInspection, startProcessing, recordQualityCheck } from "../src/services/partner.js";
 import { arriveStop, assignDelivery, closeOrder, recordDeliveryAttempt } from "../src/services/delivery.js";
 import { ensureLedgerAccounts, postJournal } from "../src/services/finance.js";
 import { createQuote } from "../src/services/quotes.js";
@@ -132,7 +132,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
     const f = await intakeFixture();
     const eventBase = {
       clientEventId: randomUUID(), deviceId: f.deviceId, scannedType: "order" as const,
-      scannedId: f.orderId, capturedAt: "2026-12-01T10:00:00.000Z", context: {},
+      scannedId: f.orderId, capturedAt: new Date().toISOString(), context: {},
     };
     const event = { ...eventBase, payloadHash: canonicalScanHash(eventBase) };
     const results = await Promise.all([
@@ -167,6 +167,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-close" });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-close" });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: "complete-close" });
     await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: "qc-close" });
     const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-close" });
     await arriveStop(db, f.courier, { stopId: assigned.stopId, key: "arrive-close" });
@@ -190,6 +191,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Verification-loop gaps", () => 
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-proof" });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-proof" });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: "complete-proof" });
     await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: "qc-proof" });
     const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-proof" });
     await arriveStop(db, f.courier, { stopId: assigned.stopId, key: "arrive-proof" });

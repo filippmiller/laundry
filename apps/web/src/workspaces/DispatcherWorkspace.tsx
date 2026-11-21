@@ -7,7 +7,7 @@ import {
   RefreshCw,
   Truck,
 } from "lucide-react";
-import { api, dt } from "../api";
+import { ApiError, api, dt } from "../api";
 import {
   formatError,
   ORDER_STATE_LABELS,
@@ -21,7 +21,7 @@ import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
 import { DataTable, type DataTableColumn } from "../components/ui/DataTable";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Select } from "../components/ui/Field";
+import { Input, Select } from "../components/ui/Field";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Reveal, Stagger } from "../components/ui/Reveal";
 import { StatGrid, StatTile } from "../components/ui/StatTile";
@@ -239,10 +239,29 @@ export function DispatcherWorkspace({
 
   const [pickupOrderId, setPickupOrderId] = useState("");
   const [pickupShiftId, setPickupShiftId] = useState("");
+  const [pickupMismatchPrompt, setPickupMismatchPrompt] = useState(false);
+  const [pickupOverrideReason, setPickupOverrideReason] = useState("");
   const [partnerOrderId, setPartnerOrderId] = useState("");
   const [partnerId, setPartnerId] = useState("");
   const [deliveryOrderId, setDeliveryOrderId] = useState("");
   const [deliveryShiftId, setDeliveryShiftId] = useState("");
+  const [deliveryMismatchPrompt, setDeliveryMismatchPrompt] = useState(false);
+  const [deliveryOverrideReason, setDeliveryOverrideReason] = useState("");
+
+  function isShiftWindowMismatch(error: unknown): boolean {
+    return error instanceof ApiError
+      && (error.serverMessage === "SHIFT_WINDOW_MISMATCH" || error.code === "SHIFT_WINDOW_MISMATCH");
+  }
+
+  function formatDispatchError(error: unknown): string {
+    if (isShiftWindowMismatch(error)) {
+      return "Окно заказа не пересекается с выбранной сменой курьера. Выберите другую смену или укажите причину исключения.";
+    }
+    if (error instanceof ApiError && error.serverMessage === "OVERRIDE_REASON_REQUIRED") {
+      return "Укажите причину назначения вне окна смены (минимум 5 символов).";
+    }
+    return formatError(error);
+  }
 
   const fetchData = useCallback(async () => {
     setRefreshing(true);
@@ -340,18 +359,49 @@ export function DispatcherWorkspace({
     );
   }, [assignableDeliveryOrders]);
 
-  async function handleAssignPickup() {
+  useEffect(() => {
+    setPickupMismatchPrompt(false);
+    setPickupOverrideReason("");
+  }, [pickupOrderId, pickupShiftId]);
+
+  useEffect(() => {
+    setDeliveryMismatchPrompt(false);
+    setDeliveryOverrideReason("");
+  }, [deliveryOrderId, deliveryShiftId]);
+
+  async function handleAssignPickup(override = false) {
     if (!pickupOrderId || !pickupShiftId) return;
+    if (override && pickupOverrideReason.trim().length < 5) {
+      notify({ kind: "error", text: "Укажите причину назначения вне окна смены (минимум 5 символов)." });
+      return;
+    }
     setBusyAction("pickup");
     try {
       await api("/dispatch/pickups/assign", {
         method: "POST",
-        body: { orderId: pickupOrderId, shiftId: pickupShiftId },
+        body: {
+          orderId: pickupOrderId,
+          shiftId: pickupShiftId,
+          ...(override
+            ? {
+              overrideShiftWindowMismatch: true,
+              overrideReason: pickupOverrideReason.trim(),
+            }
+            : {}),
+        },
       });
-      notify({ kind: "ok", text: "Курьер назначен на забор" });
+      setPickupMismatchPrompt(false);
+      setPickupOverrideReason("");
+      notify({
+        kind: "ok",
+        text: override ? "Курьер назначен на забор с исключением по окну смены" : "Курьер назначен на забор",
+      });
       await fetchData();
     } catch (error) {
-      notify({ kind: "error", text: formatError(error) });
+      if (isShiftWindowMismatch(error)) {
+        setPickupMismatchPrompt(true);
+      }
+      notify({ kind: "error", text: formatDispatchError(error) });
     } finally {
       setBusyAction(null);
     }
@@ -374,18 +424,39 @@ export function DispatcherWorkspace({
     }
   }
 
-  async function handleAssignDelivery() {
+  async function handleAssignDelivery(override = false) {
     if (!deliveryOrderId || !deliveryShiftId) return;
+    if (override && deliveryOverrideReason.trim().length < 5) {
+      notify({ kind: "error", text: "Укажите причину назначения вне окна смены (минимум 5 символов)." });
+      return;
+    }
     setBusyAction("delivery");
     try {
       await api("/dispatch/deliveries", {
         method: "POST",
-        body: { orderId: deliveryOrderId, shiftId: deliveryShiftId },
+        body: {
+          orderId: deliveryOrderId,
+          shiftId: deliveryShiftId,
+          ...(override
+            ? {
+              overrideShiftWindowMismatch: true,
+              overrideReason: deliveryOverrideReason.trim(),
+            }
+            : {}),
+        },
       });
-      notify({ kind: "ok", text: "Курьер назначен на доставку" });
+      setDeliveryMismatchPrompt(false);
+      setDeliveryOverrideReason("");
+      notify({
+        kind: "ok",
+        text: override ? "Курьер назначен на доставку с исключением по окну смены" : "Курьер назначен на доставку",
+      });
       await fetchData();
     } catch (error) {
-      notify({ kind: "error", text: formatError(error) });
+      if (isShiftWindowMismatch(error)) {
+        setDeliveryMismatchPrompt(true);
+      }
+      notify({ kind: "error", text: formatDispatchError(error) });
     } finally {
       setBusyAction(null);
     }
@@ -516,6 +587,40 @@ export function DispatcherWorkspace({
               >
                 {busyAction === "pickup" ? "Назначаем…" : "Назначить на забор"}
               </Button>
+              {pickupMismatchPrompt && (
+                <div className="panel-muted stack">
+                  <div className="alert-banner">
+                    Слот забора не пересекается со сменой. Укажите причину для аудируемого исключения:
+                  </div>
+                  <Input
+                    label="Причина исключения (мин. 5 символов)"
+                    type="text"
+                    placeholder="Например, экстренный перенос рейса диспетчером"
+                    value={pickupOverrideReason}
+                    disabled={busyAction !== null}
+                    onChange={event => setPickupOverrideReason(event.target.value)}
+                  />
+                  <div className="button-row">
+                    <Button
+                      variant="ghost"
+                      disabled={busyAction !== null || pickupOverrideReason.trim().length < 5}
+                      onClick={() => void handleAssignPickup(true)}
+                    >
+                      Назначить с исключением
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        setPickupMismatchPrompt(false);
+                        setPickupOverrideReason("");
+                      }}
+                    >
+                      Отмена
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="stack">
@@ -606,6 +711,40 @@ export function DispatcherWorkspace({
               >
                 {busyAction === "delivery" ? "Назначаем…" : "Назначить доставку"}
               </Button>
+              {deliveryMismatchPrompt && (
+                <div className="panel-muted stack">
+                  <div className="alert-banner">
+                    Слот доставки не пересекается со сменой. Укажите причину для аудируемого исключения:
+                  </div>
+                  <Input
+                    label="Причина исключения (мин. 5 символов)"
+                    type="text"
+                    placeholder="Например, согласованная доставка вне окна смены"
+                    value={deliveryOverrideReason}
+                    disabled={busyAction !== null}
+                    onChange={event => setDeliveryOverrideReason(event.target.value)}
+                  />
+                  <div className="button-row">
+                    <Button
+                      variant="ghost"
+                      disabled={busyAction !== null || deliveryOverrideReason.trim().length < 5}
+                      onClick={() => void handleAssignDelivery(true)}
+                    >
+                      Назначить с исключением
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      disabled={busyAction !== null}
+                      onClick={() => {
+                        setDeliveryMismatchPrompt(false);
+                        setDeliveryOverrideReason("");
+                      }}
+                    >
+                      Отмена
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

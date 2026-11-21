@@ -8,7 +8,7 @@ import {
   paymentIntents, quotes, refunds, services, users,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
-import { assertCursorTimestamp, pgCursorTimestampSql } from "../core/cursor.js";
+import { assertCursorTimestamp, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
@@ -734,10 +734,14 @@ export async function createPartnerInvoice(  db: Db,
   }, async tx => {
     // The partner must belong to the caller's tenant: the body chooses which partner record the
     // invoice points at, and identity comes from the session, never from the request.
-    const [partner] = await tx.select({ id: partners.id }).from(partners).where(and(
-      eq(partners.id, input.partnerId), eq(partners.organizationId, principal.organizationId),
-    )).limit(1);
-    if (!partner) throw errors.notFound("partner");
+    // Acquire `partners` FOR UPDATE before claiming accruals so invoice creation serializes
+    // cleanly with dispute opening, dispute resolution, and partner payouts.
+    const lockedPartner = await tx.execute(sql`
+      SELECT id FROM partners
+      WHERE id = ${input.partnerId} AND organization_id = ${principal.organizationId}
+      FOR UPDATE
+    `);
+    if (!(lockedPartner.rows as unknown[]).length) throw errors.notFound("partner");
     // Claim the accruals with one conditional UPDATE. Two invoices built for the same period
     // must never bill the same work twice: the second transaction waits on the locked rows and
     // then re-evaluates the predicate, so it finds nothing left to claim. A contested accrual is
@@ -807,24 +811,67 @@ export async function disputePartnerLine(
     organizationId: principal.organizationId, scope: "finance:partner_dispute", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
   }, async tx => {
-    const [line] = await tx.select().from(partnerInvoiceLines).where(eq(partnerInvoiceLines.id, input.lineId)).limit(1);
-    if (!line) throw errors.notFound("invoice line");
+    const [lineRef] = await tx.select().from(partnerInvoiceLines).where(eq(partnerInvoiceLines.id, input.lineId)).limit(1);
+    if (!lineRef) throw errors.notFound("invoice line");
     const [invoice] = await tx.select().from(partnerInvoices).where(and(
-      eq(partnerInvoices.id, line.invoiceId), eq(partnerInvoices.organizationId, principal.organizationId),
+      eq(partnerInvoices.id, lineRef.invoiceId), eq(partnerInvoices.organizationId, principal.organizationId),
     )).limit(1);
     if (!invoice) throw errors.notFound("invoice");
     // A partner's finance user may only dispute invoices issued to that partner.
     if (hasRole(principal, "partner_finance") && !hasRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin)) {
       if (invoice.partnerId !== principal.partnerId) throw errors.notFound("invoice");
     }
-    // Serialize with createPartnerPayout / approvePartnerPayout using the same partners FOR UPDATE lock
-    // so a concurrent dispute cannot invalidate a partner's payable balance mid-approval.
+    // Canonical lock order: `partners` FOR UPDATE -> `partner_invoice_lines` FOR UPDATE
+    // so payout creation/approval, dispute opening, and dispute resolution serialize cleanly.
     const lockedPartner = await tx.execute(sql`
       SELECT id FROM partners
       WHERE id = ${invoice.partnerId} AND organization_id = ${principal.organizationId}
       FOR UPDATE
     `);
     if (!(lockedPartner.rows as unknown[]).length) throw errors.notFound("partner");
+    const lockedLine = await tx.execute(sql`
+      SELECT id FROM partner_invoice_lines
+      WHERE id = ${lineRef.id}
+      FOR UPDATE
+    `);
+    if (!(lockedLine.rows as unknown[]).length) throw errors.notFound("invoice line");
+
+    const [line] = await tx.select().from(partnerInvoiceLines).where(eq(partnerInvoiceLines.id, lineRef.id)).limit(1);
+    if (!line) throw errors.notFound("invoice line");
+
+    const [creditedRow] = await tx.select({ total: sum(partnerCreditNotes.amountKopeks) })
+      .from(partnerCreditNotes)
+      .where(and(
+        eq(partnerCreditNotes.organizationId, principal.organizationId),
+        eq(partnerCreditNotes.originalLineId, line.id),
+        sql`${partnerCreditNotes.state} <> 'rejected'`,
+      ));
+    const alreadyCreditedKopeks = Number(creditedRow?.total ?? 0);
+    const remainingCreditableKopeks = Math.max(0, line.amountKopeks - alreadyCreditedKopeks);
+    if (line.amountKopeks <= 0 || remainingCreditableKopeks <= 0) {
+      throw new AppError("CONFLICT_VERSION", "LINE_ALREADY_CREDITED", {
+        lineId: line.id,
+        lineAmountKopeks: line.amountKopeks,
+        alreadyCreditedKopeks,
+      });
+    }
+
+    const [existingOpenDispute] = await tx.select({ id: partnerDisputes.id, state: partnerDisputes.state })
+      .from(partnerDisputes)
+      .where(and(
+        eq(partnerDisputes.organizationId, principal.organizationId),
+        eq(partnerDisputes.invoiceLineId, line.id),
+        inArray(partnerDisputes.state, ["open", "investigating"]),
+      ))
+      .limit(1);
+    if (existingOpenDispute) {
+      throw new AppError("CONFLICT_VERSION", "DISPUTE_ALREADY_OPEN", {
+        lineId: line.id,
+        disputeId: existingOpenDispute.id,
+        state: existingOpenDispute.state,
+      });
+    }
+
     const [dispute] = await tx.insert(partnerDisputes).values({
       organizationId: principal.organizationId,
       invoiceLineId: line.id,
@@ -877,14 +924,21 @@ export async function resolvePartnerDispute(
     )).limit(1);
     if (!invoice) throw errors.notFound("invoice");
 
-    // Lock order: `partners` FOR UPDATE -> `partner_disputes` FOR UPDATE so payout creation/approval
-    // and dispute resolution serialize cleanly on the partner's payable balance.
+    // Canonical lock order: `partners` FOR UPDATE -> `partner_invoice_lines` FOR UPDATE ->
+    // `partner_disputes` FOR UPDATE so payout creation/approval, dispute opening, and dispute
+    // resolution serialize cleanly on the partner's payable balance and line credit cap.
     const lockedPartner = await tx.execute(sql`
       SELECT id FROM partners
       WHERE id = ${invoice.partnerId} AND organization_id = ${principal.organizationId}
       FOR UPDATE
     `);
     if (!(lockedPartner.rows as unknown[]).length) throw errors.notFound("partner");
+    const lockedLine = await tx.execute(sql`
+      SELECT id FROM partner_invoice_lines
+      WHERE id = ${lineRef.id}
+      FOR UPDATE
+    `);
+    if (!(lockedLine.rows as unknown[]).length) throw errors.notFound("invoice line");
     await tx.execute(sql`
       SELECT id FROM partner_disputes
       WHERE id = ${input.disputeId} AND organization_id = ${principal.organizationId}
@@ -896,7 +950,7 @@ export async function resolvePartnerDispute(
       eq(partnerDisputes.organizationId, principal.organizationId),
     )).limit(1);
     if (!dispute) throw errors.notFound("partner dispute");
-    if (dispute.state !== "open") {
+    if (!["open", "investigating"].includes(dispute.state)) {
       throw new AppError("CONFLICT_VERSION", "DISPUTE_NOT_OPEN", { state: dispute.state });
     }
     const [line] = await tx.select().from(partnerInvoiceLines)
@@ -908,43 +962,59 @@ export async function resolvePartnerDispute(
     )).limit(1);
     if (!accrual) throw errors.notFound("partner service accrual");
 
+    const [creditedRow] = await tx.select({ total: sum(partnerCreditNotes.amountKopeks) })
+      .from(partnerCreditNotes)
+      .where(and(
+        eq(partnerCreditNotes.organizationId, principal.organizationId),
+        eq(partnerCreditNotes.originalLineId, line.id),
+        sql`${partnerCreditNotes.state} <> 'rejected'`,
+      ));
+    const alreadyCreditedKopeks = Number(creditedRow?.total ?? 0);
+    const remainingCreditableKopeks = Math.max(0, line.amountKopeks - alreadyCreditedKopeks);
+
     let nextDisputeState: "resolved" | "rejected";
-    let nextLineState: "accepted" | "credited";
     let creditAmount = 0;
     let offsetQuantity = 0;
 
     if (input.outcome === "rejected") {
       nextDisputeState = "rejected";
-      nextLineState = "accepted";
     } else if (input.outcome === "upheld") {
-      if (line.amountKopeks <= 0) {
-        throw new AppError("VALIDATION_ERROR", "CREDIT_AMOUNT_INVALID", { lineAmountKopeks: line.amountKopeks });
+      if (remainingCreditableKopeks <= 0) {
+        throw new AppError("CONFLICT_VERSION", "LINE_ALREADY_CREDITED", {
+          lineId: line.id,
+          lineAmountKopeks: line.amountKopeks,
+          alreadyCreditedKopeks,
+        });
       }
       nextDisputeState = "resolved";
-      nextLineState = "credited";
-      creditAmount = line.amountKopeks;
-      offsetQuantity = -accrual.quantity;
+      creditAmount = remainingCreditableKopeks;
+      offsetQuantity = alreadyCreditedKopeks === 0 ? -accrual.quantity : 0;
     } else {
+      if (remainingCreditableKopeks <= 0) {
+        throw new AppError("CONFLICT_VERSION", "LINE_ALREADY_CREDITED", {
+          lineId: line.id,
+          lineAmountKopeks: line.amountKopeks,
+          alreadyCreditedKopeks,
+        });
+      }
       if (
         typeof input.creditKopeks !== "number"
         || !Number.isInteger(input.creditKopeks)
         || input.creditKopeks <= 0
-        || input.creditKopeks >= line.amountKopeks
+        || input.creditKopeks >= remainingCreditableKopeks
       ) {
         throw new AppError("VALIDATION_ERROR", "CREDIT_AMOUNT_INVALID", {
           creditKopeks: input.creditKopeks,
           lineAmountKopeks: line.amountKopeks,
+          remainingCreditableKopeks,
         });
       }
       nextDisputeState = "resolved";
-      nextLineState = "accepted";
       creditAmount = input.creditKopeks;
       offsetQuantity = 0;
     }
 
     await tx.update(partnerDisputes).set({ state: nextDisputeState }).where(eq(partnerDisputes.id, dispute.id));
-    await tx.update(partnerInvoiceLines).set({ state: nextLineState }).where(eq(partnerInvoiceLines.id, line.id));
-    await tx.update(partnerServiceAccruals).set({ disputed: false }).where(eq(partnerServiceAccruals.id, accrual.id));
 
     let creditNoteId: string | null = null;
     if (creditAmount > 0) {
@@ -965,12 +1035,31 @@ export async function resolvePartnerDispute(
         organizationId: principal.organizationId,
         invoiceId: invoice.id,
         originalLineId: line.id,
+        disputeId: dispute.id,
         amountKopeks: creditAmount,
         reason: input.reason,
         state: "draft",
       }).returning({ id: partnerCreditNotes.id });
       creditNoteId = creditNote.id;
     }
+
+    const [otherOpenDispute] = await tx.select({ id: partnerDisputes.id })
+      .from(partnerDisputes)
+      .where(and(
+        eq(partnerDisputes.organizationId, principal.organizationId),
+        eq(partnerDisputes.invoiceLineId, line.id),
+        inArray(partnerDisputes.state, ["open", "investigating"]),
+        sql`${partnerDisputes.id} <> ${dispute.id}`,
+      ))
+      .limit(1);
+    const hasOtherOpenDispute = Boolean(otherOpenDispute);
+    const nextRemaining = remainingCreditableKopeks - creditAmount;
+    const nextLineState = hasOtherOpenDispute
+      ? "disputed"
+      : (nextRemaining === 0 ? "credited" : "accepted");
+
+    await tx.update(partnerInvoiceLines).set({ state: nextLineState }).where(eq(partnerInvoiceLines.id, line.id));
+    await tx.update(partnerServiceAccruals).set({ disputed: hasOtherOpenDispute }).where(eq(partnerServiceAccruals.id, accrual.id));
 
     await appendEvent(tx, {
       principal,
@@ -1176,14 +1265,101 @@ export async function listPartnerCreditNotes(
 
 const CHARGEBACK_STATES = ["disputed", "chargeback_lost"] as const;
 
+export type ChargebackStateFilter = "all" | "disputed" | "chargeback_lost";
+
+export async function listChargebacks(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number; cursor?: string; q?: string; state?: ChargebackStateFilter } = {},
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 100);
+  const parsedCursor = input.cursor ? decodeQueueCursor(input.cursor) : null;
+  const stateFilter: ChargebackStateFilter = input.state ?? "all";
+  if (!["all", "disputed", "chargeback_lost"].includes(stateFilter)) {
+    throw new AppError("VALIDATION_ERROR", "INVALID_STATE", { state: stateFilter });
+  }
+  const trimmedQ = input.q?.trim();
+  const likePattern = trimmedQ ? `%${escapeLikePattern(trimmedQ)}%` : null;
+
+  const baseWhere = and(
+    eq(paymentIntents.organizationId, principal.organizationId),
+    stateFilter === "all"
+      ? inArray(paymentIntents.state, [...CHARGEBACK_STATES])
+      : eq(paymentIntents.state, stateFilter),
+    likePattern
+      ? or(
+        sql`${paymentIntents.id}::text ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${paymentIntents.orderId}::text ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${orders.publicNumber} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`COALESCE(${paymentIntents.providerIntentId}, '') ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${paymentIntents.provider} ILIKE ${likePattern} ESCAPE '\\'`,
+      )
+      : undefined,
+  );
+
+  const pageWhere = and(
+    baseWhere,
+    parsedCursor
+      ? sql`(${paymentIntents.createdAt}, ${paymentIntents.id}) < (${parsedCursor.createdAt}::timestamptz, ${parsedCursor.id})`
+      : undefined,
+  );
+
+  const [rows, [countRow]] = await Promise.all([
+    db.select({
+      row: {
+        id: paymentIntents.id,
+        organizationId: paymentIntents.organizationId,
+        orderId: paymentIntents.orderId,
+        orderPublicNumber: orders.publicNumber,
+        provider: paymentIntents.provider,
+        providerIntentId: paymentIntents.providerIntentId,
+        amountKopeks: paymentIntents.amountKopeks,
+        state: paymentIntents.state,
+        idempotencyKey: paymentIntents.idempotencyKey,
+        createdAt: paymentIntents.createdAt,
+      },
+      cursorTs: pgCursorTimestampSql(paymentIntents.createdAt),
+    })
+      .from(paymentIntents)
+      .innerJoin(orders, and(
+        eq(orders.id, paymentIntents.orderId),
+        eq(orders.organizationId, paymentIntents.organizationId),
+      ))
+      .where(pageWhere)
+      .orderBy(desc(paymentIntents.createdAt), desc(paymentIntents.id))
+      .limit(limit + 1),
+    db.select({ count: sql<number>`count(*)::int` })
+      .from(paymentIntents)
+      .innerJoin(orders, and(
+        eq(orders.id, paymentIntents.orderId),
+        eq(orders.organizationId, paymentIntents.organizationId),
+      ))
+      .where(baseWhere),
+  ]);
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last
+    ? encodeQueueCursor({ createdAt: last.cursorTs, id: last.row.id })
+    : null;
+
+  return {
+    items: pageRows.map(entry => entry.row),
+    nextCursor,
+    hasMore,
+    totalCount: Number(countRow?.count ?? 0),
+  };
+}
+
 export async function financeOverview(db: Db, principal: Principal) {
   assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
   const [
     invoices,
     intents,
     [intentsCountRow],
-    chargebackRows,
-    [chargebacksCountRow],
+    chargebacksPage,
     refundRows,
     partnerInvoiceRows,
     pendingCompensations,
@@ -1207,18 +1383,7 @@ export async function financeOverview(db: Db, principal: Principal) {
       .limit(50),
     db.select({ count: sql<number>`count(*)::int` }).from(paymentIntents)
       .where(eq(paymentIntents.organizationId, principal.organizationId)),
-    db.select().from(paymentIntents)
-      .where(and(
-        eq(paymentIntents.organizationId, principal.organizationId),
-        inArray(paymentIntents.state, [...CHARGEBACK_STATES]),
-      ))
-      .orderBy(desc(paymentIntents.createdAt), desc(paymentIntents.id))
-      .limit(50),
-    db.select({ count: sql<number>`count(*)::int` }).from(paymentIntents)
-      .where(and(
-        eq(paymentIntents.organizationId, principal.organizationId),
-        inArray(paymentIntents.state, [...CHARGEBACK_STATES]),
-      )),
+    listChargebacks(db, principal, { limit: 50 }),
     db.select().from(refunds)
       .where(eq(refunds.organizationId, principal.organizationId))
       .orderBy(desc(refunds.createdAt))
@@ -1279,13 +1444,13 @@ export async function financeOverview(db: Db, principal: Principal) {
     listPartnerCreditNotes(db, principal, { bucket: "history", limit: 50 }),
   ]);
   const intentsTotal = Number(intentsCountRow?.count ?? intents.length);
-  const chargebacksTotal = Number(chargebacksCountRow?.count ?? chargebackRows.length);
   return {
     invoices,
     intents,
     intentsMeta: { total: intentsTotal, hasMore: intentsTotal > intents.length },
-    chargebacks: chargebackRows,
-    chargebacksMeta: { total: chargebacksTotal, hasMore: chargebacksTotal > chargebackRows.length },
+    chargebacks: chargebacksPage.items,
+    chargebacksMeta: { total: chargebacksPage.totalCount, hasMore: chargebacksPage.hasMore },
+    chargebacksPage,
     refunds: refundRows,
     partnerInvoices: partnerInvoiceRows,
     pendingCompensations,

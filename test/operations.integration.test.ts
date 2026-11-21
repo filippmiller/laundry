@@ -7,7 +7,7 @@ import { makePrincipal, seedUser } from "./fixtures.js";
 import { seedFullOrder, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
 import { canonicalScanHash } from "../src/core/scan-hash.js";import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import {
-  decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
+  completeProcessing, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
 } from "../src/services/partner.js";
 import { arriveStop, assignDelivery, recordDeliveryAttempt } from "../src/services/delivery.js";
 import { openClaim, decideClaim } from "../src/services/claims.js";
@@ -49,7 +49,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
       deviceId: f.deviceId,
       scannedType: "order" as const,
       scannedId: f.orderId,
-      capturedAt: "2026-12-01T10:00:00.000Z",
+      capturedAt: new Date().toISOString(),
       context: { stopId: f.stopId },
     };
     const scan = { ...scanBase, payloadHash: canonicalScanHash(scanBase) };
@@ -98,6 +98,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-d03" });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-d03" });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: "complete-d03" });
     const qc = await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: "qc-d03" });
     expect(qc.state).toBe("ready");
 

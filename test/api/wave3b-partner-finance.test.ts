@@ -13,7 +13,7 @@ import { seedFullOrder, seedPartner, seedPartnerForOrder, seedSeal } from "../op
 import { login, seedOrder, uniquePhone } from "./_fixtures.js";
 import { recordIntake } from "../../src/services/intake.js";
 import {
-  receiveHandoff, recordQualityCheck, returnUnprocessedOrder,
+  completeProcessing, receiveHandoff, recordQualityCheck, returnUnprocessedOrder,
   startInspection, startProcessing,
 } from "../../src/services/partner.js";
 import {
@@ -286,6 +286,10 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 3B partner, finance & orde
       orderId: f.orderId,
       processType: "wash_40c",
       key: `proc-qc-${rid()}`,
+    });
+    await completeProcessing(db, partner.principal, {
+      orderId: f.orderId,
+      key: `comp-qc-${rid()}`,
     });
 
     const qc = await recordQualityCheck(db, partner.principal, {

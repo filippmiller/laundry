@@ -16,7 +16,7 @@ import { seedEvidence, seedFullOrder, seedPartnerForOrder, seedSeal } from "./op
 import { canonicalScanHash } from "../src/core/scan-hash.js";
 import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import {
-  decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck,
+  completeProcessing, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck,
   returnUnprocessedOrder, startInspection, startProcessing,
 } from "../src/services/partner.js";
 import {
@@ -417,6 +417,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4B Backend Red-Team Remedi
 
     await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-${rid()}` });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `proc-${rid()}` });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `comp-${rid()}` });
     await recordQualityCheck(db, partner.principal, {
       orderId: f.orderId,
       results: [
@@ -486,6 +487,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4B Backend Red-Team Remedi
     // Progress to ready and test delivery reassignment stop version bump
     await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-${rid()}` });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `proc-${rid()}` });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `comp-${rid()}` });
     await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: `qc-${rid()}` });
 
     const del1 = await assignDelivery(db, f.dispatcher, {

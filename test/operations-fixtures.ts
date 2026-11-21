@@ -65,8 +65,8 @@ export async function seedFullOrder(
     organizationId: seed.organizationId,
     courierId,
     state: "active",
-    startsAt: new Date("2026-12-01T09:00:00Z"),
-    endsAt: new Date("2026-12-01T18:00:00Z"),
+    startsAt: new Date("2026-12-01T08:00:00Z"),
+    endsAt: new Date("2026-12-02T20:00:00Z"),
   }).returning();
   const [route] = await db.insert(routes).values({
     organizationId: seed.organizationId,

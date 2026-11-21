@@ -186,4 +186,55 @@ describe("PR3 scenario status register", () => {
     expect(ids.filter(id => /^F\d\d$/.test(id)).length).toBe(36);
     expect(new Set(ids).size).toBe(ids.length);
   });
+
+  it("enforces semantic integrity on E2E-001..012 rows in the execution CSV", () => {
+    const csvPath = path.resolve(repoRoot, "docs/coverage/PR3_SCENARIO_EXECUTION.csv");
+    const lines = parseCsv(fs.readFileSync(csvPath, "utf8")).filter(row => row.some(cell => cell.trim().length));
+    const header = lines[0];
+    const rows = lines.slice(1);
+    const column = (row: string[], name: string) => row[header.indexOf(name)] ?? "";
+
+    const allowedPreviousStatuses = new Set(["PASS", "PARTIAL", "NOT_RUN", "FAIL", "BLOCKED", "UNKNOWN"]);
+    const disallowedRoleStatusTokens = new Set(["PASS", "FAIL", "PARTIAL", "NOT_RUN", "BLOCKED"]);
+
+    const e2eRows = rows.filter(row => column(row, "id").startsWith("E2E-"));
+    expect(e2eRows.length).toBe(12);
+
+    const byId = new Map<string, string[]>();
+    for (const row of e2eRows) {
+      const id = column(row, "id");
+      byId.set(id, row);
+
+      const previousWaveStatus = column(row, "previous_wave_status");
+      expect(allowedPreviousStatuses.has(previousWaveStatus), `${id} previous_wave_status -> ${previousWaveStatus}`).toBe(true);
+
+      const previousWaveCommit = column(row, "previous_wave_commit");
+      expect(
+        previousWaveCommit === "UNKNOWN" || /^[0-9a-f]{40}$/.test(previousWaveCommit),
+        `${id} previous_wave_commit -> ${previousWaveCommit}`,
+      ).toBe(true);
+
+      const roles = column(row, "roles").trim();
+      expect(roles.length, `${id} roles must not be empty`).toBeGreaterThan(0);
+      expect(disallowedRoleStatusTokens.has(roles), `${id} roles must not be a status token (${roles})`).toBe(false);
+
+      const browserEvidence = column(row, "browser_evidence").trim();
+      if (browserEvidence !== "None") {
+        const pointers = browserEvidence.split(";").map(p => p.trim()).filter(Boolean);
+        expect(pointers.length, `${id} browser_evidence must not be empty`).toBeGreaterThan(0);
+        for (const pointer of pointers) {
+          expect(pointer, `${id} browser_evidence "${pointer}" must be a valid path/pointer`).toMatch(/[/\\]|\.[a-z0-9]+$/i);
+          expect(fs.existsSync(path.resolve(repoRoot, pointer)), `${id} browser_evidence -> ${pointer}`).toBe(true);
+        }
+      }
+    }
+
+    const e2e009 = byId.get("E2E-009");
+    expect(e2e009).toBeDefined();
+    expect(column(e2e009!, "title")).toBe("Lost garment, partial delivery");
+
+    const e2e012 = byId.get("E2E-012");
+    expect(e2e012).toBeDefined();
+    expect(column(e2e012!, "evidence")).toBe("Custody, inspection, processing and finance dispute scoped by partner");
+  });
 });

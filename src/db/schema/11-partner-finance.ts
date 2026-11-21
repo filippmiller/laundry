@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { pgTable, uuid, text, bigint, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { organizations, partners, users } from "./01-identity.js";
 import { partnerServiceAccruals } from "./08-processing.js";
@@ -31,13 +32,19 @@ export const partnerDisputes = pgTable("partner_disputes", {
   reason: text("reason").notNull(),
   state: disputeState("state").notNull().default("open"),
   openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
-}, t => [index("partner_disputes_line_idx").on(t.invoiceLineId)]);
+}, t => [
+  index("partner_disputes_line_idx").on(t.invoiceLineId),
+  uniqueIndex("partner_disputes_one_open_per_line_unique")
+    .on(t.invoiceLineId)
+    .where(sql`${t.state} IN ('open', 'investigating')`),
+]);
 
 export const partnerCreditNotes = pgTable("partner_credit_notes", {
   id: uuid("id").primaryKey().defaultRandom(),
   organizationId: uuid("organization_id").notNull().references(() => organizations.id),
   invoiceId: uuid("invoice_id").notNull().references(() => partnerInvoices.id),
   originalLineId: uuid("original_line_id").references(() => partnerInvoiceLines.id),
+  disputeId: uuid("dispute_id").references(() => partnerDisputes.id),
   amountKopeks: bigint("amount_kopeks", { mode: "number" }).notNull(),
   reason: text("reason").notNull(),
   state: text("state").notNull().default("draft"),

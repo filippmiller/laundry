@@ -190,6 +190,13 @@
       "when": 1795190000000,
       "tag": "0026_evidence_legal_hold_tombstone_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1795250589726,
+      "tag": "0027_closure_remediation",
+      "breakpoints": true
     }
   ]
 }

@@ -81,6 +81,7 @@ type PartnerOrderDto = {
   containers: ContainerDto[];
   garments: GarmentDto[];
   adjustments: AdjustmentDto[];
+  hasActiveProcessingBatch?: boolean;
   hasUncheckedProcessing?: boolean;
 };
 
@@ -163,6 +164,9 @@ const PROCESS_OPTIONS = [
 /** Status of a single accrual line as the partner settlement sees it. */
 const ACCRUAL_LINE_STATE_LABELS: Record<string, string> = {
   estimated: "Оценено",
+  pending: "Начислено",
+  accepted: "Принято",
+  credited: "Сторнировано",
   matched: "Сверено",
   discrepancy: "Расхождение",
   disputed: "Оспорено",
@@ -577,6 +581,19 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
     );
   };
 
+  const handleCompleteProcessing = async () => {
+    if (!selectedOrder) return;
+    await runAction(
+      "complete_processing",
+      () =>
+        api(`/partner/orders/${selectedOrder.orderId}/complete-processing`, {
+          method: "POST",
+          body: {},
+        }),
+      `Обработка заказа ${selectedOrder.publicNumber} завершена — можно проводить ОТК`,
+    );
+  };
+
   // Stage 3 handlers
   const handleQcChange = (garmentId: string, patch: Partial<QcDraft>) => {
     setQcDrafts((prev) => {
@@ -730,11 +747,18 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
       header: "Действие",
       render: (line) => {
         const isDisputed = line.disputed === true || line.status === "disputed";
+        const isCredited = line.status === "credited";
         return (
           <Button
             variant="ghost"
-            disabled={isBusy || isDisputed || !canDisputeLines}
-            title={!canDisputeLines ? "Доступно роли «Финансы партнёра»" : undefined}
+            disabled={isBusy || isDisputed || isCredited || !canDisputeLines}
+            title={
+              !canDisputeLines
+                ? "Доступно роли «Финансы партнёра»"
+                : isCredited
+                  ? "Строка полностью сторнирована"
+                  : undefined
+            }
             onClick={() => {
               setDisputeLine({ id: line.id, label: invoiceLineLabel(line) });
               setDisputeReason("");
@@ -1137,7 +1161,25 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                     }
                   />
 
-                  {!selectedOrder.hasUncheckedProcessing && (
+                  {!selectedOrder.hasUncheckedProcessing && selectedOrder.hasActiveProcessingBatch && (
+                    <div className="panel-muted stack">
+                      <div className="alert-banner">
+                        Производственная партия в работе. Завершите обработку перед проведением ОТК.
+                      </div>
+                      <div className="button-row">
+                        <Button
+                          variant="primary"
+                          disabled={isBusy}
+                          onClick={() => void handleCompleteProcessing()}
+                          leadingIcon={<CheckCircle2 size={16} aria-hidden="true" />}
+                        >
+                          Завершить обработку (к ОТК)
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {!selectedOrder.hasUncheckedProcessing && !selectedOrder.hasActiveProcessingBatch && (
                     <div className="panel-muted stack">
                       <div className="alert-banner">
                         Перед проведением ОТК запустите производственную партию (после согласования доплаты или возврата на повторную обработку).

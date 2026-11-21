@@ -17,7 +17,7 @@ import { createOrder, scheduleOrder } from "../src/services/orders.js";
 import { holdSlot } from "../src/domain/slot-reservation.js";
 import { recordIntake } from "../src/services/intake.js";
 import {
-  receiveHandoff, recordQualityCheck, startInspection, startProcessing,
+  completeProcessing, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
 } from "../src/services/partner.js";
 import { openClaim } from "../src/services/claims.js";
 import { arriveStop, assignDelivery, recordDeliveryAttempt } from "../src/services/delivery.js";
@@ -511,6 +511,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PR3 P0/P1 security regressions"
       });
       await startInspection(db, partner.principal, { orderId: f.orderId, key: `inspect-${rid()}` });
       await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `batch-${rid()}` });
+      await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `complete-${rid()}` });
       const garmentIds = intake.garments.map(garment => garment.id);
       await recordQualityCheck(db, partner.principal, {
         orderId: f.orderId,
@@ -563,6 +564,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PR3 P0/P1 security regressions"
       });
       await startInspection(db, partner.principal, { orderId: f.orderId, key: `inspect-${rid()}` });
       await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `batch-${rid()}` });
+      await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `complete-${rid()}` });
       await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: `qc-${rid()}` });
       const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: `deliver-${rid()}` });
       await arriveStop(db, f.courier, { stopId: assigned.stopId, key: `arrive-${rid()}` });

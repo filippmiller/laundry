@@ -15,7 +15,6 @@ import {
   ledgerJournals,
   orders,
   partnerContracts,
-  partnerCreditNotes,
   partnerInvoiceLines,
   scanEvents,
   seals,
@@ -218,7 +217,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     });
     expect(shiftRes.statusCode).toBe(200);
     const { shiftId } = shiftRes.json() as { shiftId: string };
@@ -299,6 +298,13 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       payload: { orderId: booked.order.id, processType: "wash" },
     })).statusCode).toBe(200);
 
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/v1/partner/orders/${booked.order.id}/complete-processing`,
+      headers: cookieHeader(partner.cookie, { "idempotency-key": `cmp-${randomUUID()}` }),
+      payload: {},
+    })).statusCode).toBe(200);
+
     const qcRes = await app.inject({
       method: "POST",
       url: `/api/v1/partner/orders/${booked.order.id}/quality-check`,
@@ -377,7 +383,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
 
     const { stopId: pickupStopId } = (await app.inject({
@@ -449,6 +455,12 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       headers: cookieHeader(partner.cookie, { "idempotency-key": `bat-${randomUUID()}` }),
       payload: { orderId: booked.order.id, processType: "delicate" },
     });
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/v1/partner/orders/${booked.order.id}/complete-processing`,
+      headers: cookieHeader(partner.cookie, { "idempotency-key": `cmp-${randomUUID()}` }),
+      payload: {},
+    })).statusCode).toBe(200);
     const qcRes = await app.inject({
       method: "POST",
       url: `/api/v1/partner/orders/${booked.order.id}/quality-check`,
@@ -648,7 +660,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
 
     const { stopId } = (await app.inject({
@@ -722,7 +734,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
 
     const { stopId: stop1 } = (await app.inject({
@@ -798,7 +810,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
     const { stopId } = (await app.inject({
       method: "POST",
@@ -919,6 +931,13 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
     });
     expect(batchA1.statusCode, batchA1.body).toBe(200);
 
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/v1/partner/orders/${orderA.order.id}/complete-processing`,
+      headers: cookieHeader(partner.cookie, { "idempotency-key": `cmpA1-${randomUUID()}` }),
+      payload: {},
+    })).statusCode).toBe(200);
+
     const qcFail = await app.inject({
       method: "POST",
       url: `/api/v1/partner/orders/${orderA.order.id}/quality-check`,
@@ -935,6 +954,13 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       payload: { orderId: orderA.order.id, processType: "wash" },
     });
     expect(batchA2.statusCode, batchA2.body).toBe(200);
+
+    expect((await app.inject({
+      method: "POST",
+      url: `/api/v1/partner/orders/${orderA.order.id}/complete-processing`,
+      headers: cookieHeader(partner.cookie, { "idempotency-key": `cmpA2-${randomUUID()}` }),
+      payload: {},
+    })).statusCode).toBe(200);
 
     const qcPass = await app.inject({
       method: "POST",
@@ -1045,7 +1071,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
     const { stopId } = (await app.inject({
       method: "POST",
@@ -1161,7 +1187,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-f19-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     });
     expect(shiftRes.statusCode, shiftRes.body).toBe(200);
     const { shiftId } = shiftRes.json() as { shiftId: string };
@@ -1454,7 +1480,7 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       method: "POST",
       url: "/api/v1/courier/shifts",
       headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
-      payload: {},
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
     const { stopId } = (await app.inject({
       method: "POST",

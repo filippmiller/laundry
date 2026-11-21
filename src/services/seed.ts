@@ -186,7 +186,7 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
     await db.insert(courierShifts).values({
       organizationId: org.id, courierId: courierUser.id, state: "active",
       startsAt: new Date(Date.now() - 60 * 60 * 1000),
-      endsAt: new Date(Date.now() + 10 * 60 * 60 * 1000),
+      endsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     });
   }
   for (let index = 1; index <= 20; index++) {
@@ -264,6 +264,13 @@ async function seedBookForTenant(db: Db, summary: Awaited<ReturnType<typeof demo
 
 async function seedBookForExistingTenant(db: Db, organizationId: string) {
   await ensureDemoEconomics(db, organizationId);
+  const minEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await db.update(courierShifts).set({
+    endsAt: sql`GREATEST(${courierShifts.endsAt}, ${minEndsAt})`,
+  }).where(and(
+    eq(courierShifts.organizationId, organizationId),
+    eq(courierShifts.state, "active"),
+  ));
   const summary = await demoSummary(db, organizationId);
   const book = await seedBookForTenant(db, summary);
   return { ...summary, demoBook: book };

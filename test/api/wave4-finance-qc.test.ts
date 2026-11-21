@@ -13,7 +13,7 @@ import { seedFullOrder, seedPartner, seedPartnerForOrder, seedSeal } from "../op
 import { login, seedOrder, seedTenant, uniquePhone } from "./_fixtures.js";
 import { recordIntake } from "../../src/services/intake.js";
 import {
-  partnerWorkspace, receiveHandoff, recordQualityCheck, returnUnprocessedOrder,
+  completeProcessing, partnerWorkspace, receiveHandoff, recordQualityCheck, returnUnprocessedOrder,
   startInspection, startProcessing,
 } from "../../src/services/partner.js";
 import {
@@ -466,6 +466,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Track 2: Finance obligat
       const { f, partner } = await receiveEconomyOrder(1_000);
       await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-eco-${rid()}` });
       await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash_40c", key: `proc-eco-${rid()}` });
+      await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `comp-eco-${rid()}` });
 
       // Missing bagPassed MUST be rejected without inserting QC row or advancing to ready
       await expect(recordQualityCheck(db, partner.principal, {
@@ -494,6 +495,10 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Track 2: Finance obligat
         processType: "wash_40c",
         key: `proc-eco-rework-${rid()}`,
       });
+      await completeProcessing(db, partner.principal, {
+        orderId: f.orderId,
+        key: `comp-eco-rework-${rid()}`,
+      });
 
       // Explicit PASS after rework -> ready, preserves both QC history rows
       const passedQc = await recordQualityCheck(db, partner.principal, {
@@ -516,6 +521,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Track 2: Finance obligat
       const { f, partner } = await receiveEconomyOrder(1_000);
       await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-g-${rid()}` });
       await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash_40c", key: `proc-g-${rid()}` });
+      await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `comp-g-${rid()}` });
 
       const [g1, g2] = await db.insert(garments).values([
         { organizationId: f.organizationId, orderId: f.orderId, itemCode: `G1-${rid().slice(0, 8)}`, category: "shirt", description: "Рубашка 1" },

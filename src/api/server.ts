@@ -18,14 +18,14 @@ import { createQuote, getQuote } from "../services/quotes.js";
 import { cancelOrder, createOrder, getOrderTimeline, loadOrderView, repeatOrder, rescheduleOrder, scheduleOrder } from "../services/orders.js";
 import { checkCourierDeviceOwnership, recordIntake, registerCourierDevice, syncScanEvents } from "../services/intake.js";
 import {
-  assignOrderToPartner, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
+  assignOrderToPartner, completeProcessing, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, reportSealBroken,
   returnUnprocessedOrder, startInspection, startProcessing, partnerWorkspace,
 } from "../services/partner.js";
 import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierStops, recordDeliveryAttempt, startStop, dispatchOverview } from "../services/delivery.js";
 import { decideClaim, getClaim, listClaimsPage, openClaim, reopenClaim } from "../services/claims.js";
 import {
   approvePartnerCreditNote, approvePartnerPayout, capturePayment, createCustomerInvoice, createPartnerInvoice,
-  createPartnerPayout, disputePartnerLine, handlePaymentWebhook, listPartnerCreditNotes, listPartnerPayouts,
+  createPartnerPayout, disputePartnerLine, handlePaymentWebhook, listChargebacks, listPartnerCreditNotes, listPartnerPayouts,
   orderFinance, partnerAccruals, processPendingRefunds, refundPayment, resolvePartnerDispute, settleClaimCompensation,
 } from "../services/finance.js";
 import { holdSlot, holdSlotPair, reconcileCapacity, releaseSlot } from "../domain/slot-reservation.js";
@@ -979,6 +979,15 @@ export function buildApp(db: Db) {
     handler: ctx => startProcessing(db, ctx.principal, { ...ctx.body, key: idempotencyKey(ctx) }),
   });
   add({
+    method: "POST", path: "/partner/orders/:id/complete-processing", summary: "Complete processing batch before QC", tags: ["Partner"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.partner],
+    body: z.object({ batchId: z.string().uuid().optional(), notes: z.string().max(1000).optional(), key: z.string().optional() }).optional(),
+    handler: ctx => completeProcessing(db, ctx.principal, {
+      orderId: ctx.params.id, batchId: ctx.body?.batchId, notes: ctx.body?.notes, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
     method: "POST", path: "/partner/orders/:id/quality-check", summary: "QC, rewash or pack", tags: ["Partner"],
     params: idSchema,
     body: z.object({
@@ -1184,7 +1193,8 @@ export function buildApp(db: Db) {
       shiftId: z.uuid(),
       windowStart: z.iso.datetime().optional(),
       windowEnd: z.iso.datetime().optional(),
-      enforceShiftWindowOverlap: z.boolean().optional(),
+      overrideShiftWindowMismatch: z.boolean().optional(),
+      overrideReason: z.string().max(500).optional(),
       key: z.string().optional(),
     }),
     handler: ctx => assignPickup(db, ctx.principal, {
@@ -1192,7 +1202,8 @@ export function buildApp(db: Db) {
       shiftId: ctx.body.shiftId,
       windowStart: ctx.body.windowStart ? new Date(ctx.body.windowStart) : undefined,
       windowEnd: ctx.body.windowEnd ? new Date(ctx.body.windowEnd) : undefined,
-      enforceShiftWindowOverlap: ctx.body.enforceShiftWindowOverlap,
+      overrideShiftWindowMismatch: ctx.body.overrideShiftWindowMismatch,
+      overrideReason: ctx.body.overrideReason,
       key: idempotencyKey(ctx),
     }),
   });
@@ -1203,7 +1214,8 @@ export function buildApp(db: Db) {
       shiftId: z.uuid(),
       windowStart: z.iso.datetime().optional(),
       windowEnd: z.iso.datetime().optional(),
-      enforceShiftWindowOverlap: z.boolean().optional(),
+      overrideShiftWindowMismatch: z.boolean().optional(),
+      overrideReason: z.string().max(500).optional(),
       key: z.string().optional(),
     }),
     handler: ctx => assignDelivery(db, ctx.principal, {
@@ -1211,7 +1223,8 @@ export function buildApp(db: Db) {
       shiftId: ctx.body.shiftId,
       windowStart: ctx.body.windowStart ? new Date(ctx.body.windowStart) : undefined,
       windowEnd: ctx.body.windowEnd ? new Date(ctx.body.windowEnd) : undefined,
-      enforceShiftWindowOverlap: ctx.body.enforceShiftWindowOverlap,
+      overrideShiftWindowMismatch: ctx.body.overrideShiftWindowMismatch,
+      overrideReason: ctx.body.overrideReason,
       key: idempotencyKey(ctx),
     }),
   });
@@ -1277,6 +1290,22 @@ export function buildApp(db: Db) {
     method: "GET", path: "/finance/payment-drift", summary: "Intent state versus completed refunds", tags: ["Finance"],
     roles: [...ROLE_GROUPS.finance, "security_auditor"],
     handler: ctx => paymentDrift(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/finance/chargebacks", summary: "Paginated chargeback queue", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).optional(),
+      q: z.string().max(200).optional(),
+      state: z.enum(["all", "disputed", "chargeback_lost"]).optional(),
+    }),
+    handler: ctx => listChargebacks(db, ctx.principal, {
+      limit: ctx.query.limit as number | undefined,
+      cursor: ctx.query.cursor as string | undefined,
+      q: ctx.query.q as string | undefined,
+      state: ctx.query.state as "all" | "disputed" | "chargeback_lost" | undefined,
+    }),
   });
   add({
     method: "POST", path: "/finance/chargebacks", summary: "Mark a capture as disputed by the provider", tags: ["Finance"],

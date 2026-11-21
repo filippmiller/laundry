@@ -1,9 +1,9 @@
-import { and, desc, eq, gt, gte, inArray, isNull, lte, ne, notInArray, or, sql, sum } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, ne, notInArray, or, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
   customerApprovals, customerInvoiceLines, customerInvoices, garments, intakeManifestLines, intakeManifests,
-  orderAdjustments, orderLines, orders, partnerContracts, partnerCreditNotes, partnerInvoiceLines,
+  orderAdjustments, orderLines, orders, partnerContracts, partnerCreditNotes, partnerDisputes, partnerInvoiceLines,
   partnerPriceVersions, partners, partnerReceiptLines, partnerReceipts, partnerServiceAccruals,
   paymentIntents, processingOperations, qualityChecks, refunds, routeStops, seals, slotReservations,
 } from "../db/schema.js";
@@ -161,17 +161,55 @@ async function voidPartnerAccrualsForOrder(
   organizationId: string,
   orderId: string,
   reason: string,
+  principal: Principal,
 ) {
   const lines = await tx.select({ id: orderLines.id }).from(orderLines)
     .where(eq(orderLines.orderId, orderId));
   if (!lines.length) return { voidedAccruals: 0, creditedAccruals: 0 };
 
   const lineIds = lines.map(row => row.id);
+  const partnerRows = await tx.selectDistinct({ partnerId: partnerServiceAccruals.partnerId })
+    .from(partnerServiceAccruals)
+    .where(and(
+      eq(partnerServiceAccruals.organizationId, organizationId),
+      inArray(partnerServiceAccruals.orderLineId, lineIds),
+      notInArray(partnerServiceAccruals.status, ["voided", "credited"]),
+    ))
+    .orderBy(asc(partnerServiceAccruals.partnerId));
+  if (!partnerRows.length) return { voidedAccruals: 0, creditedAccruals: 0 };
+
+  const partnerIds = partnerRows.map(row => row.partnerId);
+  await tx.select({ id: partners.id })
+    .from(partners)
+    .where(and(eq(partners.organizationId, organizationId), inArray(partners.id, partnerIds)))
+    .orderBy(asc(partners.id))
+    .for("update");
+
   const accruals = await tx.select().from(partnerServiceAccruals).where(and(
     eq(partnerServiceAccruals.organizationId, organizationId),
     inArray(partnerServiceAccruals.orderLineId, lineIds),
     notInArray(partnerServiceAccruals.status, ["voided", "credited"]),
-  ));
+  )).orderBy(asc(partnerServiceAccruals.id));
+  if (!accruals.length) return { voidedAccruals: 0, creditedAccruals: 0 };
+
+  const accrualIds = accruals.map(row => row.id);
+  const invoiceLines = await tx.select().from(partnerInvoiceLines)
+    .where(inArray(partnerInvoiceLines.accrualId, accrualIds))
+    .orderBy(asc(partnerInvoiceLines.id))
+    .for("update");
+  const invoiceLineByAccrualId = new Map(invoiceLines.map(row => [row.accrualId, row]));
+
+  const invoiceLineIds = invoiceLines.map(row => row.id);
+  const openDisputes = invoiceLineIds.length
+    ? await tx.select().from(partnerDisputes)
+      .where(and(
+        eq(partnerDisputes.organizationId, organizationId),
+        inArray(partnerDisputes.invoiceLineId, invoiceLineIds),
+        inArray(partnerDisputes.state, ["open", "investigating"]),
+      ))
+      .orderBy(asc(partnerDisputes.id))
+      .for("update")
+    : [];
 
   let voidedAccruals = 0;
   let creditedAccruals = 0;
@@ -190,33 +228,95 @@ async function voidPartnerAccrualsForOrder(
       }
     }
     if (accrual.amountKopeks !== 0) {
-      const [invoiceLine] = await tx.select().from(partnerInvoiceLines)
-        .where(eq(partnerInvoiceLines.accrualId, accrual.id)).limit(1);
-      let createdCreditNote = false;
+      const invoiceLine = invoiceLineByAccrualId.get(accrual.id);
       if (invoiceLine && accrual.amountKopeks > 0) {
-        await tx.insert(partnerCreditNotes).values({
+        const [creditedRow] = await tx.select({
+          total: sql<number>`COALESCE(SUM(${partnerCreditNotes.amountKopeks}), 0)::bigint`,
+        })
+          .from(partnerCreditNotes)
+          .where(and(
+            eq(partnerCreditNotes.organizationId, organizationId),
+            eq(partnerCreditNotes.originalLineId, invoiceLine.id),
+            ne(partnerCreditNotes.state, "rejected"),
+          ));
+        const alreadyCreditedKopeks = Number(creditedRow?.total ?? 0);
+        const remainingToCredit = Math.max(0, invoiceLine.amountKopeks - alreadyCreditedKopeks);
+
+        if (remainingToCredit > 0) {
+          const priorOffsets = await tx.select({ quantity: partnerServiceAccruals.quantity })
+            .from(partnerServiceAccruals)
+            .where(and(
+              eq(partnerServiceAccruals.organizationId, organizationId),
+              eq(partnerServiceAccruals.partnerId, accrual.partnerId),
+              eq(partnerServiceAccruals.orderLineId, accrual.orderLineId),
+              eq(partnerServiceAccruals.status, "credited"),
+              sql`${partnerServiceAccruals.amountKopeks} < 0`,
+            ));
+          const priorOffsetQuantity = priorOffsets.reduce((sumQty, row) => sumQty + row.quantity, 0);
+          const offsetQuantity = priorOffsetQuantity === 0 ? -accrual.quantity : 0;
+
+          await tx.insert(partnerCreditNotes).values({
+            organizationId,
+            invoiceId: invoiceLine.invoiceId,
+            originalLineId: invoiceLine.id,
+            amountKopeks: remainingToCredit,
+            reason,
+            state: "draft",
+          });
+          // When a credit note carries the reversal, mark the offsetting accrual row as "credited"
+          // so createPartnerInvoice never claims it a second time and double-reverses partner_payable.
+          await tx.insert(partnerServiceAccruals).values({
+            organizationId,
+            partnerId: accrual.partnerId,
+            orderLineId: accrual.orderLineId,
+            contractId: accrual.contractId,
+            contractPriceVersionId: accrual.contractPriceVersionId,
+            quantity: offsetQuantity,
+            amountKopeks: -remainingToCredit,
+            status: "credited",
+            disputed: false,
+          });
+          creditedAccruals += 1;
+        }
+
+        await tx.update(partnerInvoiceLines).set({ state: "credited" })
+          .where(eq(partnerInvoiceLines.id, invoiceLine.id));
+        await tx.update(partnerServiceAccruals).set({ disputed: false })
+          .where(eq(partnerServiceAccruals.id, accrual.id));
+
+        const lineDisputes = openDisputes.filter(dispute => dispute.invoiceLineId === invoiceLine.id);
+        for (const dispute of lineDisputes) {
+          await tx.update(partnerDisputes).set({ state: "resolved" })
+            .where(eq(partnerDisputes.id, dispute.id));
+          await appendEvent(tx, {
+            principal,
+            aggregateType: "partner_dispute",
+            aggregateId: dispute.id,
+            eventType: "partner_dispute.resolved",
+            reason,
+            payload: {
+              disputeId: dispute.id,
+              invoiceId: invoiceLine.invoiceId,
+              lineId: invoiceLine.id,
+              orderId,
+              outcome: "upheld",
+              creditKopeks: remainingToCredit,
+            },
+          });
+        }
+      } else {
+        await tx.insert(partnerServiceAccruals).values({
           organizationId,
-          invoiceId: invoiceLine.invoiceId,
-          originalLineId: invoiceLine.id,
-          amountKopeks: accrual.amountKopeks,
-          reason,
-          state: "draft",
+          partnerId: accrual.partnerId,
+          orderLineId: accrual.orderLineId,
+          contractId: accrual.contractId,
+          contractPriceVersionId: accrual.contractPriceVersionId,
+          quantity: -accrual.quantity,
+          amountKopeks: -accrual.amountKopeks,
+          status: "estimated",
         });
-        createdCreditNote = true;
+        creditedAccruals += 1;
       }
-      // When a credit note carries the reversal, mark the offsetting accrual row as "credited"
-      // so createPartnerInvoice never claims it a second time and double-reverses partner_payable.
-      await tx.insert(partnerServiceAccruals).values({
-        organizationId,
-        partnerId: accrual.partnerId,
-        orderLineId: accrual.orderLineId,
-        contractId: accrual.contractId,
-        contractPriceVersionId: accrual.contractPriceVersionId,
-        quantity: -accrual.quantity,
-        amountKopeks: -accrual.amountKopeks,
-        status: createdCreditNote ? "credited" : "estimated",
-      });
-      creditedAccruals += 1;
     }
   }
   return { voidedAccruals, creditedAccruals };
@@ -916,6 +1016,7 @@ export async function decideAdjustment(
         principal.organizationId,
         order.id,
         reason,
+        principal,
       );
       const liveReservations = await tx.select({ id: slotReservations.id }).from(slotReservations).where(and(
         eq(slotReservations.organizationId, principal.organizationId),
@@ -1024,6 +1125,7 @@ export async function returnUnprocessedOrder(
       principal.organizationId,
       order.id,
       input.reason,
+      principal,
     );
     // Nothing will be delivered, so the capacity held for this order is released again.
     const liveReservations = await tx.select({ id: slotReservations.id }).from(slotReservations).where(and(
@@ -1058,11 +1160,6 @@ export async function returnUnprocessedOrder(
       eq(garments.organizationId, principal.organizationId),
       eq(garments.orderId, order.id),
     ));
-    await tx.update(containerAssignments).set({ unassignedAt: new Date() }).where(and(
-      eq(containerAssignments.organizationId, principal.organizationId),
-      eq(containerAssignments.orderId, order.id),
-      isNull(containerAssignments.unassignedAt),
-    ));
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: "order.return_unprocessed",
@@ -1082,6 +1179,22 @@ export async function returnUnprocessedOrder(
   });
 }
 
+async function findBatchIdsForOrder(tx: Tx, organizationId: string, orderId: string): Promise<string[]> {
+  const [byDetails, byGarment] = await Promise.all([
+    tx.select({ batchId: processingOperations.batchId }).from(processingOperations).where(and(
+      eq(processingOperations.organizationId, organizationId),
+      sql`${processingOperations.detailsJson}->>'orderId' = ${orderId}`,
+    )),
+    tx.select({ batchId: batchItems.batchId }).from(batchItems)
+      .innerJoin(garments, eq(garments.id, batchItems.garmentId))
+      .where(and(
+        eq(garments.organizationId, organizationId),
+        eq(garments.orderId, orderId),
+      )),
+  ]);
+  return [...new Set([...byDetails.map(r => r.batchId), ...byGarment.map(r => r.batchId)])];
+}
+
 export async function startProcessing(db: Db, principal: Principal, input: { orderId: string; processType: string; key: string }) {
   assertRole(principal, ...ROLE_GROUPS.partner);
   return withIdempotencyFlat(db, {
@@ -1097,6 +1210,26 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
     if (!order) throw errors.notFound("order");
     assertAssignedPartner(order, principal);
     if (!["inspection", "processing"].includes(order.lifecycleState)) throw errors.transition(order.lifecycleState, "start_processing");
+
+    const existingBatchIds = await findBatchIdsForOrder(tx, principal.organizationId, order.id);
+    if (existingBatchIds.length) {
+      const priorNonTerminal = await tx.select({ id: batches.id }).from(batches).where(and(
+        eq(batches.organizationId, principal.organizationId),
+        inArray(batches.id, existingBatchIds),
+        inArray(batches.state, ["created", "processing", "quality_check"]),
+      ));
+      const priorIds = priorNonTerminal.map(b => b.id);
+      if (priorIds.length) {
+        await tx.update(batches).set({ state: "cancelled" }).where(and(
+          eq(batches.organizationId, principal.organizationId),
+          inArray(batches.id, priorIds),
+        ));
+        await tx.update(batchItems).set({ status: "cancelled" }).where(
+          inArray(batchItems.batchId, priorIds),
+        );
+      }
+    }
+
     const [batch] = await tx.insert(batches).values({
       organizationId: principal.organizationId,
       partnerId: principal.partnerId!,
@@ -1109,23 +1242,14 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
     ));
     for (const item of items) {
       await tx.insert(batchItems).values({ batchId: batch.id, garmentId: item.id, status: "processing" });
-      await tx.insert(processingOperations).values({
-        organizationId: principal.organizationId,
-        batchId: batch.id,
-        operation: input.processType,
-        detailsJson: { orderId: order.id, garmentId: item.id },
-        actorId: principal.userId,
-      });
     }
-    if (!items.length) {
-      await tx.insert(processingOperations).values({
-        organizationId: principal.organizationId,
-        batchId: batch.id,
-        operation: `${input.processType}:bag`,
-        detailsJson: { orderId: order.id },
-        actorId: principal.userId,
-      });
-    }
+    await tx.insert(processingOperations).values({
+      organizationId: principal.organizationId,
+      batchId: batch.id,
+      operation: "start_processing",
+      detailsJson: { orderId: order.id, processType: input.processType },
+      actorId: principal.userId,
+    });
     let to: OrderState;
     if (order.lifecycleState === "inspection") {
       to = nextState("inspection", "start_processing", principal);
@@ -1145,6 +1269,79 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
       payload: { batchId: batch.id, itemCount: items.length, fromState: order.lifecycleState },
     });
     return { batchId: batch.id, state: to, itemCount: items.length };
+  });
+}
+
+export async function completeProcessing(
+  db: Db,
+  principal: Principal,
+  input: { orderId: string; batchId?: string; notes?: string; key: string },
+) {
+  assertRole(principal, ...ROLE_GROUPS.partner);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId,
+    scope: "partner:complete_processing",
+    key: input.key,
+    actorId: principal.userId,
+    requestHash: hashRequest(input),
+  }, async tx => {
+    await tx.execute(sql`
+      SELECT id FROM orders WHERE id = ${input.orderId} AND organization_id = ${principal.organizationId} FOR UPDATE
+    `);
+    const [order] = await tx.select().from(orders).where(and(
+      eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
+    )).limit(1);
+    if (!order) throw errors.notFound("order");
+    assertAssignedPartner(order, principal);
+    if (order.lifecycleState !== "processing") {
+      throw errors.transition(order.lifecycleState, "complete_processing");
+    }
+
+    const orderBatchIds = await findBatchIdsForOrder(tx, principal.organizationId, order.id);
+    if (!orderBatchIds.length) {
+      throw new AppError("INVALID_TRANSITION", "PROCESSING_BATCH_REQUIRED", {
+        orderId: order.id,
+        ...(input.batchId ? { batchId: input.batchId } : {}),
+      });
+    }
+    const [batch] = await tx.select().from(batches).where(and(
+      eq(batches.organizationId, principal.organizationId),
+      inArray(batches.id, orderBatchIds),
+      eq(batches.state, "processing"),
+      ...(input.batchId ? [eq(batches.id, input.batchId)] : []),
+    )).orderBy(desc(batches.createdAt), desc(batches.id)).limit(1);
+    if (!batch) {
+      throw new AppError("INVALID_TRANSITION", "PROCESSING_BATCH_REQUIRED", {
+        orderId: order.id,
+        ...(input.batchId ? { batchId: input.batchId } : {}),
+      });
+    }
+
+    await tx.update(batches).set({ state: "quality_check" }).where(and(
+      eq(batches.id, batch.id),
+      eq(batches.organizationId, principal.organizationId),
+    ));
+    await tx.update(batchItems).set({ status: "ready_for_qc" }).where(eq(batchItems.batchId, batch.id));
+    await tx.insert(processingOperations).values({
+      organizationId: principal.organizationId,
+      batchId: batch.id,
+      operation: "complete_processing",
+      detailsJson: { orderId: order.id, completed: true, notes: input.notes ?? null },
+      actorId: principal.userId,
+    });
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "order",
+      aggregateId: order.id,
+      eventType: "processing.completed",
+      payload: {
+        orderId: order.id,
+        batchId: batch.id,
+        state: "quality_check",
+        notes: input.notes ?? null,
+      },
+    });
+    return { orderId: order.id, batchId: batch.id, state: "quality_check" as const };
   });
 }
 
@@ -1190,28 +1387,30 @@ export async function recordQualityCheck(
       .orderBy(desc(qualityChecks.occurredAt))
       .limit(1);
 
-    const matchingOps = await tx.select({
-      id: processingOperations.id,
-      batchId: processingOperations.batchId,
-    })
-      .from(processingOperations)
-      .leftJoin(batchItems, eq(batchItems.batchId, processingOperations.batchId))
-      .leftJoin(garments, eq(garments.id, batchItems.garmentId))
-      .where(and(
-        eq(processingOperations.organizationId, principal.organizationId),
-        or(
-          sql`${processingOperations.detailsJson}->>'orderId' = ${order.id}`,
-          eq(garments.orderId, order.id),
-        ),
-        ...(latestQc ? [gt(processingOperations.occurredAt, latestQc.occurredAt)] : []),
-      ));
+    const orderBatchIds = await findBatchIdsForOrder(tx, principal.organizationId, order.id);
+    const readyBatchOps = orderBatchIds.length
+      ? await tx.select({
+        batchId: batches.id,
+      })
+        .from(batches)
+        .innerJoin(processingOperations, eq(processingOperations.batchId, batches.id))
+        .where(and(
+          eq(batches.organizationId, principal.organizationId),
+          inArray(batches.id, orderBatchIds),
+          eq(batches.state, "quality_check"),
+          eq(processingOperations.organizationId, principal.organizationId),
+          eq(processingOperations.operation, "complete_processing"),
+          ...(latestQc ? [gt(processingOperations.occurredAt, latestQc.occurredAt)] : []),
+        ))
+        .orderBy(desc(batches.createdAt), desc(batches.id))
+      : [];
 
-    if (!matchingOps.length) {
-      throw new AppError("INVALID_TRANSITION", "PROCESSING_OPERATION_REQUIRED", {
+    const associatedBatchIds = [...new Set(readyBatchOps.map(op => op.batchId))];
+    if (!associatedBatchIds.length) {
+      throw new AppError("INVALID_TRANSITION", "PROCESSING_NOT_COMPLETED", {
         orderId: order.id,
       });
     }
-    const associatedBatchIds = [...new Set(matchingOps.map(op => op.batchId))];
 
     const garmentRows = await tx.select({ id: garments.id }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId), eq(garments.orderId, order.id),
@@ -1333,10 +1532,39 @@ export async function recordQualityCheck(
       await tx.update(orders).set({ lifecycleState: finalState, version: order.version + 2 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
     }
-    await tx.update(batches).set({ state: allPassed ? "packed" : "processing" }).where(and(
-      eq(batches.organizationId, principal.organizationId),
-      inArray(batches.id, associatedBatchIds),
-    ));
+    if (allPassed) {
+      await tx.update(batches).set({ state: "packed" }).where(and(
+        eq(batches.organizationId, principal.organizationId),
+        inArray(batches.id, associatedBatchIds),
+      ));
+      await tx.update(batchItems).set({ status: "packed" }).where(
+        inArray(batchItems.batchId, associatedBatchIds),
+      );
+      const staleNonTerminal = await tx.select({ id: batches.id }).from(batches).where(and(
+        eq(batches.organizationId, principal.organizationId),
+        inArray(batches.id, orderBatchIds),
+        notInArray(batches.id, associatedBatchIds),
+        inArray(batches.state, ["created", "processing", "quality_check"]),
+      ));
+      const staleIds = staleNonTerminal.map(b => b.id);
+      if (staleIds.length) {
+        await tx.update(batches).set({ state: "cancelled" }).where(and(
+          eq(batches.organizationId, principal.organizationId),
+          inArray(batches.id, staleIds),
+        ));
+        await tx.update(batchItems).set({ status: "superseded" }).where(
+          inArray(batchItems.batchId, staleIds),
+        );
+      }
+    } else {
+      await tx.update(batches).set({ state: "cancelled" }).where(and(
+        eq(batches.organizationId, principal.organizationId),
+        inArray(batches.id, associatedBatchIds),
+      ));
+      await tx.update(batchItems).set({ status: "failed_qc" }).where(
+        inArray(batchItems.batchId, associatedBatchIds),
+      );
+    }
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: allPassed ? "order.qc_passed" : "order.qc_failed",
@@ -1427,6 +1655,8 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
     )),
     db.select({
       orderId: sql<string>`${processingOperations.detailsJson}->>'orderId'`,
+      batchId: processingOperations.batchId,
+      operation: processingOperations.operation,
       occurredAt: processingOperations.occurredAt,
     }).from(processingOperations).where(and(
       eq(processingOperations.organizationId, principal.organizationId),
@@ -1434,6 +1664,8 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
     )),
     db.select({
       orderId: garments.orderId,
+      batchId: processingOperations.batchId,
+      operation: processingOperations.operation,
       occurredAt: processingOperations.occurredAt,
     }).from(processingOperations)
       .innerJoin(batchItems, eq(batchItems.batchId, processingOperations.batchId))
@@ -1444,18 +1676,34 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
       )),
   ]);
 
+  const allBatchIds = [...new Set([...opByDetailsRows, ...opByGarmentRows].map(row => row.batchId))];
+  const batchRows = allBatchIds.length
+    ? await db.select({ id: batches.id, state: batches.state }).from(batches).where(and(
+      eq(batches.organizationId, principal.organizationId),
+      inArray(batches.id, allBatchIds),
+    ))
+    : [];
+  const batchStateById = new Map(batchRows.map(row => [row.id, row.state]));
+
   const latestQcByOrder = new Map<string, number>();
   for (const row of qcRows) {
     const ts = new Date(row.occurredAt).getTime();
     const prev = latestQcByOrder.get(row.orderId);
     if (prev === undefined || ts > prev) latestQcByOrder.set(row.orderId, ts);
   }
-  const latestProcByOrder = new Map<string, number>();
+  const batchIdsByOrder = new Map<string, Set<string>>();
+  const latestCompleteByOrderBatch = new Map<string, number>();
   for (const row of [...opByDetailsRows, ...opByGarmentRows]) {
     if (!row.orderId) continue;
-    const ts = new Date(row.occurredAt).getTime();
-    const prev = latestProcByOrder.get(row.orderId);
-    if (prev === undefined || ts > prev) latestProcByOrder.set(row.orderId, ts);
+    const set = batchIdsByOrder.get(row.orderId) ?? new Set<string>();
+    set.add(row.batchId);
+    batchIdsByOrder.set(row.orderId, set);
+    if (row.operation === "complete_processing") {
+      const ts = new Date(row.occurredAt).getTime();
+      const key = `${row.orderId}:${row.batchId}`;
+      const prev = latestCompleteByOrderBatch.get(key);
+      if (prev === undefined || ts > prev) latestCompleteByOrderBatch.set(key, ts);
+    }
   }
 
   const latestManifestByOrder = new Map<string, typeof intakeManifests.$inferSelect>();
@@ -1502,11 +1750,16 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
 
   return {
     orders: orderRows.map(order => {
-      const latestProc = latestProcByOrder.get(order.id);
       const latestQc = latestQcByOrder.get(order.id);
-      const hasUncheckedProcessing = Boolean(
-        latestProc !== undefined && (latestQc === undefined || latestProc > latestQc),
+      const orderBatchIds = [...(batchIdsByOrder.get(order.id) ?? [])];
+      const hasActiveProcessingBatch = orderBatchIds.some(
+        batchId => batchStateById.get(batchId) === "processing",
       );
+      const hasUncheckedProcessing = orderBatchIds.some(batchId => {
+        if (batchStateById.get(batchId) !== "quality_check") return false;
+        const completedAt = latestCompleteByOrderBatch.get(`${order.id}:${batchId}`);
+        return completedAt !== undefined && (latestQc === undefined || completedAt > latestQc);
+      });
       return {
         id: order.id,
         orderId: order.id,
@@ -1518,6 +1771,7 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
         containers: containersByOrder.get(order.id) ?? [],
         garments: garmentsByOrder.get(order.id) ?? [],
         adjustments: adjustmentsByOrder.get(order.id) ?? [],
+        hasActiveProcessingBatch,
         hasUncheckedProcessing,
       };
     }),

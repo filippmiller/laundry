@@ -2,14 +2,16 @@ import { and, asc, eq, gt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { Principal, Role } from "../core/context.js";
 import {
-  customerAddresses, memberships, membershipRoles, partners, seals, serviceWindows, users,
+  courierShifts, customerAddresses, memberships, membershipRoles, partners, seals, serviceWindows, users,
 } from "../db/schema.js";
 import { createQuote } from "./quotes.js";
 import { createOrder, scheduleOrder } from "./orders.js";
 import { holdSlot } from "../domain/slot-reservation.js";
 import { arriveStop, assignDelivery, assignPickup, closeOrder, recordDeliveryAttempt } from "./delivery.js";
 import { recordIntake } from "./intake.js";
-import { assignOrderToPartner, receiveHandoff, recordQualityCheck, startInspection, startProcessing } from "./partner.js";
+import {
+  assignOrderToPartner, completeProcessing, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
+} from "./partner.js";
 import { capturePayment, createCustomerInvoice, refundPayment } from "./finance.js";
 import { decideClaim, openClaim } from "./claims.js";
 import { decideCompensation, proposeCompensation } from "./workspace.js";
@@ -225,7 +227,9 @@ type DemoBookContext = {
     address: string;
     pickupWindowId: string;
     deliveryWindowId: string;
+    pickupStartsAt: Date;
     pickupEndsAt: Date;
+    deliveryStartsAt: Date;
     deliveryEndsAt: Date;
   }>;
   tariffVersionId: string;
@@ -283,7 +287,9 @@ async function ensureWindows(
   address: string;
   pickupWindowId: string;
   deliveryWindowId: string;
+  pickupStartsAt: Date;
   pickupEndsAt: Date;
+  deliveryStartsAt: Date;
   deliveryEndsAt: Date;
 }>> {
   const now = new Date();
@@ -292,7 +298,9 @@ async function ensureWindows(
     address: string;
     pickupWindowId: string;
     deliveryWindowId: string;
+    pickupStartsAt: Date;
     pickupEndsAt: Date;
+    deliveryStartsAt: Date;
     deliveryEndsAt: Date;
   }> = [];
 
@@ -300,6 +308,7 @@ async function ensureWindows(
     const open = await db.select({
       id: serviceWindows.id,
       kind: serviceWindows.kind,
+      startsAt: serviceWindows.startsAt,
       endsAt: serviceWindows.endsAt,
     }).from(serviceWindows).where(and(
       eq(serviceWindows.organizationId, organizationId),
@@ -311,10 +320,10 @@ async function ensureWindows(
     const pickup = open.find(window => window.kind === "pickup");
     const delivery = open.find(window => window.kind === "delivery");
 
-    const created: Record<string, { id: string; endsAt: Date }> = {};
+    const created: Record<string, { id: string; startsAt: Date; endsAt: Date }> = {};
     for (const [kind, existing] of [["pickup", pickup], ["delivery", delivery]] as const) {
       if (existing) {
-        created[kind] = { id: existing.id, endsAt: existing.endsAt };
+        created[kind] = { id: existing.id, startsAt: existing.startsAt, endsAt: existing.endsAt };
         continue;
       }
       const startsAt = kind === "pickup"
@@ -331,7 +340,7 @@ async function ensureWindows(
         feeKopeks: 0,
         status: "open",
       }).returning();
-      created[kind] = { id: window.id, endsAt: window.endsAt };
+      created[kind] = { id: window.id, startsAt: window.startsAt, endsAt: window.endsAt };
     }
 
     result.push({
@@ -339,7 +348,9 @@ async function ensureWindows(
       address: building.address,
       pickupWindowId: created.pickup.id,
       deliveryWindowId: created.delivery.id,
+      pickupStartsAt: created.pickup.startsAt,
       pickupEndsAt: created.pickup.endsAt,
+      deliveryStartsAt: created.delivery.startsAt,
       deliveryEndsAt: created.delivery.endsAt,
     });
   }
@@ -629,6 +640,9 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
     await startProcessing(db, context.principals.partner, {
       orderId: order.id, processType: "wash", key: key("processing"),
     });
+    await completeProcessing(db, context.principals.partner, {
+      orderId: order.id, key: key("complete-processing"),
+    });
     const garmentIds = await db.execute(sql`
       SELECT id FROM garments WHERE order_id = ${order.id} AND organization_id = ${context.organizationId}
     `);
@@ -800,6 +814,18 @@ export async function buildDemoBookContext(
     shiftId = shift?.id;
   }
   if (!shiftId) throw new Error("DEMO_ACTIVE_SHIFT_MISSING");
+
+  if (windows.length > 0) {
+    const minWindowStart = new Date(Math.min(...windows.flatMap(w => [w.pickupStartsAt.getTime(), w.deliveryStartsAt.getTime()])));
+    const maxWindowEnd = new Date(Math.max(...windows.flatMap(w => [w.pickupEndsAt.getTime(), w.deliveryEndsAt.getTime()])));
+    await db.update(courierShifts).set({
+      startsAt: sql`LEAST(${courierShifts.startsAt}, ${minWindowStart})`,
+      endsAt: sql`GREATEST(${courierShifts.endsAt}, ${maxWindowEnd})`,
+    }).where(and(
+      eq(courierShifts.id, shiftId),
+      eq(courierShifts.organizationId, input.organizationId),
+    ));
+  }
 
   return {
     organizationId: input.organizationId,

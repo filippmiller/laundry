@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   claims, containerAssignments, containers, courierDevices, custodyEvents, evidenceAssets,
@@ -387,6 +387,7 @@ async function evaluateScanEvent(
   tx: Tx,
   principal: Principal,
   event: ScanEventInput,
+  receivedAt: Date = new Date(),
 ): Promise<ScanEvaluation> {
   const [device] = await tx.select({ id: courierDevices.id }).from(courierDevices).where(and(
     eq(courierDevices.id, event.deviceId),
@@ -397,7 +398,9 @@ async function evaluateScanEvent(
   if (!device) return { ok: false, reason: "DEVICE_NOT_OWNED" };
   if (canonicalScanHash(event) !== event.payloadHash) return { ok: false, reason: "PAYLOAD_HASH_MISMATCH" };
   const capturedAt = new Date(event.capturedAt);
-  if (Number.isNaN(capturedAt.getTime())) return { ok: false, reason: "INVALID_CAPTURED_AT" };
+  if (Number.isNaN(capturedAt.getTime()) || capturedAt.getTime() > receivedAt.getTime() + 60_000) {
+    return { ok: false, reason: "INVALID_CAPTURED_AT" };
+  }
 
   let orderId: string | undefined;
   let notAssignedReason = "ORDER_NOT_ASSIGNED";
@@ -413,9 +416,17 @@ async function evaluateScanEvent(
         eq(containerAssignments.organizationId, principal.organizationId),
         eq(containers.organizationId, principal.organizationId),
         eq(containers.code, event.scannedId),
-        isNull(containerAssignments.unassignedAt),
+        lte(containerAssignments.assignedAt, capturedAt),
+        or(
+          isNull(containerAssignments.unassignedAt),
+          gt(containerAssignments.unassignedAt, capturedAt),
+        ),
       ))
-      .orderBy(desc(containerAssignments.assignedAt))
+      .orderBy(
+        desc(containerAssignments.assignedAt),
+        sql`(${containerAssignments.unassignedAt} IS NULL) DESC`,
+        desc(containerAssignments.id),
+      )
       .limit(1);
     orderId = row?.orderId;
   } else {
@@ -424,13 +435,32 @@ async function evaluateScanEvent(
       .innerJoin(seals, eq(seals.id, containerAssignments.sealId))
       .where(and(
         eq(containerAssignments.organizationId, principal.organizationId),
+        eq(seals.organizationId, principal.organizationId),
         eq(seals.serialNumber, event.scannedId),
-        eq(seals.state, "assigned"),
-      )).limit(1);
+        lte(containerAssignments.assignedAt, capturedAt),
+        or(
+          isNull(containerAssignments.unassignedAt),
+          gt(containerAssignments.unassignedAt, capturedAt),
+        ),
+      ))
+      .orderBy(
+        desc(containerAssignments.assignedAt),
+        sql`(${containerAssignments.unassignedAt} IS NULL) DESC`,
+        desc(containerAssignments.id),
+      )
+      .limit(1);
     orderId = sealRow?.orderId;
   }
 
   if (!orderId) return { ok: false, reason: notAssignedReason };
+
+  if (
+    event.context
+    && typeof event.context.orderId === "string"
+    && event.context.orderId !== orderId
+  ) {
+    return { ok: false, reason: "CONTEXT_ORDER_MISMATCH" };
+  }
 
   const shiftResolution = await resolveVerifiedScanShift(tx, principal, orderId, capturedAt);
   if (!shiftResolution.ok) {
@@ -529,11 +559,11 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
           return { kind: "rejected" as const, reason: mismatch };
         }
         if (existing.syncStatus === "rejected") {
-          const evaluation = await evaluateScanEvent(tx, principal, event);
+          const receivedAt = new Date();
+          const evaluation = await evaluateScanEvent(tx, principal, event, receivedAt);
           if (!evaluation.ok) {
             return { kind: "rejected" as const, reason: evaluation.reason };
           }
-          const receivedAt = new Date();
           const updated = await tx.update(scanEvents)
             .set({ syncStatus: "accepted", shiftId: evaluation.shiftId, receivedAt })
             .where(and(
@@ -562,14 +592,14 @@ export async function syncScanEvents(db: Db, principal: Principal, events: ScanE
         return { kind: "duplicate" as const };
       }
 
-      const evaluation = await evaluateScanEvent(tx, principal, event);
+      const receivedAt = new Date();
+      const evaluation = await evaluateScanEvent(tx, principal, event, receivedAt);
       if (!evaluation.ok && evaluation.reason === "DEVICE_NOT_OWNED") {
         // Never persist a scan_events row for an unowned/foreign device so a cross-actor or
         // cross-tenant caller cannot poison the global (device_id, client_event_id) unique index
         // and block the rightful owner's subsequent legitimate sync.
         return { kind: "rejected" as const, reason: evaluation.reason };
       }
-      const receivedAt = new Date();
       const inserted = await tx.insert(scanEvents).values({
         organizationId: principal.organizationId,
         deviceId: event.deviceId,

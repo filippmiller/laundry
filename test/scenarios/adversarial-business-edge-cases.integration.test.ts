@@ -154,7 +154,8 @@ describe("Adversarial business & security edge cases", () => {
 
     const { shiftId: shiftA } = (await app.inject({
       method: "POST", url: "/api/v1/courier/shifts",
-      headers: cookieHeader(courierA.cookie, { "idempotency-key": `shA-${randomUUID()}` }), payload: {},
+      headers: cookieHeader(courierA.cookie, { "idempotency-key": `shA-${randomUUID()}` }),
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
 
     const { stopId: stop1 } = (await app.inject({
@@ -225,7 +226,8 @@ describe("Adversarial business & security edge cases", () => {
     });
     const { shiftId: shiftB } = (await app.inject({
       method: "POST", url: "/api/v1/courier/shifts",
-      headers: cookieHeader(courierB.cookie, { "idempotency-key": `shB-${randomUUID()}` }), payload: {},
+      headers: cookieHeader(courierB.cookie, { "idempotency-key": `shB-${randomUUID()}` }),
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
     const { stopId: stopB } = (await app.inject({
       method: "POST", url: "/api/v1/dispatch/pickups/assign",
@@ -279,7 +281,8 @@ describe("Adversarial business & security edge cases", () => {
     await db.update(orders).set({ lifecycleState: "ready" }).where(eq(orders.id, booked.order.id));
     const { shiftId } = (await app.inject({
       method: "POST", url: "/api/v1/courier/shifts",
-      headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }), payload: {},
+      headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
     const { stopId } = (await app.inject({
       method: "POST", url: "/api/v1/dispatch/deliveries",
@@ -473,7 +476,8 @@ describe("Adversarial business & security edge cases", () => {
 
     const { shiftId } = (await app.inject({
       method: "POST", url: "/api/v1/courier/shifts",
-      headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }), payload: {},
+      headers: cookieHeader(courier.cookie, { "idempotency-key": `sh-${randomUUID()}` }),
+      payload: { startsAt: "2026-12-01T08:00:00.000Z", endsAt: "2026-12-02T20:00:00.000Z" },
     })).json() as { shiftId: string };
 
     // Case 1: Broken seal reported before receipt -> receipt rejected with 409 AND durable custody_discrepancies row written
@@ -787,8 +791,11 @@ describe("Adversarial business & security edge cases", () => {
         payload: { pickupReservationId: np.reservationId, deliveryReservationId: nd.reservationId },
       }),
     ]);
-    // Both cannot mutate the same version; one succeeds (200) and the other sees conflict (409)
-    const raceStatuses = [cancelRace.statusCode, reschedRace.statusCode].sort((a, b) => a - b);
-    expect(raceStatuses).toEqual([200, 409]);
+    // Both serialize on orders FOR UPDATE: if cancel wins first, reschedule sees cancelled (409);
+    // if reschedule wins first (200), cancel runs next on the rescheduled order (200) -> final state is cancelled.
+    expect(cancelRace.statusCode).toBe(200);
+    expect([200, 409]).toContain(reschedRace.statusCode);
+    const [raceOrder] = await db.select().from(orders).where(eq(orders.id, raceBooked.order.id)).limit(1);
+    expect(raceOrder.lifecycleState).toBe("cancelled");
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Building2,
@@ -10,6 +10,7 @@ import {
   RefreshCw,
   RotateCcw,
   Scale,
+  Search,
   ShieldAlert,
   Wallet,
   XCircle,
@@ -48,6 +49,9 @@ type PaymentIntentItem = {
   amountKopeks: number;
   state: string;
   provider: string;
+  orderId?: string;
+  orderPublicNumber?: string;
+  providerIntentId?: string | null;
   invoiceId?: string;
   createdAt?: string;
 };
@@ -137,6 +141,7 @@ type FinanceOverviewResponse = {
   intentsMeta?: { total: number; hasMore: boolean };
   chargebacks?: PaymentIntentItem[];
   chargebacksMeta?: { total: number; hasMore: boolean };
+  chargebacksPage?: PaginatedBucket<PaymentIntentItem>;
   refunds?: RefundItem[];
   partnerInvoices?: PartnerInvoiceItem[];
   pendingCompensations?: CompensationItem[];
@@ -247,6 +252,21 @@ export function FinanceWorkspace({
     items: [], nextCursor: null, hasMore: false, totalCount: 0,
   });
 
+  const [chargebacksBucket, setChargebacksBucket] = useState<PaginatedBucket<PaymentIntentItem>>({
+    items: [], nextCursor: null, hasMore: false, totalCount: 0,
+  });
+  const [chargebackQuery, setChargebackQuery] = useState("");
+  const [appliedChargebackQuery, setAppliedChargebackQuery] = useState("");
+  const [chargebackState, setChargebackState] = useState<"all" | "disputed" | "chargeback_lost">("all");
+  const [chargebacksLoading, setChargebacksLoading] = useState(false);
+  const [chargebacksLoadingMore, setChargebacksLoadingMore] = useState(false);
+  const chargebacksReqRef = useRef(0);
+  const chargebacksAbortRef = useRef<AbortController | null>(null);
+  const appliedChargebackQueryRef = useRef("");
+  const chargebackStateRef = useRef<"all" | "disputed" | "chargeback_lost">("all");
+  appliedChargebackQueryRef.current = appliedChargebackQuery;
+  chargebackStateRef.current = chargebackState;
+
   const partnerSelectId = useId();
   const partnerInputId = useId();
   const periodStartId = useId();
@@ -258,6 +278,8 @@ export function FinanceWorkspace({
   const refundAmountId = useId();
   const refundReasonId = useId();
   const chargebackReasonId = useId();
+  const chargebackSearchId = useId();
+  const chargebackStateId = useId();
 
   const partners = useMemo<PartnerOption[]>(
     () => (overview.partners !== undefined ? overview.partners : (demo?.partners ?? [])),
@@ -275,6 +297,86 @@ export function FinanceWorkspace({
     }
   }, [partners, partnerId, payoutPartnerId]);
 
+  const fetchChargebacksPage = useCallback(async (opts: {
+    q?: string;
+    state: "all" | "disputed" | "chargeback_lost";
+    cursor?: string;
+    signal?: AbortSignal;
+  }) => {
+    const params = new URLSearchParams({ limit: "50", state: opts.state });
+    const trimmed = opts.q?.trim();
+    if (trimmed) params.set("q", trimmed);
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    return api<PaginatedBucket<PaymentIntentItem>>(`/finance/chargebacks?${params.toString()}`, {
+      signal: opts.signal,
+    });
+  }, []);
+
+  const loadChargebacks = useCallback(async (
+    q: string,
+    state: "all" | "disputed" | "chargeback_lost",
+  ): Promise<boolean> => {
+    chargebacksAbortRef.current?.abort();
+    const controller = new AbortController();
+    chargebacksAbortRef.current = controller;
+    const reqId = ++chargebacksReqRef.current;
+    setChargebacksLoading(true);
+    try {
+      const page = await fetchChargebacksPage({ q, state, signal: controller.signal });
+      if (chargebacksReqRef.current !== reqId || controller.signal.aborted) return false;
+      setChargebacksBucket(page);
+      return true;
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        return false;
+      }
+      if (chargebacksReqRef.current !== reqId) return false;
+      notify({ kind: "error", text: formatError(err) });
+      return false;
+    } finally {
+      if (chargebacksReqRef.current === reqId) {
+        setChargebacksLoading(false);
+      }
+    }
+  }, [fetchChargebacksPage, notify]);
+
+  const loadMoreChargebacks = useCallback(async () => {
+    if (!chargebacksBucket.nextCursor) return;
+    chargebacksAbortRef.current?.abort();
+    const controller = new AbortController();
+    chargebacksAbortRef.current = controller;
+    const reqId = ++chargebacksReqRef.current;
+    setChargebacksLoadingMore(true);
+    try {
+      const page = await fetchChargebacksPage({
+        q: appliedChargebackQueryRef.current,
+        state: chargebackStateRef.current,
+        cursor: chargebacksBucket.nextCursor,
+        signal: controller.signal,
+      });
+      if (chargebacksReqRef.current !== reqId || controller.signal.aborted) return;
+      setChargebacksBucket(prev => {
+        const seen = new Set(prev.items.map(i => i.id));
+        return {
+          items: [...prev.items, ...page.items.filter(i => !seen.has(i.id))],
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+          totalCount: page.totalCount,
+        };
+      });
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
+        return;
+      }
+      if (chargebacksReqRef.current !== reqId) return;
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      if (chargebacksReqRef.current === reqId) {
+        setChargebacksLoadingMore(false);
+      }
+    }
+  }, [chargebacksBucket.nextCursor, fetchChargebacksPage, notify]);
+
   const loadFinance = useCallback(async () => {
     setLoading(true);
     setRefreshNonce(n => n + 1);
@@ -283,6 +385,7 @@ export function FinanceWorkspace({
         api<FinanceOverviewResponse>("/finance/overview"),
         api<ReconciliationResponse>("/finance/reconciliation"),
         api<DriftItem[] | { items?: DriftItem[] }>("/finance/payment-drift"),
+        loadChargebacks(appliedChargebackQueryRef.current, chargebackStateRef.current),
       ]);
       setOverview(ov ?? {});
       if (ov?.partnerPayoutsActive) {
@@ -322,11 +425,13 @@ export function FinanceWorkspace({
     } finally {
       setLoading(false);
     }
-  }, [notify]);
+  }, [loadChargebacks, notify]);
 
   useEffect(() => {
     void loadFinance();
   }, [loadFinance]);
+
+  useEffect(() => () => chargebacksAbortRef.current?.abort(), []);
 
   const openRefundModal = (intent: PaymentIntentItem) => {
     setRefundTarget(intent);
@@ -661,8 +766,7 @@ export function FinanceWorkspace({
   const invoices = overview.invoices ?? [];
   const intents = overview.intents ?? [];
   const intentsMeta = overview.intentsMeta;
-  const chargebacks = overview.chargebacks ?? [];
-  const chargebacksMeta = overview.chargebacksMeta;
+  const chargebacks = chargebacksBucket.items;
   const partnerInvoices = overview.partnerInvoices ?? [];
   const visiblePayoutBucket = payoutTab === "active" ? payoutActiveBucket : payoutHistoryBucket;
   const visibleCreditNoteBucket = creditNoteTab === "active" ? creditNoteActiveBucket : creditNoteHistoryBucket;
@@ -828,15 +932,89 @@ export function FinanceWorkspace({
         )}
 
         <h4 style={{ marginBlock: "8px 10px" }}>
-          Оспариваемые платежи и чарджбэки ({chargebacksMeta?.total ?? chargebacks.length})
+          Оспариваемые платежи и чарджбэки ({chargebacksBucket.totalCount})
         </h4>
+        <form
+          onSubmit={e => {
+            e.preventDefault();
+            const nextQ = chargebackQuery.trim();
+            setAppliedChargebackQuery(nextQ);
+            appliedChargebackQueryRef.current = nextQ;
+            void loadChargebacks(nextQ, chargebackState);
+          }}
+          style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "end", marginBlockEnd: 12 }}
+        >
+          <div style={{ flex: "1 1 240px" }}>
+            <label htmlFor={chargebackSearchId}>Поиск чарджбэков</label>
+            <input
+              id={chargebackSearchId}
+              type="search"
+              value={chargebackQuery}
+              onChange={e => setChargebackQuery(e.target.value)}
+              placeholder="ID платежа, номер заказа или провайдер…"
+            />
+          </div>
+          <div style={{ minWidth: 200 }}>
+            <label htmlFor={chargebackStateId}>Статус</label>
+            <select
+              id={chargebackStateId}
+              value={chargebackState}
+              onChange={e => {
+                const nextState = e.target.value as "all" | "disputed" | "chargeback_lost";
+                setChargebackState(nextState);
+                chargebackStateRef.current = nextState;
+                void loadChargebacks(appliedChargebackQueryRef.current, nextState);
+              }}
+            >
+              <option value="all">Все статусы</option>
+              <option value="disputed">Оспаривается</option>
+              <option value="chargeback_lost">Чарджбэк проигран</option>
+            </select>
+          </div>
+          <div className="button-row" style={{ marginBlock: 0 }}>
+            <Button
+              type="submit"
+              variant="ghost"
+              size="sm"
+              disabled={chargebacksLoading}
+              leadingIcon={<Search size={15} aria-hidden="true" />}
+            >
+              Найти
+            </Button>
+            {(appliedChargebackQuery || chargebackState !== "all") && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={chargebacksLoading}
+                onClick={() => {
+                  setChargebackQuery("");
+                  setAppliedChargebackQuery("");
+                  appliedChargebackQueryRef.current = "";
+                  setChargebackState("all");
+                  chargebackStateRef.current = "all";
+                  void loadChargebacks("", "all");
+                }}
+              >
+                Сбросить
+              </Button>
+            )}
+          </div>
+        </form>
         {chargebacks.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>Активных чарджбэков нет.</p>
+          <p className="muted" style={{ marginBlockEnd: 18 }}>
+            {chargebacksLoading
+              ? "Загрузка чарджбэков…"
+              : (appliedChargebackQuery || chargebackState !== "all")
+                ? "Чарджбэки по заданным фильтрам не найдены."
+                : "Активных чарджбэков нет."}
+          </p>
         ) : (
           <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
             <table className="clean-table">
               <thead>
                 <tr>
+                  <th>Заказ</th>
                   <th>Идентификатор</th>
                   <th>Сумма</th>
                   <th>Статус</th>
@@ -847,6 +1025,7 @@ export function FinanceWorkspace({
               <tbody>
                 {chargebacks.map(cb => (
                   <tr key={cb.id}>
+                    <td className="mono">{cb.orderPublicNumber ?? cb.orderId ?? "—"}</td>
                     <td className="mono">{cb.id}</td>
                     <td className="mono">{money(cb.amountKopeks)}</td>
                     <td>
@@ -858,10 +1037,19 @@ export function FinanceWorkspace({
                 ))}
               </tbody>
             </table>
-            {chargebacksMeta?.hasMore && (
-              <p className="muted" style={{ marginBlockStart: 8 }}>
-                Показаны последние {chargebacks.length} из {chargebacksMeta.total}.
-              </p>
+            {chargebacksBucket.hasMore && (
+              <div className="button-row" style={{ marginBlockStart: 10 }}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={chargebacksLoadingMore || chargebacksLoading}
+                  onClick={() => void loadMoreChargebacks()}
+                >
+                  {chargebacksLoadingMore
+                    ? "Загрузка…"
+                    : `Загрузить ещё (${chargebacksBucket.items.length} из ${chargebacksBucket.totalCount})`}
+                </Button>
+              </div>
             )}
           </div>
         )}

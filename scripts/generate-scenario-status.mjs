@@ -466,6 +466,16 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
       console.error(`${EXECUTION_CSV} has ${actualRows} rows, expected ${expectedRows} — run: node scripts/generate-scenario-status.mjs`);
       process.exit(1);
     }
+    const e2eRows = readPreviousE2eRows(EXECUTION_CSV);
+    const allowedLegacy = new Set(["PASS", "PARTIAL", "NOT_RUN", "FAIL", "BLOCKED", "UNKNOWN"]);
+    for (let i = 1; i <= 12; i++) {
+      const id = `E2E-${String(i).padStart(3, "0")}`;
+      const row = e2eRows.get(id);
+      if (!row || !allowedLegacy.has(row.previousStatus) || !(/^[0-9a-f]{40}$/.test(row.commit) || row.commit === "UNKNOWN") || allowedLegacy.has(row.roles)) {
+        console.error(`${EXECUTION_CSV}: semantic check failed for ${id} (${JSON.stringify(row)})`);
+        process.exit(1);
+      }
+    }
     if (csv.includes(catalog.baseline_sha)) {
       console.log(`${EXECUTION_CSV}: ${actualRows} rows (as_of ${committed.as_of})`);
     }

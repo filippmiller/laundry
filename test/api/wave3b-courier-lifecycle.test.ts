@@ -12,7 +12,7 @@ import {
 } from "../../src/services/delivery.js";
 import { recordIntake, syncScanEvents, type ScanEventInput } from "../../src/services/intake.js";
 import {
-  receiveHandoff, recordQualityCheck, startInspection, startProcessing,
+  completeProcessing, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
 } from "../../src/services/partner.js";
 
 const rid = () => randomUUID();
@@ -194,6 +194,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 3B courier shift lifecycle
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-rec-${rid()}` });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "dry_clean", key: `proc-rec-${rid()}` });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `comp-rec-${rid()}` });
 
     const garmentRows = await db.select().from(garments).where(eq(garments.orderId, f.orderId));
     expect(garmentRows).toHaveLength(2);

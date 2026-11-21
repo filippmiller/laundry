@@ -7,7 +7,7 @@ import { canonicalScanHash } from "../../src/core/scan-hash.js";
 import { assignDelivery, currentCourierStops } from "../../src/services/delivery.js";
 import { recordIntake, syncScanEvents, type ScanEventInput } from "../../src/services/intake.js";
 import { seedFullOrder, seedPartnerForOrder, seedSeal } from "../operations-fixtures.js";
-import { startInspection, startProcessing, receiveHandoff, recordQualityCheck } from "../../src/services/partner.js";
+import { completeProcessing, startInspection, startProcessing, receiveHandoff, recordQualityCheck } from "../../src/services/partner.js";
 
 describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 1 courier & delivery fixes", () => {
   let db: Db;
@@ -67,6 +67,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 1 courier & delivery fixes
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-${randomUUID()}` });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `proc-${randomUUID()}` });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: `comp-${randomUUID()}` });
     await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: `qc-${randomUUID()}` });
 
     const [shift] = await db.select().from(courierShifts).where(eq(courierShifts.id, f.shiftId)).limit(1);

@@ -28,6 +28,8 @@ async function resolveStopWindowForAssignment(
     windowStart?: Date;
     windowEnd?: Date;
     enforceShiftWindowOverlap?: boolean;
+    overrideShiftWindowMismatch?: boolean;
+    overrideReason?: string;
   },
 ) {
   const hasStart = input.windowStart !== undefined;
@@ -70,22 +72,41 @@ async function resolveStopWindowForAssignment(
     }
   }
 
+  const enforceOverlap = input.enforceShiftWindowOverlap ?? true;
   let shiftWindowMismatch: boolean | undefined;
+  let overrideApplied = false;
+  let trimmedOverrideReason: string | undefined;
   if (windowStart && windowEnd) {
     const overlap = input.shift.startsAt < windowEnd && input.shift.endsAt > windowStart;
     shiftWindowMismatch = !overlap;
-    if (input.enforceShiftWindowOverlap && shiftWindowMismatch) {
-      throw new AppError("CONFLICT_VERSION", "SHIFT_WINDOW_MISMATCH", {
-        shiftId: input.shift.id,
-        shiftStartsAt: input.shift.startsAt,
-        shiftEndsAt: input.shift.endsAt,
-        windowStart,
-        windowEnd,
-      });
+    if (shiftWindowMismatch) {
+      if (input.overrideShiftWindowMismatch) {
+        const reason = (input.overrideReason ?? "").trim();
+        if (reason.length < 5) {
+          throw new AppError("VALIDATION_ERROR", "OVERRIDE_REASON_REQUIRED", { minLength: 5 });
+        }
+        overrideApplied = true;
+        trimmedOverrideReason = reason;
+      } else if (enforceOverlap) {
+        throw new AppError("CONFLICT_VERSION", "SHIFT_WINDOW_MISMATCH", {
+          shiftId: input.shift.id,
+          shiftStartsAt: input.shift.startsAt,
+          shiftEndsAt: input.shift.endsAt,
+          windowStart,
+          windowEnd,
+        });
+      }
     }
   }
 
-  return { windowStart, windowEnd, windowOverridden, shiftWindowMismatch };
+  return {
+    windowStart,
+    windowEnd,
+    windowOverridden,
+    shiftWindowMismatch,
+    overrideApplied,
+    overrideReason: trimmedOverrideReason,
+  };
 }
 
 export async function assignPickup(
@@ -97,6 +118,8 @@ export async function assignPickup(
     windowStart?: Date;
     windowEnd?: Date;
     enforceShiftWindowOverlap?: boolean;
+    overrideShiftWindowMismatch?: boolean;
+    overrideReason?: string;
     key: string;
   },
 ) {
@@ -123,7 +146,9 @@ export async function assignPickup(
       shift,
       windowStart: input.windowStart,
       windowEnd: input.windowEnd,
-      enforceShiftWindowOverlap: input.enforceShiftWindowOverlap,
+      enforceShiftWindowOverlap: input.enforceShiftWindowOverlap ?? true,
+      overrideShiftWindowMismatch: input.overrideShiftWindowMismatch,
+      overrideReason: input.overrideReason,
     });
     // Supersede any active pickup stop so a reassigned courier immediately loses access.
     await tx.update(routeStops).set({ state: "rescheduled", version: sql`${routeStops.version} + 1` }).where(and(
@@ -166,6 +191,12 @@ export async function assignPickup(
         ...(resolvedWindow.windowOverridden ? { windowOverridden: true } : {}),
         ...(resolvedWindow.shiftWindowMismatch !== undefined
           ? { shiftWindowMismatch: resolvedWindow.shiftWindowMismatch }
+          : {}),
+        ...(resolvedWindow.overrideApplied
+          ? {
+            overrideReason: resolvedWindow.overrideReason,
+            overrideActorId: principal.userId,
+          }
           : {}),
       },
     });
@@ -240,6 +271,8 @@ export async function assignDelivery(
     windowStart?: Date;
     windowEnd?: Date;
     enforceShiftWindowOverlap?: boolean;
+    overrideShiftWindowMismatch?: boolean;
+    overrideReason?: string;
     key: string;
   },
 ) {
@@ -266,7 +299,9 @@ export async function assignDelivery(
       shift,
       windowStart: input.windowStart,
       windowEnd: input.windowEnd,
-      enforceShiftWindowOverlap: input.enforceShiftWindowOverlap,
+      enforceShiftWindowOverlap: input.enforceShiftWindowOverlap ?? true,
+      overrideShiftWindowMismatch: input.overrideShiftWindowMismatch,
+      overrideReason: input.overrideReason,
     });
 
     // Supersede any active delivery stop so a reassigned courier immediately loses access.
@@ -312,6 +347,12 @@ export async function assignDelivery(
         ...(resolvedWindow.windowOverridden ? { windowOverridden: true } : {}),
         ...(resolvedWindow.shiftWindowMismatch !== undefined
           ? { shiftWindowMismatch: resolvedWindow.shiftWindowMismatch }
+          : {}),
+        ...(resolvedWindow.overrideApplied
+          ? {
+            overrideReason: resolvedWindow.overrideReason,
+            overrideActorId: principal.userId,
+          }
           : {}),
       },
     });
