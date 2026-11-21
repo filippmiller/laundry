@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, garments, orders,
@@ -34,7 +34,7 @@ export async function openClaim(
   }, async tx => {
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
-    )).limit(1);
+    )).for("share").limit(1);
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
 
@@ -49,6 +49,8 @@ export async function openClaim(
     }
 
     // Evidence is bound to the order owner, a verified/held state and a claim-appropriate purpose.
+    // Lock candidate rows in deterministic id ASC order FOR UPDATE so concurrent deleteEvidence
+    // cannot tombstone an asset between eligibility check and legal hold insertion.
     const evidenceScope = and(
       eq(evidenceAssets.organizationId, principal.organizationId),
       eq(evidenceAssets.ownerType, "order"),
@@ -57,13 +59,16 @@ export async function openClaim(
       inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
       inArray(evidenceAssets.purpose, [...CLAIM_EVIDENCE_PURPOSES]),
     );
-    const orderEvidence = await tx.select().from(evidenceAssets).where(evidenceScope);
-    const evidence = input.evidenceIds?.length
-      ? await tx.select().from(evidenceAssets).where(and(
-        evidenceScope,
-        inArray(evidenceAssets.id, input.evidenceIds),
-      ))
-      : orderEvidence;
+    const evidenceWhere = input.evidenceIds?.length
+      ? and(evidenceScope, inArray(evidenceAssets.id, input.evidenceIds))
+      : evidenceScope;
+    const lockedCandidates = await tx.select().from(evidenceAssets)
+      .where(evidenceWhere)
+      .orderBy(asc(evidenceAssets.id))
+      .for("update");
+    const evidence = lockedCandidates.filter(
+      asset => asset.deletedAt === null && ["verified", "legal_hold", "retained"].includes(asset.status),
+    );
     if (input.evidenceIds?.length && evidence.length !== new Set(input.evidenceIds).size) {
       throw errors.notFound("evidence asset");
     }
@@ -216,7 +221,7 @@ export async function decideClaim(
   }, async tx => {
     const [claim] = await tx.select().from(claims).where(and(
       eq(claims.id, input.claimId), eq(claims.organizationId, principal.organizationId),
-    )).limit(1);
+    )).for("update").limit(1);
     if (!claim) throw errors.notFound("claim");
     if (!["opened", "triage", "investigating", "decision_pending", "escalated", "reopened"].includes(claim.state)) {
       throw new AppError("CONFLICT_VERSION", "CLAIM_NOT_DECIDABLE", { state: claim.state });
@@ -242,6 +247,7 @@ export async function decideClaim(
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.decided",
       payload: {
+        orderId: claim.orderId,
         outcome: input.outcome,
         previousVersion: claim.version,
         releasedHoldCount: releasedHolds.length,
@@ -260,7 +266,7 @@ export async function reopenClaim(db: Db, principal: Principal, input: { claimId
   }, async tx => {
     const [claim] = await tx.select().from(claims).where(and(
       eq(claims.id, input.claimId), eq(claims.organizationId, principal.organizationId),
-    )).limit(1);
+    )).for("update").limit(1);
     if (!claim) throw errors.notFound("claim");
     if (!["resolved", "denied_with_reason"].includes(claim.state)) throw errors.transition(claim.state, "reopen");
     const [updated] = await tx.update(claims).set({ state: "reopened", version: claim.version + 1 })
@@ -269,7 +275,8 @@ export async function reopenClaim(db: Db, principal: Principal, input: { claimId
     if (!updated) throw errors.version(claim.version);
 
     // Re-place active legal holds on the claim's previously held evidence (or current order
-    // evidence if none were held) so reopened claims remain protected against deletion/expiry.
+    // evidence if none were held) AND direct claim attachments (`ownerType = "claim"`),
+    // locking candidate evidence_assets in deterministic id ASC order FOR UPDATE.
     const priorHolds = await tx.select({
       assetId: evidenceLegalHolds.assetId,
       releasedAt: evidenceLegalHolds.releasedAt,
@@ -282,24 +289,35 @@ export async function reopenClaim(db: Db, principal: Principal, input: { claimId
     );
     const priorAssetIds = [...new Set(priorHolds.map(h => h.assetId))];
 
-    const candidateAssets = priorAssetIds.length > 0
-      ? await tx.select({ id: evidenceAssets.id }).from(evidenceAssets).where(and(
-        eq(evidenceAssets.organizationId, principal.organizationId),
-        inArray(evidenceAssets.id, priorAssetIds),
-        isNull(evidenceAssets.deletedAt),
-        inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
-      ))
-      : await tx.select({ id: evidenceAssets.id }).from(evidenceAssets).where(and(
-        eq(evidenceAssets.organizationId, principal.organizationId),
-        eq(evidenceAssets.ownerType, "order"),
-        eq(evidenceAssets.ownerId, claim.orderId),
-        isNull(evidenceAssets.deletedAt),
-        inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
-        inArray(evidenceAssets.purpose, [...CLAIM_EVIDENCE_PURPOSES]),
-      ));
+    const directClaimFilter = and(
+      eq(evidenceAssets.ownerType, "claim"),
+      eq(evidenceAssets.ownerId, claim.id),
+    );
+    const orderOwnedFilter = and(
+      eq(evidenceAssets.ownerType, "order"),
+      eq(evidenceAssets.ownerId, claim.orderId),
+      inArray(evidenceAssets.purpose, [...CLAIM_EVIDENCE_PURPOSES]),
+    );
+    const candidateScope = priorAssetIds.length > 0
+      ? or(inArray(evidenceAssets.id, priorAssetIds), directClaimFilter)
+      : or(orderOwnedFilter, directClaimFilter);
+
+    const candidateAssets = await tx.select({
+      id: evidenceAssets.id,
+      status: evidenceAssets.status,
+      deletedAt: evidenceAssets.deletedAt,
+    }).from(evidenceAssets).where(and(
+      eq(evidenceAssets.organizationId, principal.organizationId),
+      isNull(evidenceAssets.deletedAt),
+      inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
+      candidateScope,
+    )).orderBy(asc(evidenceAssets.id)).for("update");
 
     let reheldCount = 0;
     for (const asset of candidateAssets) {
+      if (asset.deletedAt !== null || !["verified", "legal_hold", "retained"].includes(asset.status)) {
+        continue;
+      }
       if (alreadyActiveAssetIds.has(asset.id)) continue;
       await tx.insert(evidenceLegalHolds).values({
         organizationId: principal.organizationId,

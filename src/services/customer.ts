@@ -73,10 +73,27 @@ export async function removeAddress(db: Db, principal: Principal, addressId: str
     organizationId: principal.organizationId, scope: "addresses:remove", key: addressId, actorId: principal.userId,
     requestHash: hashRequest({ addressId, actorId: principal.userId }),
   }, async tx => {
+    // Verify address ownership scoped by (id, organizationId, customerId) BEFORE querying
+    // orders so a foreign/cross-customer address always returns uniform NOT_FOUND.
+    const [address] = await tx.select({ id: customerAddresses.id })
+      .from(customerAddresses)
+      .where(and(
+        eq(customerAddresses.id, addressId),
+        eq(customerAddresses.organizationId, principal.organizationId),
+        eq(customerAddresses.customerId, principal.userId),
+      ))
+      .for("update")
+      .limit(1);
+    if (!address) throw errors.notFound("address");
+
     // An order still points at the address. The foreign key would refuse the delete and the
     // client would see an unexplained 500 instead of a conflict it can act on.
     const [referencing] = await tx.select({ id: orders.id }).from(orders)
-      .where(eq(orders.addressId, addressId)).limit(1);
+      .where(and(
+        eq(orders.organizationId, principal.organizationId),
+        eq(orders.customerId, principal.userId),
+        eq(orders.addressId, addressId),
+      )).limit(1);
     if (referencing) {
       throw new AppError("CONFLICT_VERSION", "ADDRESS_IN_USE", { orderId: referencing.id });
     }

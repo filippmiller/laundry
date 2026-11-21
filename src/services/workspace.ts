@@ -17,6 +17,9 @@ import { hasActiveCourierOrderEntitlement } from "./courier-entitlement.js";
 
 const SUPPORT_ROLES = [...ROLE_GROUPS.support, ...ROLE_GROUPS.admin] as const;
 const STAFF = ["dispatcher", "platform_finance", "claims_approver", "customer_support", "platform_admin"] as const;
+const ACTIVE_CLAIM_STATES = new Set([
+  "opened", "triage", "investigating", "decision_pending", "escalated", "reopened",
+]);
 
 /** Active sessions of the signed-in principal; the current one is flagged, not hidden. */
 export async function listMySessions(db: Db, principal: Principal) {
@@ -359,48 +362,92 @@ export async function uploadEvidence(
       eq(evidenceAssets.organizationId, principal.organizationId),
     )).limit(1);
     if (!asset) throw errors.notFound("evidence");
-    // Lock order: courier_shifts (FOR SHARE) BEFORE writing bytes or mutating evidence_assets.
+    // Lock order: courier_shifts (FOR SHARE) via authorizeEvidenceOwner, then claims (FOR SHARE)
+    // when ownerType === "claim", BEFORE evidence_assets (FOR UPDATE) to prevent AB-BA deadlocks
+    // with decideClaim / reopenClaim / deleteEvidence.
     await authorizeEvidenceOwner(tx, principal, asset, { lockShift: true });
-    if (asset.deletedAt !== null || asset.status === "expired") {
+
+    let claimForHold: { id: string; state: string } | undefined;
+    if (asset.ownerType === "claim") {
+      const [lockedClaim] = await tx.select({ id: claims.id, state: claims.state })
+        .from(claims)
+        .where(and(
+          eq(claims.id, asset.ownerId),
+          eq(claims.organizationId, principal.organizationId),
+        ))
+        .for("share")
+        .limit(1);
+      claimForHold = lockedClaim;
+    }
+
+    const [lockedAsset] = await tx.select().from(evidenceAssets).where(and(
+      eq(evidenceAssets.id, input.evidenceId),
+      eq(evidenceAssets.organizationId, principal.organizationId),
+    )).for("update").limit(1);
+    if (!lockedAsset) throw errors.notFound("evidence");
+    if (lockedAsset.deletedAt !== null || lockedAsset.status === "expired") {
       throw errors.notFound("evidence");
     }
-    if (asset.status === "quarantined") {
-      throw new AppError("FORBIDDEN", "EVIDENCE_QUARANTINED", { evidenceId: asset.id });
+    if (lockedAsset.status === "quarantined") {
+      throw new AppError("FORBIDDEN", "EVIDENCE_QUARANTINED", { evidenceId: lockedAsset.id });
     }
-    const effectiveMime = input.mimeType ?? asset.mimeType;
+    const effectiveMime = input.mimeType ?? lockedAsset.mimeType;
     if (!ALLOWED_EVIDENCE_MIME_TYPES.has(effectiveMime)) {
       throw new AppError("VALIDATION_ERROR", "EVIDENCE_MIME_NOT_ALLOWED", { mimeType: effectiveMime });
     }
-    if (actualSha256 !== asset.sha256) {
+    if (actualSha256 !== lockedAsset.sha256) {
       throw new AppError("VALIDATION_ERROR", "EVIDENCE_SHA256_MISMATCH", {
-        expected: asset.sha256,
+        expected: lockedAsset.sha256,
         actual: actualSha256,
       });
     }
-    if (asset.status === "pending_upload") {
-      await writeEvidenceBytes(asset.organizationId, asset.id, payloadBytes);
+    let resultStatus = lockedAsset.status;
+    if (lockedAsset.status === "pending_upload") {
+      await writeEvidenceBytes(lockedAsset.organizationId, lockedAsset.id, payloadBytes);
       await tx.update(evidenceAssets).set({
         status: "verified",
         mimeType: effectiveMime,
         sizeBytes: payloadBytes.byteLength,
-      }).where(eq(evidenceAssets.id, asset.id));
+      }).where(eq(evidenceAssets.id, lockedAsset.id));
+      resultStatus = "verified";
       await appendEvent(tx, {
         principal,
         aggregateType: "evidence",
-        aggregateId: asset.id,
+        aggregateId: lockedAsset.id,
         eventType: "evidence.verified",
         payload: {
-          ownerType: asset.ownerType,
-          ownerId: asset.ownerId,
+          ownerType: lockedAsset.ownerType,
+          ownerId: lockedAsset.ownerId,
           sha256: actualSha256,
           mimeType: effectiveMime,
           sizeBytes: payloadBytes.byteLength,
         },
       });
+      if (lockedAsset.ownerType === "claim" && claimForHold && ACTIVE_CLAIM_STATES.has(claimForHold.state)) {
+        const [existingHold] = await tx.select({ id: evidenceLegalHolds.id })
+          .from(evidenceLegalHolds)
+          .where(and(
+            eq(evidenceLegalHolds.organizationId, principal.organizationId),
+            eq(evidenceLegalHolds.assetId, lockedAsset.id),
+            eq(evidenceLegalHolds.claimId, claimForHold.id),
+            isNull(evidenceLegalHolds.releasedAt),
+          ))
+          .limit(1);
+        if (!existingHold) {
+          await tx.insert(evidenceLegalHolds).values({
+            organizationId: principal.organizationId,
+            assetId: lockedAsset.id,
+            claimId: claimForHold.id,
+            reason: `claim:${claimForHold.id}`,
+            placedBy: principal.userId,
+          });
+        }
+        resultStatus = "legal_hold";
+      }
     }
     return {
-      evidenceId: asset.id,
-      status: asset.status === "pending_upload" ? ("verified" as const) : asset.status,
+      evidenceId: lockedAsset.id,
+      status: resultStatus,
       sha256: actualSha256,
       mimeType: effectiveMime,
       sizeBytes: payloadBytes.byteLength,
@@ -600,28 +647,36 @@ export async function deleteEvidence(
       throw errors.forbidden("only the uploader or support staff may delete this evidence");
     }
 
-    if (asset.legalHoldCount > 0 || asset.status === "legal_hold") {
-      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id });
+    // Lock the target evidence_assets row FOR UPDATE after courier_shifts (FOR SHARE) so
+    // concurrent openClaim / reopenClaim / uploadEvidence serialize cleanly on the asset row.
+    const [lockedAsset] = await tx.select().from(evidenceAssets).where(and(
+      eq(evidenceAssets.id, input.evidenceId),
+      eq(evidenceAssets.organizationId, principal.organizationId),
+    )).for("update").limit(1);
+    if (!lockedAsset) throw errors.notFound("evidence");
+
+    if (lockedAsset.legalHoldCount > 0 || lockedAsset.status === "legal_hold") {
+      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: lockedAsset.id });
     }
     const [activeHold] = await tx.select({ id: evidenceLegalHolds.id }).from(evidenceLegalHolds).where(and(
       eq(evidenceLegalHolds.organizationId, principal.organizationId),
-      eq(evidenceLegalHolds.assetId, asset.id),
+      eq(evidenceLegalHolds.assetId, lockedAsset.id),
       isNull(evidenceLegalHolds.releasedAt),
     )).limit(1);
     if (activeHold) {
-      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id, holdId: activeHold.id });
+      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: lockedAsset.id, holdId: activeHold.id });
     }
 
     // Tombstone via `deleted_at`, never erase: the asset row, its access events and its legal holds
     // all stay intact so the audit trail survives deletion without overloading `status = 'expired'`.
-    if (asset.deletedAt !== null) {
-      return { evidenceId: asset.id, deleted: true as const, alreadyDeleted: true as const };
+    if (lockedAsset.deletedAt !== null) {
+      return { evidenceId: lockedAsset.id, deleted: true as const, alreadyDeleted: true as const };
     }
     const deletedAt = new Date();
     const [tombstoned] = await tx.update(evidenceAssets).set({
       deletedAt,
     }).where(and(
-      eq(evidenceAssets.id, asset.id),
+      eq(evidenceAssets.id, lockedAsset.id),
       eq(evidenceAssets.legalHoldCount, 0),
       isNull(evidenceAssets.deletedAt),
       sql`NOT EXISTS (
@@ -632,21 +687,26 @@ export async function deleteEvidence(
     if (!tombstoned) {
       const [current] = await tx.select({
         deletedAt: evidenceAssets.deletedAt,
-      }).from(evidenceAssets).where(eq(evidenceAssets.id, asset.id)).limit(1);
+      }).from(evidenceAssets).where(eq(evidenceAssets.id, lockedAsset.id)).limit(1);
       if (current?.deletedAt !== null) {
-        return { evidenceId: asset.id, deleted: true as const, alreadyDeleted: true as const };
+        return { evidenceId: lockedAsset.id, deleted: true as const, alreadyDeleted: true as const };
       }
-      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: asset.id });
+      throw new AppError("FINANCIAL_HOLD", "EVIDENCE_ON_LEGAL_HOLD", { evidenceId: lockedAsset.id });
     }
     await appendEvent(tx, {
       principal,
       aggregateType: "evidence",
-      aggregateId: asset.id,
+      aggregateId: lockedAsset.id,
       eventType: "evidence.deleted",
       // The digest identifies the object for the audit trail; the storage key is never published.
-      payload: { ownerType: asset.ownerType, ownerId: asset.ownerId, sha256: asset.sha256, deletedAt: deletedAt.toISOString() },
+      payload: {
+        ownerType: lockedAsset.ownerType,
+        ownerId: lockedAsset.ownerId,
+        sha256: lockedAsset.sha256,
+        deletedAt: deletedAt.toISOString(),
+      },
     });
-    return { evidenceId: asset.id, deleted: true as const, deletedAt };
+    return { evidenceId: lockedAsset.id, deleted: true as const, deletedAt };
   });
 }
 
