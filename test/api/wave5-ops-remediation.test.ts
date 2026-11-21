@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, desc, eq, isNull } from "drizzle-orm";
+import { buildApp } from "../../src/api/server.js";
 import { createDb, type Db } from "../../src/db/client.js";
 import {
   batches, containerAssignments, containers, courierShifts, garments,
@@ -9,6 +10,7 @@ import {
 } from "../../src/db/schema.js";
 import { makePrincipal, seedAddress, seedCatalog, seedDeliveryWindow, seedUser, seedWindow } from "../fixtures.js";
 import { seedFullOrder, seedPartnerForOrder, seedSeal } from "../operations-fixtures.js";
+import { login, uniquePhone } from "./_fixtures.js";
 import { createQuote } from "../../src/services/quotes.js";
 import { createOrder, scheduleOrder } from "../../src/services/orders.js";
 import { holdSlot } from "../../src/domain/slot-reservation.js";
@@ -26,14 +28,18 @@ const rid = () => randomUUID();
 describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 5 Ops Remediation (LND-PRO-001..004, LND-PRO-011)", () => {
   let db: Db;
   let close: () => Promise<void>;
+  let app: ReturnType<typeof buildApp>;
 
   beforeAll(async () => {
     const created = createDb(process.env.TEST_DATABASE_URL!, { max: 10 });
     db = created.db;
     close = () => created.pool.end();
+    app = buildApp(db);
+    await app.ready();
   });
 
   afterAll(async () => {
+    await app.close();
     await close();
   });
 
@@ -471,14 +477,27 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 5 Ops Remediation (LND-PRO
     await startInspection(db, partner.principal, { orderId: f.orderId, key: `insp-004-${rid()}` });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: `proc-004-${rid()}` });
 
-    const qc = await recordQualityCheck(db, partner.principal, {
-      orderId: f.orderId,
-      results: [],
-      bagPassed: true,
-      outboundContainerCode: outBag,
-      outboundSealCode: outSeal.serial,
-      key: `qc-004-${rid()}`,
+    const partnerSession = await login(app, {
+      organizationId: f.organizationId,
+      phone: uniquePhone(),
+      roles: [...partner.principal.roles],
+      partnerId: partner.partnerId,
     });
+    expect(partnerSession.status).toBe(200);
+
+    const qcResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/partner/orders/${f.orderId}/quality-check`,
+      headers: { cookie: partnerSession.cookie, "idempotency-key": `qc-004-${rid()}` },
+      payload: {
+        results: [],
+        bagPassed: true,
+        outboundContainerCode: outBag,
+        outboundSealCode: outSeal.serial,
+      },
+    });
+    expect(qcResponse.statusCode).toBe(200);
+    const qc = qcResponse.json() as { state: string };
     expect(qc.state).toBe("ready");
 
     // Inbound assignment is retired, outbound assignment is active, outbound seal is assigned

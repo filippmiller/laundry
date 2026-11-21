@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { MotionConfig } from "motion/react";
-import { ApiError, api } from "./api";
+import { api } from "./api";
+import {
+  PENDING_LOGOUT_KEY,
+  bootstrapSessionWithPendingLogout,
+  hasPendingLogout,
+  performServerLogout,
+  setPendingLogoutStorage,
+} from "./auth-logout";
 import "./styles.css";
 import { DemoConfig, Me, Notice } from "./types";
 import { Shell } from "./components/Shell";
@@ -9,28 +16,7 @@ import { Button } from "./components/ui";
 import { AuthLanding } from "./workspaces/AuthLanding";
 import { WORKSPACES, workspacesForRoles, type WorkspaceKey } from "./workspaces/registry";
 
-export const PENDING_LOGOUT_KEY = "laundry:pending-logout";
-
-function hasPendingLogout(): boolean {
-  try {
-    return typeof window !== "undefined" && window.localStorage.getItem(PENDING_LOGOUT_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function setPendingLogoutStorage(pending: boolean): void {
-  try {
-    if (typeof window === "undefined") return;
-    if (pending) {
-      window.localStorage.setItem(PENDING_LOGOUT_KEY, "1");
-    } else {
-      window.localStorage.removeItem(PENDING_LOGOUT_KEY);
-    }
-  } catch {
-    // Ignore storage quota or privacy-mode errors.
-  }
-}
+export { PENDING_LOGOUT_KEY };
 
 export function workspaceFromHash(hash: string): WorkspaceKey | null {
   if (!hash.startsWith("#/")) return null;
@@ -54,26 +40,14 @@ function App() {
   async function attemptServerLogout(): Promise<boolean> {
     setLogoutRetrying(true);
     try {
-      await api("/auth/logout", { method: "POST", body: {} });
-      setPendingLogoutStorage(false);
-      setPendingLogout(false);
-      setLogoutError(null);
-      return true;
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        setPendingLogoutStorage(false);
+      const res = await performServerLogout({ request: api });
+      if (res.completed) {
         setPendingLogout(false);
         setLogoutError(null);
         return true;
       }
-      const message = err instanceof ApiError
-        ? (err.serverMessage ?? err.code)
-        : err instanceof Error && err.message
-          ? err.message
-          : "NETWORK_ERROR";
-      setPendingLogoutStorage(true);
       setPendingLogout(true);
-      setLogoutError(message);
+      setLogoutError(res.error);
       setNotice({
         kind: "error",
         text: "Выход не завершён: сервер недоступен. Повторите выход.",
@@ -93,23 +67,18 @@ function App() {
       .catch(() => undefined);
 
     async function bootstrapSession() {
-      if (hasPendingLogout()) {
-        setPendingLogout(true);
-        const cleared = await attemptServerLogout();
-        if (cancelled) return;
-        if (!cleared) {
-          setBooting(false);
-          return;
-        }
+      const result = await bootstrapSessionWithPendingLogout<Me>({ request: api });
+      if (cancelled) return;
+      setPendingLogout(result.pendingLogout);
+      setLogoutError(result.logoutError);
+      if (result.pendingLogout && result.logoutError) {
+        setNotice({
+          kind: "error",
+          text: "Выход не завершён: сервер недоступен. Повторите выход.",
+        });
       }
-      try {
-        const result = await api<Me>("/me");
-        if (!cancelled) setMe(result);
-      } catch {
-        // Not signed in.
-      } finally {
-        if (!cancelled) setBooting(false);
-      }
+      if (result.me) setMe(result.me);
+      setBooting(false);
     }
 
     void bootstrapSession();

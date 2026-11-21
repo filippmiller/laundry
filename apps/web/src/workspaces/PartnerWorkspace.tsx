@@ -317,6 +317,8 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
   // Stage 3: Quality check drafts
   const [qcDrafts, setQcDrafts] = useState<Record<string, QcDraft>>({});
   const [economyQcNote, setEconomyQcNote] = useState("");
+  const [outboundContainerCode, setOutboundContainerCode] = useState("");
+  const [outboundSealCode, setOutboundSealCode] = useState("");
 
   // Stage 4: Partner act print & invoice line dispute modal
   const [printActId, setPrintActId] = useState<string | null>(null);
@@ -378,6 +380,8 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
     setActualContainers(buildContainerDrafts(selectedOrder.containers));
     setQcDrafts(buildQcDrafts(selectedOrder.garments));
     setEconomyQcNote("");
+    setOutboundContainerCode("");
+    setOutboundSealCode("");
     setAdjustmentRub("");
     setAdjustmentReason("");
     setReturnReason("");
@@ -586,6 +590,12 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
 
   const handleCompleteQc = async (economyBagPassed?: boolean) => {
     if (!selectedOrder) return;
+    const trimmedOutboundContainer = outboundContainerCode.trim();
+    const trimmedOutboundSeal = outboundSealCode.trim();
+    const outboundPayload = {
+      ...(trimmedOutboundContainer ? { outboundContainerCode: trimmedOutboundContainer } : {}),
+      ...(trimmedOutboundSeal ? { outboundSealCode: trimmedOutboundSeal } : {}),
+    };
     const isEconomy = selectedOrder.garments.length === 0;
     if (isEconomy) {
       if (typeof economyBagPassed !== "boolean") {
@@ -606,9 +616,12 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
               results: [],
               bagPassed: economyBagPassed,
               ...(trimmedNote ? { note: trimmedNote } : {}),
+              ...outboundPayload,
             },
           });
           setEconomyQcNote("");
+          setOutboundContainerCode("");
+          setOutboundSealCode("");
         },
         economyBagPassed
           ? `ОТК заказа ${selectedOrder.publicNumber} пройден — готово к выдаче`
@@ -629,11 +642,14 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
 
     await runAction(
       "quality_check",
-      () =>
-        api(`/partner/orders/${selectedOrder.orderId}/quality-check`, {
+      async () => {
+        await api(`/partner/orders/${selectedOrder.orderId}/quality-check`, {
           method: "POST",
-          body: { results },
-        }),
+          body: { results, ...outboundPayload },
+        });
+        setOutboundContainerCode("");
+        setOutboundSealCode("");
+      },
       `Результаты ОТК по заказу ${selectedOrder.publicNumber} сохранены`,
     );
   };
@@ -1150,6 +1166,23 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                       </div>
                     </div>
                   )}
+
+                  <div className="grid-two">
+                    <Input
+                      label="Исходящий контейнер / мешок (необязательно)"
+                      type="text"
+                      placeholder="Например, BAG-OUT-101"
+                      value={outboundContainerCode}
+                      onChange={(e) => setOutboundContainerCode(e.target.value)}
+                    />
+                    <Input
+                      label="Исходящая пломба (необязательно)"
+                      type="text"
+                      placeholder="Серийный номер пломбы для выдачи"
+                      value={outboundSealCode}
+                      onChange={(e) => setOutboundSealCode(e.target.value)}
+                    />
+                  </div>
 
                   {selectedOrder.garments.length === 0 ? (
                     <div className="stack">
