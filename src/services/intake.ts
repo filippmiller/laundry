@@ -99,6 +99,29 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
         quotedTiers: [...quotedTiers],
       });
     }
+    if (quotedTiers.has("protected") && quotedTiers.has("economy")) {
+      if (input.mode !== "mixed") {
+        throw new AppError("VALIDATION_ERROR", "INTAKE_MODE_MISMATCH", {
+          mode: input.mode,
+          expectedMode: "mixed",
+          quotedTiers: [...quotedTiers],
+        });
+      }
+      if (!input.items?.length) {
+        throw new AppError("VALIDATION_ERROR", "MIXED_SEPARATION_REQUIRED");
+      }
+    } else if (quotedTiers.has("protected")) {
+      if (input.mode !== "protected_items") {
+        throw new AppError("VALIDATION_ERROR", "INTAKE_MODE_MISMATCH", {
+          mode: input.mode,
+          expectedMode: "protected_items",
+          quotedTiers: [...quotedTiers],
+        });
+      }
+      if (!input.items?.length) {
+        throw new AppError("EVIDENCE_REQUIRED", "PROTECTED_ITEMS_REQUIRED");
+      }
+    }
     if (input.handoffCode) {
       if (!order.handoffCode || input.handoffCode.trim() !== order.handoffCode) {
         throw new AppError("FORBIDDEN", "HANDOFF_PIN_MISMATCH");

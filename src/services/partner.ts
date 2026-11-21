@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNull, lte, ne, notInArray, or, sql, sum } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, lte, ne, notInArray, or, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
 import {
   batches, batchItems, containerAssignments, containers, custodyDiscrepancies, custodyEvents,
@@ -714,6 +714,11 @@ export async function proposeAdjustment(
   input: { orderId: string; deltaKopeks: number; reason: string; key: string },
 ) {
   assertRole(principal, ...ROLE_GROUPS.partner);
+  if (!Number.isInteger(input.deltaKopeks) || input.deltaKopeks <= 0) {
+    throw new AppError("VALIDATION_ERROR", "ADJUSTMENT_DELTA_INVALID", {
+      deltaKopeks: input.deltaKopeks,
+    });
+  }
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "partner:adjustment", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
@@ -1053,6 +1058,11 @@ export async function returnUnprocessedOrder(
       eq(garments.organizationId, principal.organizationId),
       eq(garments.orderId, order.id),
     ));
+    await tx.update(containerAssignments).set({ unassignedAt: new Date() }).where(and(
+      eq(containerAssignments.organizationId, principal.organizationId),
+      eq(containerAssignments.orderId, order.id),
+      isNull(containerAssignments.unassignedAt),
+    ));
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: "order.return_unprocessed",
@@ -1103,6 +1113,7 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
         organizationId: principal.organizationId,
         batchId: batch.id,
         operation: input.processType,
+        detailsJson: { orderId: order.id, garmentId: item.id },
         actorId: principal.userId,
       });
     }
@@ -1111,19 +1122,27 @@ export async function startProcessing(db: Db, principal: Principal, input: { ord
         organizationId: principal.organizationId,
         batchId: batch.id,
         operation: `${input.processType}:bag`,
+        detailsJson: { orderId: order.id },
         actorId: principal.userId,
       });
     }
-    const to = nextState(order.lifecycleState as "inspection" | "processing", "start_processing", principal);
-    if (order.lifecycleState !== to) {
+    let to: OrderState;
+    if (order.lifecycleState === "inspection") {
+      to = nextState("inspection", "start_processing", principal);
       const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
         .returning({ version: orders.version });
       if (!advanced) throw errors.version(order.version);
+    } else {
+      to = "processing";
+      const [bumped] = await tx.update(orders).set({ version: order.version + 1 })
+        .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+        .returning({ version: orders.version });
+      if (!bumped) throw errors.version(order.version);
     }
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.start_processing",
-      payload: { batchId: batch.id, itemCount: items.length },
+      payload: { batchId: batch.id, itemCount: items.length, fromState: order.lifecycleState },
     });
     return { batchId: batch.id, state: to, itemCount: items.length };
   });
@@ -1137,10 +1156,17 @@ export async function recordQualityCheck(
     results: Array<{ garmentId: string; passed: boolean; note?: string }>;
     bagPassed?: boolean;
     note?: string;
+    outboundContainerCode?: string;
+    outboundSealCode?: string;
     key: string;
   },
 ) {
   assertRole(principal, ...ROLE_GROUPS.partner);
+  const outboundContainerCode = input.outboundContainerCode?.trim() || undefined;
+  const outboundSealCode = input.outboundSealCode?.trim() || undefined;
+  if (Boolean(outboundContainerCode) !== Boolean(outboundSealCode)) {
+    throw new AppError("VALIDATION_ERROR", "OUTBOUND_CONTAINER_AND_SEAL_REQUIRED");
+  }
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "partner:qc", key: input.key, actorId: principal.userId,
     requestHash: hashRequest(input),
@@ -1154,6 +1180,39 @@ export async function recordQualityCheck(
     if (!order) throw errors.notFound("order");
     assertAssignedPartner(order, principal);
     if (order.lifecycleState !== "processing") throw errors.transition(order.lifecycleState, "qc_start");
+
+    const [latestQc] = await tx.select({ occurredAt: qualityChecks.occurredAt })
+      .from(qualityChecks)
+      .where(and(
+        eq(qualityChecks.organizationId, principal.organizationId),
+        eq(qualityChecks.orderId, order.id),
+      ))
+      .orderBy(desc(qualityChecks.occurredAt))
+      .limit(1);
+
+    const matchingOps = await tx.select({
+      id: processingOperations.id,
+      batchId: processingOperations.batchId,
+    })
+      .from(processingOperations)
+      .leftJoin(batchItems, eq(batchItems.batchId, processingOperations.batchId))
+      .leftJoin(garments, eq(garments.id, batchItems.garmentId))
+      .where(and(
+        eq(processingOperations.organizationId, principal.organizationId),
+        or(
+          sql`${processingOperations.detailsJson}->>'orderId' = ${order.id}`,
+          eq(garments.orderId, order.id),
+        ),
+        ...(latestQc ? [gt(processingOperations.occurredAt, latestQc.occurredAt)] : []),
+      ));
+
+    if (!matchingOps.length) {
+      throw new AppError("INVALID_TRANSITION", "PROCESSING_OPERATION_REQUIRED", {
+        orderId: order.id,
+      });
+    }
+    const associatedBatchIds = [...new Set(matchingOps.map(op => op.batchId))];
+
     const garmentRows = await tx.select({ id: garments.id }).from(garments).where(and(
       eq(garments.organizationId, principal.organizationId), eq(garments.orderId, order.id),
     ));
@@ -1210,7 +1269,7 @@ export async function recordQualityCheck(
       });
       allPassed = input.bagPassed;
     }
-    const to = nextState("processing", allPassed ? "qc_start" : "qc_start", principal);
+    const to = nextState("processing", "qc_start", principal);
     let finalState: OrderState = to;
     await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
@@ -1218,6 +1277,52 @@ export async function recordQualityCheck(
       finalState = nextState("quality_check", "pack", principal);
       await tx.update(orders).set({ lifecycleState: finalState, version: order.version + 2 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
+      if (outboundContainerCode && outboundSealCode) {
+        const [outboundSeal] = await tx.select().from(seals).where(and(
+          eq(seals.organizationId, principal.organizationId),
+          eq(seals.serialNumber, outboundSealCode),
+        )).limit(1);
+        if (!outboundSeal || outboundSeal.state !== "available") {
+          throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_AVAILABLE", { serial: outboundSealCode });
+        }
+        await tx.update(containerAssignments).set({ unassignedAt: new Date() }).where(and(
+          eq(containerAssignments.organizationId, principal.organizationId),
+          eq(containerAssignments.orderId, order.id),
+          isNull(containerAssignments.unassignedAt),
+        ));
+        let [outboundContainer] = await tx.select().from(containers).where(and(
+          eq(containers.organizationId, principal.organizationId),
+          eq(containers.code, outboundContainerCode),
+        )).limit(1);
+        if (!outboundContainer) {
+          [outboundContainer] = await tx.insert(containers).values({
+            organizationId: principal.organizationId,
+            code: outboundContainerCode,
+          }).returning();
+        }
+        const [activeContainerAssignment] = await tx.select({ id: containerAssignments.id })
+          .from(containerAssignments)
+          .where(and(
+            eq(containerAssignments.containerId, outboundContainer.id),
+            isNull(containerAssignments.unassignedAt),
+          ))
+          .limit(1);
+        if (activeContainerAssignment) {
+          throw new AppError("CUSTODY_CONFLICT", "CONTAINER_ALREADY_ASSIGNED", { code: outboundContainerCode });
+        }
+        const claimedSeal = await tx.update(seals).set({ state: "assigned" })
+          .where(and(eq(seals.id, outboundSeal.id), eq(seals.state, "available")))
+          .returning({ id: seals.id });
+        if (!claimedSeal.length) {
+          throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_AVAILABLE", { serial: outboundSealCode });
+        }
+        await tx.insert(containerAssignments).values({
+          organizationId: principal.organizationId,
+          containerId: outboundContainer.id,
+          orderId: order.id,
+          sealId: outboundSeal.id,
+        });
+      }
     } else {
       // A QC failure is a rewash, never a delivery and never a customer surcharge.
       // The escalation itself is automatic, so it is not blocked by supervisor-only command roles.
@@ -1228,10 +1333,20 @@ export async function recordQualityCheck(
       await tx.update(orders).set({ lifecycleState: finalState, version: order.version + 2 })
         .where(and(eq(orders.id, order.id), eq(orders.version, order.version + 1)));
     }
+    await tx.update(batches).set({ state: allPassed ? "packed" : "processing" }).where(and(
+      eq(batches.organizationId, principal.organizationId),
+      inArray(batches.id, associatedBatchIds),
+    ));
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
       eventType: allPassed ? "order.qc_passed" : "order.qc_failed",
-      payload: { results: input.results, state: finalState },
+      payload: {
+        results: input.results,
+        state: finalState,
+        ...(allPassed && outboundContainerCode && outboundSealCode
+          ? { outboundContainerCode, outboundSealCode }
+          : {}),
+      },
     });
     return { orderId: order.id, state: finalState, allPassed };
   });
@@ -1261,7 +1376,7 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
   if (!orderRows.length) return { orders: [] };
 
   const orderIds = orderRows.map(order => order.id);
-  const [manifestRows, containerRows, garmentRows, adjustmentRows] = await Promise.all([
+  const [manifestRows, containerRows, garmentRows, adjustmentRows, qcRows, opByDetailsRows, opByGarmentRows] = await Promise.all([
     db.select().from(intakeManifests).where(and(
       eq(intakeManifests.organizationId, principal.organizationId),
       inArray(intakeManifests.orderId, orderIds),
@@ -1277,6 +1392,7 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
       .where(and(
         eq(containerAssignments.organizationId, principal.organizationId),
         inArray(containerAssignments.orderId, orderIds),
+        isNull(containerAssignments.unassignedAt),
       )),
     db.select({
       id: garments.id,
@@ -1302,7 +1418,45 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
       eq(orderAdjustments.organizationId, principal.organizationId),
       inArray(orderAdjustments.orderId, orderIds),
     )).orderBy(desc(orderAdjustments.createdAt)),
+    db.select({
+      orderId: qualityChecks.orderId,
+      occurredAt: qualityChecks.occurredAt,
+    }).from(qualityChecks).where(and(
+      eq(qualityChecks.organizationId, principal.organizationId),
+      inArray(qualityChecks.orderId, orderIds),
+    )),
+    db.select({
+      orderId: sql<string>`${processingOperations.detailsJson}->>'orderId'`,
+      occurredAt: processingOperations.occurredAt,
+    }).from(processingOperations).where(and(
+      eq(processingOperations.organizationId, principal.organizationId),
+      sql`${processingOperations.detailsJson}->>'orderId' IN (${sql.join(orderIds.map(id => sql`${id}`), sql`, `)})`,
+    )),
+    db.select({
+      orderId: garments.orderId,
+      occurredAt: processingOperations.occurredAt,
+    }).from(processingOperations)
+      .innerJoin(batchItems, eq(batchItems.batchId, processingOperations.batchId))
+      .innerJoin(garments, eq(garments.id, batchItems.garmentId))
+      .where(and(
+        eq(processingOperations.organizationId, principal.organizationId),
+        inArray(garments.orderId, orderIds),
+      )),
   ]);
+
+  const latestQcByOrder = new Map<string, number>();
+  for (const row of qcRows) {
+    const ts = new Date(row.occurredAt).getTime();
+    const prev = latestQcByOrder.get(row.orderId);
+    if (prev === undefined || ts > prev) latestQcByOrder.set(row.orderId, ts);
+  }
+  const latestProcByOrder = new Map<string, number>();
+  for (const row of [...opByDetailsRows, ...opByGarmentRows]) {
+    if (!row.orderId) continue;
+    const ts = new Date(row.occurredAt).getTime();
+    const prev = latestProcByOrder.get(row.orderId);
+    if (prev === undefined || ts > prev) latestProcByOrder.set(row.orderId, ts);
+  }
 
   const latestManifestByOrder = new Map<string, typeof intakeManifests.$inferSelect>();
   const weightByOrderContainer = new Map<string, number>();
@@ -1347,17 +1501,25 @@ export async function partnerWorkspace(db: Db, principal: Principal) {
   }
 
   return {
-    orders: orderRows.map(order => ({
-      id: order.id,
-      orderId: order.id,
-      publicNumber: order.publicNumber,
-      lifecycleState: order.lifecycleState,
-      returnReason: order.returnReason,
-      createdAt: order.createdAt,
-      manifestId: latestManifestByOrder.get(order.id)?.id ?? null,
-      containers: containersByOrder.get(order.id) ?? [],
-      garments: garmentsByOrder.get(order.id) ?? [],
-      adjustments: adjustmentsByOrder.get(order.id) ?? [],
-    })),
+    orders: orderRows.map(order => {
+      const latestProc = latestProcByOrder.get(order.id);
+      const latestQc = latestQcByOrder.get(order.id);
+      const hasUncheckedProcessing = Boolean(
+        latestProc !== undefined && (latestQc === undefined || latestProc > latestQc),
+      );
+      return {
+        id: order.id,
+        orderId: order.id,
+        publicNumber: order.publicNumber,
+        lifecycleState: order.lifecycleState,
+        returnReason: order.returnReason,
+        createdAt: order.createdAt,
+        manifestId: latestManifestByOrder.get(order.id)?.id ?? null,
+        containers: containersByOrder.get(order.id) ?? [],
+        garments: garmentsByOrder.get(order.id) ?? [],
+        adjustments: adjustmentsByOrder.get(order.id) ?? [],
+        hasUncheckedProcessing,
+      };
+    }),
   };
 }

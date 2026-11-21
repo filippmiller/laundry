@@ -488,6 +488,13 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 4 Track 2: Finance obligat
       expect(failedQc.allPassed).toBe(false);
       expect(failedQc.state).toBe("processing");
 
+      // Rework requires starting a new processing batch before the second QC
+      await startProcessing(db, partner.principal, {
+        orderId: f.orderId,
+        processType: "wash_40c",
+        key: `proc-eco-rework-${rid()}`,
+      });
+
       // Explicit PASS after rework -> ready, preserves both QC history rows
       const passedQc = await recordQualityCheck(db, partner.principal, {
         orderId: f.orderId,

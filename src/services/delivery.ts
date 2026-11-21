@@ -1,8 +1,9 @@
-import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import type { Db, Tx } from "../db/client.js";
 import {
-  buildings, claims, courierShifts, custodyDiscrepancies, custodyEvents, customerAddresses,
-  deliveryAttempts, garments, notifications, orders, partners, routes, routeStops, users, vehicles,
+  buildings, claims, containerAssignments, courierShifts, custodyDiscrepancies, custodyEvents, customerAddresses,
+  deliveryAttempts, garments, notifications, orders, partners, quotes, routes, routeStops, serviceWindows,
+  slotReservations, users, vehicles,
 } from "../db/schema.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
@@ -13,10 +14,91 @@ import {
   activeCourierStopsFilter, assertCourierStopEntitlement, lockCourierShiftForShare,
 } from "./courier-entitlement.js";
 
+/**
+ * Resolves the canonical stop window from an explicit caller override or the order's active
+ * confirmed slot reservation (`pickup` or `delivery`), and evaluates overlap with the shift.
+ */
+async function resolveStopWindowForAssignment(
+  tx: Tx,
+  input: {
+    organizationId: string;
+    orderId: string;
+    kind: "pickup" | "delivery";
+    shift: { id: string; startsAt: Date; endsAt: Date };
+    windowStart?: Date;
+    windowEnd?: Date;
+    enforceShiftWindowOverlap?: boolean;
+  },
+) {
+  const hasStart = input.windowStart !== undefined;
+  const hasEnd = input.windowEnd !== undefined;
+  if (hasStart !== hasEnd) {
+    throw new AppError("VALIDATION_ERROR", "INVALID_WINDOW_RANGE");
+  }
+  if (hasStart && hasEnd && !(input.windowStart! < input.windowEnd!)) {
+    throw new AppError("VALIDATION_ERROR", "INVALID_WINDOW_RANGE", {
+      windowStart: input.windowStart,
+      windowEnd: input.windowEnd,
+    });
+  }
+
+  let windowStart = input.windowStart;
+  let windowEnd = input.windowEnd;
+  const windowOverridden = hasStart && hasEnd;
+
+  if (!windowOverridden) {
+    const [confirmed] = await tx.select({
+      startsAt: serviceWindows.startsAt,
+      endsAt: serviceWindows.endsAt,
+    })
+      .from(slotReservations)
+      .innerJoin(serviceWindows, and(
+        eq(serviceWindows.id, slotReservations.windowId),
+        eq(serviceWindows.organizationId, input.organizationId),
+        eq(serviceWindows.kind, input.kind),
+      ))
+      .where(and(
+        eq(slotReservations.organizationId, input.organizationId),
+        eq(slotReservations.orderId, input.orderId),
+        eq(slotReservations.state, "confirmed"),
+      ))
+      .orderBy(desc(slotReservations.createdAt))
+      .limit(1);
+    if (confirmed) {
+      windowStart = confirmed.startsAt;
+      windowEnd = confirmed.endsAt;
+    }
+  }
+
+  let shiftWindowMismatch: boolean | undefined;
+  if (windowStart && windowEnd) {
+    const overlap = input.shift.startsAt < windowEnd && input.shift.endsAt > windowStart;
+    shiftWindowMismatch = !overlap;
+    if (input.enforceShiftWindowOverlap && shiftWindowMismatch) {
+      throw new AppError("CONFLICT_VERSION", "SHIFT_WINDOW_MISMATCH", {
+        shiftId: input.shift.id,
+        shiftStartsAt: input.shift.startsAt,
+        shiftEndsAt: input.shift.endsAt,
+        windowStart,
+        windowEnd,
+      });
+    }
+  }
+
+  return { windowStart, windowEnd, windowOverridden, shiftWindowMismatch };
+}
+
 export async function assignPickup(
   db: Db,
   principal: Principal,
-  input: { orderId: string; shiftId: string; key: string },
+  input: {
+    orderId: string;
+    shiftId: string;
+    windowStart?: Date;
+    windowEnd?: Date;
+    enforceShiftWindowOverlap?: boolean;
+    key: string;
+  },
 ) {
   assertRole(principal, ...ROLE_GROUPS.dispatcher);
   return withIdempotencyFlat(db, {
@@ -34,6 +116,15 @@ export async function assignPickup(
     const to: OrderState = isReassign
       ? "pickup_assigned"
       : nextState(order.lifecycleState as "scheduled", "assign_pickup", principal);
+    const resolvedWindow = await resolveStopWindowForAssignment(tx, {
+      organizationId: principal.organizationId,
+      orderId: order.id,
+      kind: "pickup",
+      shift,
+      windowStart: input.windowStart,
+      windowEnd: input.windowEnd,
+      enforceShiftWindowOverlap: input.enforceShiftWindowOverlap,
+    });
     // Supersede any active pickup stop so a reassigned courier immediately loses access.
     await tx.update(routeStops).set({ state: "rescheduled", version: sql`${routeStops.version} + 1` }).where(and(
       eq(routeStops.organizationId, principal.organizationId),
@@ -45,8 +136,8 @@ export async function assignPickup(
       organizationId: principal.organizationId,
       shiftId: shift.id,
       kind: "pickup",
-      plannedStart: shift.startsAt,
-      plannedEnd: shift.endsAt,
+      plannedStart: resolvedWindow.windowStart ?? shift.startsAt,
+      plannedEnd: resolvedWindow.windowEnd ?? shift.endsAt,
     }).returning();
     const [stop] = await tx.insert(routeStops).values({
       organizationId: principal.organizationId,
@@ -55,6 +146,8 @@ export async function assignPickup(
       kind: "pickup",
       sequence: 1,
       assignedCourierId: shift.courierId,
+      windowStart: resolvedWindow.windowStart,
+      windowEnd: resolvedWindow.windowEnd,
     }).returning();
     const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
@@ -64,7 +157,17 @@ export async function assignPickup(
     if (!advanced) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
-      eventType: "order.assign_pickup", payload: { stopId: stop.id, courierId: shift.courierId },
+      eventType: "order.assign_pickup",
+      payload: {
+        stopId: stop.id,
+        courierId: shift.courierId,
+        windowStart: resolvedWindow.windowStart?.toISOString() ?? null,
+        windowEnd: resolvedWindow.windowEnd?.toISOString() ?? null,
+        ...(resolvedWindow.windowOverridden ? { windowOverridden: true } : {}),
+        ...(resolvedWindow.shiftWindowMismatch !== undefined
+          ? { shiftWindowMismatch: resolvedWindow.shiftWindowMismatch }
+          : {}),
+      },
     });
     return { orderId: order.id, stopId: stop.id, courierId: shift.courierId, state: to };
   });
@@ -72,7 +175,7 @@ export async function assignPickup(
 
 export async function currentCourierStops(db: Db, principal: Principal) {
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
-  return db.select({
+  const rows = await db.select({
     stopId: routeStops.id,
     orderId: routeStops.orderId,
     publicNumber: orders.publicNumber,
@@ -85,15 +188,27 @@ export async function currentCourierStops(db: Db, principal: Principal) {
     address: buildings.address,
     apartment: customerAddresses.apartment,
     notes: customerAddresses.notes,
+    quoteSnapshot: quotes.snapshotJson,
   }).from(routeStops)
     .innerJoin(routes, eq(routes.id, routeStops.routeId))
     .innerJoin(courierShifts, eq(courierShifts.id, routes.shiftId))
     .innerJoin(orders, eq(orders.id, routeStops.orderId))
+    .leftJoin(quotes, eq(quotes.id, orders.quoteId))
     .leftJoin(customerAddresses, eq(customerAddresses.id, orders.addressId))
     .leftJoin(buildings, eq(buildings.id, customerAddresses.buildingId))
     .where(activeCourierStopsFilter(principal))
     .orderBy(routeStops.sequence)
     .limit(50);
+
+  return rows.map(({ quoteSnapshot, ...stop }) => {
+    const snap = (quoteSnapshot ?? {}) as { lines?: Array<{ kind?: string; tier?: string }> };
+    const quotedTiers = [...new Set(
+      (snap.lines ?? [])
+        .filter(line => line.kind === "service" && typeof line.tier === "string")
+        .map(line => line.tier!),
+    )];
+    return { ...stop, quotedTiers };
+  });
 }
 
 export async function startStop(db: Db, principal: Principal, input: { stopId: string; key: string }) {
@@ -119,7 +234,14 @@ export async function startStop(db: Db, principal: Principal, input: { stopId: s
 export async function assignDelivery(
   db: Db,
   principal: Principal,
-  input: { orderId: string; shiftId: string; windowStart?: Date; windowEnd?: Date; key: string },
+  input: {
+    orderId: string;
+    shiftId: string;
+    windowStart?: Date;
+    windowEnd?: Date;
+    enforceShiftWindowOverlap?: boolean;
+    key: string;
+  },
 ) {
   assertRole(principal, ...ROLE_GROUPS.dispatcher);
   return withIdempotencyFlat(db, {
@@ -137,6 +259,15 @@ export async function assignDelivery(
     if (!isReassign && order.lifecycleState !== "ready") {
       throw errors.transition(order.lifecycleState, "dispatch");
     }
+    const resolvedWindow = await resolveStopWindowForAssignment(tx, {
+      organizationId: principal.organizationId,
+      orderId: order.id,
+      kind: "delivery",
+      shift,
+      windowStart: input.windowStart,
+      windowEnd: input.windowEnd,
+      enforceShiftWindowOverlap: input.enforceShiftWindowOverlap,
+    });
 
     // Supersede any active delivery stop so a reassigned courier immediately loses access.
     await tx.update(routeStops).set({ state: "rescheduled", version: sql`${routeStops.version} + 1` }).where(and(
@@ -149,8 +280,8 @@ export async function assignDelivery(
       organizationId: principal.organizationId,
       shiftId: shift.id,
       kind: "delivery",
-      plannedStart: input.windowStart ?? shift.startsAt,
-      plannedEnd: input.windowEnd ?? shift.endsAt,
+      plannedStart: resolvedWindow.windowStart ?? shift.startsAt,
+      plannedEnd: resolvedWindow.windowEnd ?? shift.endsAt,
     }).returning();
     const [stop] = await tx.insert(routeStops).values({
       organizationId: principal.organizationId,
@@ -160,8 +291,8 @@ export async function assignDelivery(
       sequence: 1,
       state: "pending",
       assignedCourierId: shift.courierId,
-      windowStart: input.windowStart,
-      windowEnd: input.windowEnd,
+      windowStart: resolvedWindow.windowStart,
+      windowEnd: resolvedWindow.windowEnd,
     }).returning();
     const to: OrderState = isReassign
       ? "out_for_delivery"
@@ -172,7 +303,17 @@ export async function assignDelivery(
     if (!advanced) throw errors.version(order.version);
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id,
-      eventType: "order.dispatch", payload: { stopId: stop.id, routeId: route.id },
+      eventType: "order.dispatch",
+      payload: {
+        stopId: stop.id,
+        routeId: route.id,
+        windowStart: resolvedWindow.windowStart?.toISOString() ?? null,
+        windowEnd: resolvedWindow.windowEnd?.toISOString() ?? null,
+        ...(resolvedWindow.windowOverridden ? { windowOverridden: true } : {}),
+        ...(resolvedWindow.shiftWindowMismatch !== undefined
+          ? { shiftWindowMismatch: resolvedWindow.shiftWindowMismatch }
+          : {}),
+      },
     });
     return { orderId: order.id, stopId: stop.id, state: to };
   });
@@ -333,6 +474,11 @@ export async function recordDeliveryAttempt(db: Db, principal: Principal, input:
         ))
         .returning({ id: routeStops.id });
       if (!completedStop) throw errors.version(stop.version);
+      await tx.update(containerAssignments).set({ unassignedAt: new Date() }).where(and(
+        eq(containerAssignments.organizationId, principal.organizationId),
+        eq(containerAssignments.orderId, order.id),
+        isNull(containerAssignments.unassignedAt),
+      ));
     } else if (input.outcome === "partial") {
       for (const id of deliveredIds) {
         await tx.update(garments).set({ status: "delivered" }).where(eq(garments.id, id));
@@ -435,6 +581,11 @@ export async function closeOrder(db: Db, principal: Principal, input: { orderId:
       .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
       .returning({ id: orders.id });
     if (!closed) throw errors.version(order.version);
+    await tx.update(containerAssignments).set({ unassignedAt: new Date() }).where(and(
+      eq(containerAssignments.organizationId, principal.organizationId),
+      eq(containerAssignments.orderId, order.id),
+      isNull(containerAssignments.unassignedAt),
+    ));
     await appendEvent(tx, {
       principal, aggregateType: "order", aggregateId: order.id, eventType: "order.closed",
       payload: { openClaimCount: openClaims.length },

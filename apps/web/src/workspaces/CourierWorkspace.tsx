@@ -92,6 +92,7 @@ type RouteStop = {
   apartment?: string;
   windowLabel?: string;
   notes?: string;
+  quotedTiers: string[];
 };
 
 type OrderGarment = {
@@ -294,6 +295,9 @@ function normalizeStops(raw: unknown): RouteStop[] {
         apartment: typeof s.apartment === "string" ? s.apartment : undefined,
         windowLabel: typeof s.windowLabel === "string" ? s.windowLabel : undefined,
         notes: typeof s.notes === "string" ? s.notes : undefined,
+        quotedTiers: Array.isArray(s.quotedTiers)
+          ? s.quotedTiers.filter((t): t is string => typeof t === "string")
+          : [],
       };
     })
     .filter((s): s is RouteStop => s !== null)
@@ -517,6 +521,17 @@ export function CourierWorkspace({
     [stops, selectedStopId],
   );
 
+  const requiredIntakeMode = useMemo<IntakeMode | null>(() => {
+    const tiers = selectedStop?.quotedTiers;
+    if (!tiers || tiers.length === 0) return null;
+    const hasProtected = tiers.includes("protected");
+    const hasEconomy = tiers.includes("economy");
+    if (hasProtected && hasEconomy) return "mixed";
+    if (hasProtected) return "protected_items";
+    if (hasEconomy) return "economy_bag";
+    return null;
+  }, [selectedStop?.quotedTiers]);
+
   const refreshQueue = useCallback(async () => {
     if (!actorScope) {
       setPendingScans([]);
@@ -723,13 +738,15 @@ export function CourierWorkspace({
     };
   }, [selectedStop, notify]);
 
-  // The intake list belongs to one stop: a new stop starts with an empty manifest.
+  // The intake list belongs to one stop: a new stop starts with an empty manifest and
+  // initializes intakeMode from the order's quoted service tier.
   useEffect(() => {
     setPicked([]);
     setItemMeta({});
     setIntakeEvidenceIds([]);
     setDualConfirmed(false);
-  }, [selectedStop?.stopId]);
+    setIntakeMode(requiredIntakeMode ?? "economy_bag");
+  }, [selectedStop?.stopId, requiredIntakeMode]);
 
   const syncQueue = useCallback(async () => {
     if (syncingRef.current || !actorScope || !deviceId) return;
@@ -1074,6 +1091,14 @@ export function CourierWorkspace({
     const parsedWeight = Number(weightGrams);
     if (!Number.isFinite(parsedWeight) || parsedWeight <= 0) {
       notify({ kind: "error", text: "Укажите корректный вес в граммах." });
+      return;
+    }
+
+    if (requiredIntakeMode && intakeMode !== requiredIntakeMode) {
+      notify({
+        kind: "error",
+        text: "Режим приёмки не может быть ниже или не соответствовать тарифу заказа.",
+      });
       return;
     }
 
@@ -1578,11 +1603,31 @@ export function CourierWorkspace({
                 <Select
                   label="Режим приёмки"
                   value={intakeMode}
-                  onChange={e => setIntakeMode(e.target.value as IntakeMode)}
+                  disabled={requiredIntakeMode !== null}
+                  onChange={e => {
+                    const next = e.target.value as IntakeMode;
+                    if (requiredIntakeMode && next !== requiredIntakeMode) return;
+                    setIntakeMode(next);
+                  }}
                 >
-                  <option value="economy_bag">Эконом (мешок + пломба)</option>
-                  <option value="protected_items">Защищённый (поштучная опись)</option>
-                  <option value="mixed">Смешанный</option>
+                  <option
+                    value="economy_bag"
+                    disabled={requiredIntakeMode !== null && requiredIntakeMode !== "economy_bag"}
+                  >
+                    Эконом (мешок + пломба)
+                  </option>
+                  <option
+                    value="protected_items"
+                    disabled={requiredIntakeMode !== null && requiredIntakeMode !== "protected_items"}
+                  >
+                    Защищённый (поштучная опись)
+                  </option>
+                  <option
+                    value="mixed"
+                    disabled={requiredIntakeMode !== null && requiredIntakeMode !== "mixed"}
+                  >
+                    Смешанный
+                  </option>
                 </Select>
 
                 <div className="grid-two">

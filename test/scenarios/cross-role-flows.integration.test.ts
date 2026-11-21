@@ -911,6 +911,14 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
       description: "Рубашка",
     }).returning();
 
+    const batchA1 = await app.inject({
+      method: "POST",
+      url: "/api/v1/partner/batches",
+      headers: cookieHeader(partner.cookie, { "idempotency-key": `batA1-${randomUUID()}` }),
+      payload: { orderId: orderA.order.id, processType: "wash" },
+    });
+    expect(batchA1.statusCode, batchA1.body).toBe(200);
+
     const qcFail = await app.inject({
       method: "POST",
       url: `/api/v1/partner/orders/${orderA.order.id}/quality-check`,
@@ -919,6 +927,14 @@ describe("Cross-role end-to-end flows (F01..F36)", () => {
     });
     expect(qcFail.statusCode).toBe(200);
     expect(qcFail.json()).toMatchObject({ state: "processing" });
+
+    const batchA2 = await app.inject({
+      method: "POST",
+      url: "/api/v1/partner/batches",
+      headers: cookieHeader(partner.cookie, { "idempotency-key": `batA2-${randomUUID()}` }),
+      payload: { orderId: orderA.order.id, processType: "wash" },
+    });
+    expect(batchA2.statusCode, batchA2.body).toBe(200);
 
     const qcPass = await app.inject({
       method: "POST",

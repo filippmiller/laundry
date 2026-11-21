@@ -81,6 +81,7 @@ type PartnerOrderDto = {
   containers: ContainerDto[];
   garments: GarmentDto[];
   adjustments: AdjustmentDto[];
+  hasUncheckedProcessing?: boolean;
 };
 
 type PartnerWorkspaceResponse = {
@@ -1120,6 +1121,36 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                     }
                   />
 
+                  {!selectedOrder.hasUncheckedProcessing && (
+                    <div className="panel-muted stack">
+                      <div className="alert-banner">
+                        Перед проведением ОТК запустите производственную партию (после согласования доплаты или возврата на повторную обработку).
+                      </div>
+                      <h3>Запуск производственной партии</h3>
+                      <Select
+                        label="Технология обработки"
+                        value={processType}
+                        onChange={(e) => setProcessType(e.target.value)}
+                      >
+                        {PROCESS_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </Select>
+                      <div className="button-row">
+                        <Button
+                          variant="primary"
+                          disabled={isBusy}
+                          onClick={() => void handleStartBatch()}
+                          leadingIcon={<Play size={16} aria-hidden="true" />}
+                        >
+                          Запустить в обработку
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   {selectedOrder.garments.length === 0 ? (
                     <div className="stack">
                       <p className="muted">
@@ -1136,7 +1167,7 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                       <div className="button-row">
                         <Button
                           variant="primary"
-                          disabled={isBusy}
+                          disabled={isBusy || !selectedOrder.hasUncheckedProcessing}
                           onClick={() => void handleCompleteQc(true)}
                           leadingIcon={<CheckCircle2 size={16} aria-hidden="true" />}
                         >
@@ -1144,7 +1175,7 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                         </Button>
                         <Button
                           variant="ghost"
-                          disabled={isBusy}
+                          disabled={isBusy || !selectedOrder.hasUncheckedProcessing}
                           onClick={() => void handleCompleteQc(false)}
                           leadingIcon={<XCircle size={16} aria-hidden="true" />}
                         >
@@ -1216,7 +1247,7 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
                       <div className="button-row">
                         <Button
                           variant="primary"
-                          disabled={isBusy}
+                          disabled={isBusy || !selectedOrder.hasUncheckedProcessing}
                           onClick={() => void handleCompleteQc()}
                           leadingIcon={<ClipboardCheck size={16} aria-hidden="true" />}
                         >
