@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type ChargebackBucket,
   type ChargebackFilterState,
+  type ChargebacksSnapshot,
   createChargebacksController,
+  getEffectiveChargebackFilter,
 } from "../../apps/web/src/workspaces/chargebacks-controller.js";
 
 type FakeChargeback = {
@@ -264,5 +266,135 @@ describe("R2-001: chargebacks UI request lifecycle controller", () => {
     await expect(pRefresh).resolves.toBe(false);
     expect(listener.mock.calls.length).toBe(callsBeforeDispose);
     expect(errors).toEqual([]);
+  });
+});
+
+describe("R3-001 / R3-002: getEffectiveChargebackFilter", () => {
+  it("applies precedence inFlightFilter > failedFilter > committedFilter", () => {
+    const baseSnapshot: ChargebacksSnapshot<FakeChargeback> = {
+      bucket: { items: [], nextCursor: null, hasMore: false, totalCount: 0 },
+      committedFilter: { q: "committed", state: "all" },
+      inFlightFilter: null,
+      failedFilter: null,
+      loadingMode: "idle",
+      lastError: null,
+    };
+
+    expect(getEffectiveChargebackFilter(baseSnapshot)).toEqual({ q: "committed", state: "all" });
+
+    const withFailed: ChargebacksSnapshot<FakeChargeback> = {
+      ...baseSnapshot,
+      failedFilter: { q: "failed", state: "disputed" },
+    };
+    expect(getEffectiveChargebackFilter(withFailed)).toEqual({ q: "failed", state: "disputed" });
+
+    const withInFlight: ChargebacksSnapshot<FakeChargeback> = {
+      ...withFailed,
+      inFlightFilter: { q: "inflight", state: "chargeback_lost" },
+    };
+    expect(getEffectiveChargebackFilter(withInFlight)).toEqual({
+      q: "inflight",
+      state: "chargeback_lost",
+    });
+  });
+
+  it("R3-001: preserves in-flight query across state change and ignores late resolution/rejection of aborted request", async () => {
+    const { controller, calls, errors } = createHarness();
+
+    const pSearch = controller.loadInitial({ q: "ORD-77", state: "all" });
+    expect(getEffectiveChargebackFilter(controller.getSnapshot()).q).toBe("ORD-77");
+    expect(calls[0]).toMatchObject({ q: "ORD-77", state: "all" });
+
+    const activeQuery = getEffectiveChargebackFilter(controller.getSnapshot()).q;
+    const pStateChange = controller.loadInitial({ q: activeQuery, state: "chargeback_lost" });
+    expect(calls[0].signal?.aborted).toBe(true);
+    expect(calls[1]).toMatchObject({ q: "ORD-77", state: "chargeback_lost" });
+    expect(calls[1].cursor).toBeUndefined();
+
+    calls[1].defer.resolve({
+      items: [{ id: "cb-77", state: "chargeback_lost" }],
+      nextCursor: "cursor-77",
+      hasMore: true,
+      totalCount: 2,
+    });
+    await expect(pStateChange).resolves.toBe(true);
+    const snapshotAfterSecond = controller.getSnapshot();
+
+    // Late resolution and late rejection of the aborted first request must not mutate final snapshot
+    calls[0].defer.resolve({
+      items: [{ id: "cb-stale", state: "disputed" }],
+      nextCursor: "cursor-stale",
+      hasMore: false,
+      totalCount: 99,
+    });
+    calls[0].defer.reject(new Error("late failure after resolve"));
+    await expect(pSearch).resolves.toBe(false);
+
+    expect(controller.getSnapshot()).toEqual(snapshotAfterSecond);
+    expect(controller.getSnapshot()).toMatchObject({
+      committedFilter: { q: "ORD-77", state: "chargeback_lost" },
+      inFlightFilter: null,
+      failedFilter: null,
+      loadingMode: "idle",
+      lastError: null,
+      bucket: {
+        items: [{ id: "cb-77", state: "chargeback_lost" }],
+        nextCursor: "cursor-77",
+        hasMore: true,
+        totalCount: 2,
+      },
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it("R3-002: reverts effective filter state to committedFilter after loadMore clears failedFilter", async () => {
+    const { controller, calls, errors } = createHarness();
+
+    // 1. Committed "all" with nextCursor
+    const pInit = controller.loadInitial({ q: "", state: "all" });
+    calls[0].defer.resolve({
+      items: [{ id: "cb-1", state: "disputed" }],
+      nextCursor: "cursor-all-1",
+      hasMore: true,
+      totalCount: 2,
+    });
+    await expect(pInit).resolves.toBe(true);
+    expect(getEffectiveChargebackFilter(controller.getSnapshot()).state).toBe("all");
+
+    // 2. Failed replacement to "disputed"
+    const pFail = controller.loadInitial({ q: "", state: "disputed" });
+    calls[1].defer.reject(new Error("HTTP 503"));
+    await expect(pFail).resolves.toBe(false);
+    expect(getEffectiveChargebackFilter(controller.getSnapshot()).state).toBe("disputed");
+    expect(errors).toEqual(["HTTP 503"]);
+
+    // 3. loadMore succeeds on committed "all" and clears failedFilter/lastError
+    const pMore = controller.loadMore();
+    expect(calls[2]).toMatchObject({ q: "", state: "all", cursor: "cursor-all-1" });
+    calls[2].defer.resolve({
+      items: [{ id: "cb-2", state: "chargeback_lost" }],
+      nextCursor: null,
+      hasMore: false,
+      totalCount: 2,
+    });
+    await expect(pMore).resolves.toBe(true);
+
+    const afterMore = controller.getSnapshot();
+    expect(afterMore.failedFilter).toBeNull();
+    expect(afterMore.lastError).toBeNull();
+    expect(getEffectiveChargebackFilter(afterMore).state).toBe("all");
+    expect(getEffectiveChargebackFilter(afterMore).state).toBe(afterMore.committedFilter.state);
+
+    // 4. Subsequent refresh uses "all" (matching effective/committed filter)
+    const pRefresh = controller.refresh();
+    expect(calls[3]).toMatchObject({ q: "", state: "all" });
+    expect(calls[3].cursor).toBeUndefined();
+    calls[3].defer.resolve({
+      items: [{ id: "cb-1", state: "disputed" }],
+      nextCursor: null,
+      hasMore: false,
+      totalCount: 1,
+    });
+    await expect(pRefresh).resolves.toBe(true);
   });
 });

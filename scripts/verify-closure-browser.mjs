@@ -17,6 +17,7 @@
  */
 import EmbeddedPostgres from "embedded-postgres";
 import { Client } from "pg";
+import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
 import { execSync, spawn } from "node:child_process";
 import { chromium } from "playwright";
@@ -155,7 +156,8 @@ try {
     await page.getByRole("heading", { name: "Новый заказ" }).waitFor({ timeout: 15_000 });
 
     const cookiesBeforeLogout = await context.cookies();
-    check("A1: session cookie present after login", cookiesBeforeLogout.some(c => c.name.includes("session") || c.name.includes("sid") || c.value.length > 10));
+    const sessionCookieBefore = cookiesBeforeLogout.find(c => c.name === "laundry_session");
+    check("A1: session cookie present after login", Boolean(sessionCookieBefore && sessionCookieBefore.value.length > 0));
 
     // Intercept POST /api/v1/auth/logout with 503
     let failLogout = true;
@@ -190,7 +192,16 @@ try {
     check("A3: pending logout storage marker set", markerAfter503);
 
     const cookiesAfter503 = await context.cookies();
-    check("A4: session cookie retained after 503 logout failure", cookiesAfter503.length >= cookiesBeforeLogout.length);
+    const sessionCookieAfter = cookiesAfter503.find(c => c.name === "laundry_session");
+    check(
+      "A4: session cookie retained after 503 logout failure",
+      Boolean(
+        sessionCookieAfter
+        && sessionCookieBefore
+        && sessionCookieAfter.value === sessionCookieBefore.value
+        && (sessionCookieAfter.expires === -1 || sessionCookieAfter.expires * 1000 > Date.now()),
+      ),
+    );
 
     // Reload while logout still returns 503 -> verify logout runs BEFORE /me
     authCallOrder.length = 0;
@@ -217,11 +228,37 @@ try {
     });
     check("A7: pending logout storage marker cleared", !markerAfterRetry);
 
+    const cookiesAfterSuccess = await context.cookies();
+    const cookieCleared = !cookiesAfterSuccess.some(c => c.name === "laundry_session" && c.value.length > 0);
     const meStatus = await page.evaluate(async () => {
       const r = await fetch("/api/v1/me", { credentials: "include" });
       return r.status;
     });
-    check("A8: session revoked on server (GET /me -> 401)", meStatus === 401, `status=${meStatus}`);
+    let replayStatus = 0;
+    let isRevokedInDb = false;
+    if (sessionCookieBefore?.value) {
+      const replayRes = await fetch(`${API_URL}/api/v1/me`, {
+        headers: { cookie: `laundry_session=${sessionCookieBefore.value}` },
+      });
+      replayStatus = replayRes.status;
+      const tokenHash = createHash("sha256").update(sessionCookieBefore.value).digest("hex");
+      const dbClient = new Client({ connectionString: DB_URL });
+      await dbClient.connect();
+      try {
+        const { rows } = await dbClient.query(
+          "SELECT revoked_at IS NOT NULL AS is_revoked FROM sessions WHERE token_hash = $1",
+          [tokenHash],
+        );
+        isRevokedInDb = rows[0]?.is_revoked === true;
+      } finally {
+        await dbClient.end();
+      }
+    }
+    check(
+      "A8: session revoked on server (cookie cleared, browser/node replay -> 401, DB revoked_at set)",
+      cookieCleared && meStatus === 401 && replayStatus === 401 && isRevokedInDb,
+      `cookieCleared=${cookieCleared}, meStatus=${meStatus}, replayStatus=${replayStatus}, isRevokedInDb=${isRevokedInDb}`,
+    );
     check("A9: no uncaught pageerrors in Scenario A", pageErrors.length === 0, pageErrors.join("; "));
     await context.close();
   }
@@ -292,10 +329,20 @@ try {
     check("B4: R2-001 fixed — load-more button is enabled and NOT stuck on Загрузка… after preemption", await restoredLoadMore.isEnabled());
 
     // Clear route intercept and click load-more -> verify all 52 items load cleanly
+    const cbTable = page
+      .locator("table", { has: page.locator("th", { hasText: "Заказ" }) })
+      .filter({ has: page.locator("th", { hasText: "Провайдер" }) });
     await page.unroute("**/api/v1/finance/chargebacks*");
     await restoredLoadMore.click();
+    await cbTable.locator("tbody tr").nth(51).waitFor({ state: "visible", timeout: 10_000 });
+    await page.getByRole("heading", { name: /Оспариваемые платежи и чарджбэки \(52\)/ }).waitFor({ state: "visible", timeout: 10_000 });
     await restoredLoadMore.waitFor({ state: "hidden", timeout: 10_000 });
-    check("B5: subsequent load-more loads remaining items (52/52) and hides button", !(await restoredLoadMore.isVisible()));
+    const b5RowCount = await cbTable.locator("tbody tr").count();
+    check(
+      "B5: subsequent load-more loads remaining items (52/52) and hides button",
+      b5RowCount === 52 && !(await restoredLoadMore.isVisible()),
+      `rows=${b5RowCount}`,
+    );
 
     // Failed replacement (500) -> verify error banner + retry succeeds
     let failNextChargebacks = true;
@@ -329,6 +376,119 @@ try {
     await errBanner.waitFor({ state: "hidden", timeout: 10_000 });
     await page.getByRole("heading", { name: /Оспариваемые платежи и чарджбэки \(26\)/ }).waitFor({ timeout: 10_000 });
     check("B7: retry recovers failed replacement and loads 26 disputed chargebacks", !(await errBanner.isVisible()));
+
+    await page.unroute("**/api/v1/finance/chargebacks*");
+
+    // Reset to "all" (50 of 52) before B10
+    await page.getByRole("button", { name: "Сбросить" }).click();
+    const b10LoadMoreBtn = page.getByRole("button", { name: /Загрузить ещё \(50 из 52\)/ });
+    await b10LoadMoreBtn.waitFor({ state: "visible", timeout: 10_000 });
+
+    // B10 (R3-002): failed replacement followed by load-more clears error/failedFilter and restores committed "all"
+    await page.route("**/api/v1/finance/chargebacks*", async route => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("state") === "disputed") {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { code: "INTERNAL", message: "simulated disputed error" } }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await stateSelect.selectOption("disputed");
+    await errBanner.waitFor({ state: "visible", timeout: 10_000 });
+    const selectDuringErr = await stateSelect.inputValue();
+    await page.unroute("**/api/v1/finance/chargebacks*");
+
+    await b10LoadMoreBtn.click();
+    await cbTable.locator("tbody tr").nth(51).waitFor({ state: "visible", timeout: 10_000 });
+    await page.getByRole("heading", { name: /Оспариваемые платежи и чарджбэки \(52\)/ }).waitFor({ state: "visible", timeout: 10_000 });
+    const b10RowCount = await cbTable.locator("tbody tr").count();
+    const b10DisputedCount = await cbTable.locator("tbody tr", { hasText: "Оспорен (чарджбэк)" }).count();
+    const b10LostCount = await cbTable.locator("tbody tr", { hasText: "Чарджбэк проигран" }).count();
+    const b10BannerHidden = !(await errBanner.isVisible());
+    const b10SelectAfterLoadMore = await stateSelect.inputValue();
+
+    const refreshReqPromise = page.waitForRequest(req => req.url().includes("/api/v1/finance/chargebacks"));
+    const refreshResPromise = page.waitForResponse(res => res.url().includes("/api/v1/finance/chargebacks"));
+    await page.getByRole("button", { name: "Обновить данные" }).click();
+    const refreshReq = await refreshReqPromise;
+    await refreshResPromise;
+    const refreshStateParam = new URL(refreshReq.url()).searchParams.get("state");
+    const b10SelectAfterRefresh = await stateSelect.inputValue();
+
+    check(
+      "B10: R3-002 — load-more after failed replacement clears error banner, restores 'all' (52 rows both states), and refresh uses 'all'",
+      selectDuringErr === "disputed"
+        && b10BannerHidden
+        && b10SelectAfterLoadMore === "all"
+        && b10RowCount === 52
+        && b10DisputedCount > 0
+        && b10LostCount > 0
+        && (refreshStateParam === "all" || refreshStateParam === null)
+        && b10SelectAfterRefresh === "all",
+      `selectErr=${selectDuringErr}, bannerHidden=${b10BannerHidden}, selectAfterLM=${b10SelectAfterLoadMore}, rows=${b10RowCount}, disputed=${b10DisputedCount}, lost=${b10LostCount}, refreshState=${refreshStateParam}, selectAfterRefresh=${b10SelectAfterRefresh}`,
+    );
+
+    // B11 (R3-001): changing status while search replacement is pending preserves submitted q=ORD-77
+    let heldRoute;
+    let resolveHeldStarted;
+    const heldStarted = new Promise(resolve => { resolveHeldStarted = resolve; });
+    const lostRequests = [];
+    await page.route("**/api/v1/finance/chargebacks*", async route => {
+      const url = new URL(route.request().url());
+      const qParam = url.searchParams.get("q");
+      const stateParam = url.searchParams.get("state");
+      if (stateParam === "chargeback_lost") {
+        lostRequests.push(url.toString());
+        await route.continue();
+        return;
+      }
+      if (qParam === "ORD-77" && stateParam !== "chargeback_lost" && !heldRoute) {
+        heldRoute = route;
+        resolveHeldStarted();
+        return;
+      }
+      await route.continue();
+    });
+
+    const searchInput = page.getByLabel("Поиск чарджбэков");
+    await searchInput.fill("ORD-77");
+    await page.getByRole("button", { name: "Найти" }).click();
+    await heldStarted;
+
+    await stateSelect.selectOption("chargeback_lost");
+    await page.getByRole("heading", { name: /Оспариваемые платежи и чарджбэки \(0\)/ }).waitFor({ state: "visible", timeout: 10_000 });
+    const emptyMsg = page.getByText("Чарджбэки по заданным фильтрам не найдены.");
+    await emptyMsg.waitFor({ state: "visible", timeout: 10_000 });
+
+    if (heldRoute) {
+      await heldRoute.continue().catch(() => undefined);
+    }
+    await page.waitForTimeout(300);
+
+    const lastLostUrl = lostRequests.length ? new URL(lostRequests[lostRequests.length - 1]) : null;
+    const b11ReqOk = Boolean(
+      lastLostUrl
+      && lastLostUrl.searchParams.get("q") === "ORD-77"
+      && lastLostUrl.searchParams.get("state") === "chargeback_lost"
+      && !lastLostUrl.searchParams.has("cursor"),
+    );
+    const b11EmptyVisible = await emptyMsg.isVisible();
+    const b11TableCount = await cbTable.count();
+    const b11SearchValue = await searchInput.inputValue();
+    const b11StateValue = await stateSelect.inputValue();
+
+    await page.unroute("**/api/v1/finance/chargebacks*");
+
+    check(
+      "B11: R3-001 — status change during pending search keeps q=ORD-77, state=chargeback_lost, no cursor, 0 rows",
+      b11ReqOk && b11EmptyVisible && b11TableCount === 0 && b11SearchValue === "ORD-77" && b11StateValue === "chargeback_lost",
+      `reqOk=${b11ReqOk}, emptyVisible=${b11EmptyVisible}, tableCount=${b11TableCount}, q=${b11SearchValue}, state=${b11StateValue}`,
+    );
+
     check("B8: no uncaught pageerrors in Scenario B", pageErrors.length === 0, pageErrors.join("; "));
     await context.close();
   }

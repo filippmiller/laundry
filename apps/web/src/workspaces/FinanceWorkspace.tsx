@@ -38,6 +38,7 @@ import {
   type ChargebacksController,
   type ChargebacksSnapshot,
   createChargebacksController,
+  getEffectiveChargebackFilter,
 } from "./chargebacks-controller";
 import { FinanceMoneyPanel } from "./analytics-panels";
 
@@ -259,7 +260,6 @@ export function FinanceWorkspace({
   });
 
   const [chargebackQuery, setChargebackQuery] = useState("");
-  const [chargebackState, setChargebackState] = useState<ChargebackFilterState>("all");
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
 
@@ -285,6 +285,8 @@ export function FinanceWorkspace({
   const [chargebacksSnap, setChargebacksSnap] = useState<ChargebacksSnapshot<PaymentIntentItem>>(
     () => getChargebacksController().getSnapshot(),
   );
+  const effectiveChargebackFilter = getEffectiveChargebackFilter(chargebacksSnap);
+  const chargebackState = effectiveChargebackFilter.state;
   const chargebacksBucket = chargebacksSnap.bucket;
   const appliedChargebackQuery = chargebacksSnap.committedFilter.q;
   const chargebacksLoading = chargebacksSnap.loadingMode === "initial";
@@ -916,7 +918,8 @@ export function FinanceWorkspace({
           onSubmit={e => {
             e.preventDefault();
             const nextQ = chargebackQuery.trim();
-            void loadChargebacks(nextQ, chargebackState);
+            const currentState = getEffectiveChargebackFilter(getChargebacksController().getSnapshot()).state;
+            void loadChargebacks(nextQ, currentState);
           }}
           style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "end", marginBlockEnd: 12 }}
         >
@@ -937,8 +940,7 @@ export function FinanceWorkspace({
               value={chargebackState}
               onChange={e => {
                 const nextState = e.target.value as ChargebackFilterState;
-                setChargebackState(nextState);
-                const activeQuery = (chargebacksFailedFilter ?? chargebacksSnap.committedFilter).q;
+                const activeQuery = getEffectiveChargebackFilter(getChargebacksController().getSnapshot()).q;
                 void loadChargebacks(activeQuery, nextState);
               }}
             >
@@ -965,7 +967,6 @@ export function FinanceWorkspace({
                 disabled={chargebacksLoading}
                 onClick={() => {
                   setChargebackQuery("");
-                  setChargebackState("all");
                   void loadChargebacks("", "all");
                 }}
               >

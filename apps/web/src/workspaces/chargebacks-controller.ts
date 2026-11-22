@@ -60,6 +60,12 @@ function normalizeFilter(filter: ChargebackFilter): ChargebackFilter {
   };
 }
 
+export function getEffectiveChargebackFilter<T extends { id: string }>(
+  snapshot: ChargebacksSnapshot<T>,
+): ChargebackFilter {
+  return snapshot.inFlightFilter ?? snapshot.failedFilter ?? snapshot.committedFilter;
+}
+
 /**
  * Single-owner request lifecycle controller for the chargebacks list.
  *
@@ -222,7 +228,7 @@ export function createChargebacksController<T extends { id: string }>(opts: {
   };
 
   const refresh = async (): Promise<boolean> => {
-    const target = snapshot.inFlightFilter ?? snapshot.failedFilter ?? snapshot.committedFilter;
+    const target = getEffectiveChargebackFilter(snapshot);
     return loadInitial(target);
   };
 

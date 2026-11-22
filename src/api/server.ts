@@ -390,8 +390,14 @@ export function buildApp(db: Db) {
     method: "POST", path: "/auth/logout", summary: "Revoke session", tags: ["Auth"],
     handler: async ctx => {
       const token = (ctx.request.cookies as Record<string, string | undefined>)[SESSION_COOKIE];
-      ctx.reply.clearCookie(SESSION_COOKIE, { path: "/" });
-      return logout(db, token);
+      const result = await logout(db, token);
+      ctx.reply.clearCookie(SESSION_COOKIE, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        path: "/",
+      });
+      return result;
     },
   });
   add({
