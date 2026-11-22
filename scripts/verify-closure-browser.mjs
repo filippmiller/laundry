@@ -314,11 +314,15 @@ try {
     await stateSelect.selectOption("disputed");
     const errBanner = page.locator('[data-testid="chargebacks-error-banner"]');
     await errBanner.waitFor({ state: "visible", timeout: 10_000 });
-    const committedRowsVisible = await page.locator("table.clean-table tbody tr", { hasText: "LA-CB-BROWSER-1" }).count();
+    const committedHeadingVisible = await page.getByRole("heading", { name: /Оспариваемые платежи и чарджбэки \(52\)/ }).isVisible();
+    const committedRowsVisible = await page
+      .locator("table.clean-table", { has: page.locator("th", { hasText: "Провайдер" }) })
+      .locator("tbody tr", { hasText: "LA-CB-BROWSER-1" })
+      .count();
     check(
       "B6: failed replacement renders chargebacks-error-banner and keeps committed rows displayed",
-      (await errBanner.isVisible()) && committedRowsVisible === 52,
-      `committedRows=${committedRowsVisible}`,
+      (await errBanner.isVisible()) && committedHeadingVisible && committedRowsVisible === 52,
+      `heading52=${committedHeadingVisible}, committedRows=${committedRowsVisible}`,
     );
 
     await errBanner.getByRole("button", { name: "Повторить" }).click();
