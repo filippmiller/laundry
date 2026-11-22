@@ -33,6 +33,12 @@ import {
   providerLabel,
   stateLabel,
 } from "../labels";
+import {
+  type ChargebackFilterState,
+  type ChargebacksController,
+  type ChargebacksSnapshot,
+  createChargebacksController,
+} from "./chargebacks-controller";
 import { FinanceMoneyPanel } from "./analytics-panels";
 
 type InvoiceItem = {
@@ -252,20 +258,40 @@ export function FinanceWorkspace({
     items: [], nextCursor: null, hasMore: false, totalCount: 0,
   });
 
-  const [chargebacksBucket, setChargebacksBucket] = useState<PaginatedBucket<PaymentIntentItem>>({
-    items: [], nextCursor: null, hasMore: false, totalCount: 0,
-  });
   const [chargebackQuery, setChargebackQuery] = useState("");
-  const [appliedChargebackQuery, setAppliedChargebackQuery] = useState("");
-  const [chargebackState, setChargebackState] = useState<"all" | "disputed" | "chargeback_lost">("all");
-  const [chargebacksLoading, setChargebacksLoading] = useState(false);
-  const [chargebacksLoadingMore, setChargebacksLoadingMore] = useState(false);
-  const chargebacksReqRef = useRef(0);
-  const chargebacksAbortRef = useRef<AbortController | null>(null);
-  const appliedChargebackQueryRef = useRef("");
-  const chargebackStateRef = useRef<"all" | "disputed" | "chargeback_lost">("all");
-  appliedChargebackQueryRef.current = appliedChargebackQuery;
-  chargebackStateRef.current = chargebackState;
+  const [chargebackState, setChargebackState] = useState<ChargebackFilterState>("all");
+  const notifyRef = useRef(notify);
+  notifyRef.current = notify;
+
+  const chargebacksControllerRef = useRef<ChargebacksController<PaymentIntentItem> | null>(null);
+  const getChargebacksController = useCallback(() => {
+    if (!chargebacksControllerRef.current) {
+      chargebacksControllerRef.current = createChargebacksController<PaymentIntentItem>({
+        fetchPage: async opts => {
+          const params = new URLSearchParams({ limit: "50", state: opts.state });
+          const trimmed = opts.q?.trim();
+          if (trimmed) params.set("q", trimmed);
+          if (opts.cursor) params.set("cursor", opts.cursor);
+          return api<PaginatedBucket<PaymentIntentItem>>(`/finance/chargebacks?${params.toString()}`, {
+            signal: opts.signal,
+          });
+        },
+        formatError,
+        onError: message => notifyRef.current({ kind: "error", text: message }),
+      });
+    }
+    return chargebacksControllerRef.current;
+  }, []);
+  const [chargebacksSnap, setChargebacksSnap] = useState<ChargebacksSnapshot<PaymentIntentItem>>(
+    () => getChargebacksController().getSnapshot(),
+  );
+  const chargebacksBucket = chargebacksSnap.bucket;
+  const appliedChargebackQuery = chargebacksSnap.committedFilter.q;
+  const chargebacksLoading = chargebacksSnap.loadingMode === "initial";
+  const chargebacksLoadingMore = chargebacksSnap.loadingMode === "more";
+  const chargebacksBusy = chargebacksSnap.loadingMode !== "idle";
+  const chargebacksError = chargebacksSnap.lastError;
+  const chargebacksFailedFilter = chargebacksSnap.failedFilter;
 
   const partnerSelectId = useId();
   const partnerInputId = useId();
@@ -297,85 +323,39 @@ export function FinanceWorkspace({
     }
   }, [partners, partnerId, payoutPartnerId]);
 
-  const fetchChargebacksPage = useCallback(async (opts: {
-    q?: string;
-    state: "all" | "disputed" | "chargeback_lost";
-    cursor?: string;
-    signal?: AbortSignal;
-  }) => {
-    const params = new URLSearchParams({ limit: "50", state: opts.state });
-    const trimmed = opts.q?.trim();
-    if (trimmed) params.set("q", trimmed);
-    if (opts.cursor) params.set("cursor", opts.cursor);
-    return api<PaginatedBucket<PaymentIntentItem>>(`/finance/chargebacks?${params.toString()}`, {
-      signal: opts.signal,
-    });
-  }, []);
+  useEffect(() => {
+    const controller = getChargebacksController();
+    setChargebacksSnap(controller.getSnapshot());
+    const unsub = controller.subscribe(setChargebacksSnap);
+    return () => {
+      unsub();
+      controller.dispose();
+      if (chargebacksControllerRef.current === controller) {
+        chargebacksControllerRef.current = null;
+      }
+    };
+  }, [getChargebacksController]);
 
-  const loadChargebacks = useCallback(async (
-    q: string,
-    state: "all" | "disputed" | "chargeback_lost",
-  ): Promise<boolean> => {
-    chargebacksAbortRef.current?.abort();
-    const controller = new AbortController();
-    chargebacksAbortRef.current = controller;
-    const reqId = ++chargebacksReqRef.current;
-    setChargebacksLoading(true);
-    try {
-      const page = await fetchChargebacksPage({ q, state, signal: controller.signal });
-      if (chargebacksReqRef.current !== reqId || controller.signal.aborted) return false;
-      setChargebacksBucket(page);
-      return true;
-    } catch (err) {
-      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
-        return false;
-      }
-      if (chargebacksReqRef.current !== reqId) return false;
-      notify({ kind: "error", text: formatError(err) });
-      return false;
-    } finally {
-      if (chargebacksReqRef.current === reqId) {
-        setChargebacksLoading(false);
-      }
-    }
-  }, [fetchChargebacksPage, notify]);
+  const loadChargebacks = useCallback(
+    (q: string, state: ChargebackFilterState) =>
+      getChargebacksController().loadInitial({ q, state }),
+    [getChargebacksController],
+  );
 
-  const loadMoreChargebacks = useCallback(async () => {
-    if (!chargebacksBucket.nextCursor) return;
-    chargebacksAbortRef.current?.abort();
-    const controller = new AbortController();
-    chargebacksAbortRef.current = controller;
-    const reqId = ++chargebacksReqRef.current;
-    setChargebacksLoadingMore(true);
-    try {
-      const page = await fetchChargebacksPage({
-        q: appliedChargebackQueryRef.current,
-        state: chargebackStateRef.current,
-        cursor: chargebacksBucket.nextCursor,
-        signal: controller.signal,
-      });
-      if (chargebacksReqRef.current !== reqId || controller.signal.aborted) return;
-      setChargebacksBucket(prev => {
-        const seen = new Set(prev.items.map(i => i.id));
-        return {
-          items: [...prev.items, ...page.items.filter(i => !seen.has(i.id))],
-          nextCursor: page.nextCursor,
-          hasMore: page.hasMore,
-          totalCount: page.totalCount,
-        };
-      });
-    } catch (err) {
-      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) {
-        return;
-      }
-      if (chargebacksReqRef.current !== reqId) return;
-      notify({ kind: "error", text: formatError(err) });
-    } finally {
-      if (chargebacksReqRef.current === reqId) {
-        setChargebacksLoadingMore(false);
-      }
-    }
-  }, [chargebacksBucket.nextCursor, fetchChargebacksPage, notify]);
+  const loadMoreChargebacks = useCallback(
+    () => getChargebacksController().loadMore(),
+    [getChargebacksController],
+  );
+
+  const refreshChargebacks = useCallback(
+    () => getChargebacksController().refresh(),
+    [getChargebacksController],
+  );
+
+  const retryChargebacks = useCallback(
+    () => getChargebacksController().retryFailed(),
+    [getChargebacksController],
+  );
 
   const loadFinance = useCallback(async () => {
     setLoading(true);
@@ -385,7 +365,7 @@ export function FinanceWorkspace({
         api<FinanceOverviewResponse>("/finance/overview"),
         api<ReconciliationResponse>("/finance/reconciliation"),
         api<DriftItem[] | { items?: DriftItem[] }>("/finance/payment-drift"),
-        loadChargebacks(appliedChargebackQueryRef.current, chargebackStateRef.current),
+        refreshChargebacks(),
       ]);
       setOverview(ov ?? {});
       if (ov?.partnerPayoutsActive) {
@@ -425,13 +405,11 @@ export function FinanceWorkspace({
     } finally {
       setLoading(false);
     }
-  }, [loadChargebacks, notify]);
+  }, [refreshChargebacks, notify]);
 
   useEffect(() => {
     void loadFinance();
   }, [loadFinance]);
-
-  useEffect(() => () => chargebacksAbortRef.current?.abort(), []);
 
   const openRefundModal = (intent: PaymentIntentItem) => {
     setRefundTarget(intent);
@@ -938,8 +916,6 @@ export function FinanceWorkspace({
           onSubmit={e => {
             e.preventDefault();
             const nextQ = chargebackQuery.trim();
-            setAppliedChargebackQuery(nextQ);
-            appliedChargebackQueryRef.current = nextQ;
             void loadChargebacks(nextQ, chargebackState);
           }}
           style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "end", marginBlockEnd: 12 }}
@@ -960,10 +936,10 @@ export function FinanceWorkspace({
               id={chargebackStateId}
               value={chargebackState}
               onChange={e => {
-                const nextState = e.target.value as "all" | "disputed" | "chargeback_lost";
+                const nextState = e.target.value as ChargebackFilterState;
                 setChargebackState(nextState);
-                chargebackStateRef.current = nextState;
-                void loadChargebacks(appliedChargebackQueryRef.current, nextState);
+                const activeQuery = (chargebacksFailedFilter ?? chargebacksSnap.committedFilter).q;
+                void loadChargebacks(activeQuery, nextState);
               }}
             >
               <option value="all">Все статусы</option>
@@ -981,7 +957,7 @@ export function FinanceWorkspace({
             >
               Найти
             </Button>
-            {(appliedChargebackQuery || chargebackState !== "all") && (
+            {(appliedChargebackQuery || chargebacksSnap.committedFilter.state !== "all" || chargebackState !== "all" || Boolean(chargebacksFailedFilter)) && (
               <Button
                 type="button"
                 variant="ghost"
@@ -989,10 +965,7 @@ export function FinanceWorkspace({
                 disabled={chargebacksLoading}
                 onClick={() => {
                   setChargebackQuery("");
-                  setAppliedChargebackQuery("");
-                  appliedChargebackQueryRef.current = "";
                   setChargebackState("all");
-                  chargebackStateRef.current = "all";
                   void loadChargebacks("", "all");
                 }}
               >
@@ -1001,13 +974,45 @@ export function FinanceWorkspace({
             )}
           </div>
         </form>
+        {chargebacksError && (
+          <div
+            role="alert"
+            data-testid="chargebacks-error-banner"
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              padding: "8px 12px",
+              marginBlockEnd: 12,
+              borderRadius: 8,
+              border: "1px solid var(--danger, #c62828)",
+            }}
+          >
+            <span className="muted" style={{ color: "var(--danger, #c62828)" }}>
+              Не удалось загрузить чарджбэки: {chargebacksError}
+            </span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={chargebacksBusy}
+              onClick={() => void retryChargebacks()}
+            >
+              Повторить
+            </Button>
+          </div>
+        )}
         {chargebacks.length === 0 ? (
           <p className="muted" style={{ marginBlockEnd: 18 }}>
             {chargebacksLoading
               ? "Загрузка чарджбэков…"
-              : (appliedChargebackQuery || chargebackState !== "all")
-                ? "Чарджбэки по заданным фильтрам не найдены."
-                : "Активных чарджбэков нет."}
+              : chargebacksError
+                ? "Данные по чарджбэкам не загружены. Попробуйте повторить запрос."
+                : (appliedChargebackQuery || chargebacksSnap.committedFilter.state !== "all")
+                  ? "Чарджбэки по заданным фильтрам не найдены."
+                  : "Активных чарджбэков нет."}
           </p>
         ) : (
           <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
@@ -1042,7 +1047,7 @@ export function FinanceWorkspace({
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={chargebacksLoadingMore || chargebacksLoading}
+                  disabled={chargebacksBusy}
                   onClick={() => void loadMoreChargebacks()}
                 >
                   {chargebacksLoadingMore

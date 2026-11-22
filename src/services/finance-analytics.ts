@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { queryPartnerAccrualTotals } from "./partner-payable.js";
 
 /**
  * Financial analytics for the tenant: what customers owe us, what we owe partners, and what the
@@ -148,14 +149,6 @@ type InvoiceSqlRow = {
   created_at: Date;
 };
 
-type AccrualSqlRow = {
-  partner_id: string;
-  partner_name: string | null;
-  status: string;
-  disputed: boolean;
-  total_kopeks: string;
-};
-
 type PayoutSqlRow = {
   partner_id: string;
   partner_name: string | null;
@@ -234,19 +227,7 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
           AND i.state <> 'cancelled'
         ORDER BY i.created_at DESC
       `),
-      db.execute(sql`
-        SELECT
-          a.partner_id                        AS partner_id,
-          p.name                              AS partner_name,
-          a.status                            AS status,
-          a.disputed                          AS disputed,
-          COALESCE(SUM(a.amount_kopeks), 0)   AS total_kopeks
-        FROM partner_service_accruals a
-        LEFT JOIN partners p ON p.id = a.partner_id
-        WHERE a.organization_id = ${organizationId}
-          AND a.status <> 'voided'
-        GROUP BY a.partner_id, p.name, a.status, a.disputed
-      `),
+      queryPartnerAccrualTotals(db, organizationId),
       db.execute(sql`
         SELECT
           pp.partner_id AS partner_id,
@@ -344,7 +325,7 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
     ]);
 
   const invoiceRows = invoiceResult.rows as unknown as InvoiceSqlRow[];
-  const accrualRows = accrualResult.rows as unknown as AccrualSqlRow[];
+  const accrualRows = accrualResult;
   const payoutRows = payoutResult.rows as unknown as PayoutSqlRow[];
   const adjustmentRows = adjustmentResult.rows as unknown as AdjustmentSqlRow[];
   const compensationRows = compensationResult.rows as unknown as CompensationSqlRow[];
@@ -484,22 +465,15 @@ export async function financeAnalytics(db: Db, principal: Principal): Promise<Fi
   let disputedKopeks = 0;
 
   for (const row of accrualRows) {
-    const total = Number(row.total_kopeks ?? 0);
-    const partner = partnerFor(row.partner_id, row.partner_name);
-    accruedKopeks += total;
-    partner.accruedKopeks += total;
-    if (row.disputed) {
-      disputedKopeks += total;
-      partner.disputedKopeks += total;
-      continue;
-    }
-    if (row.status === "estimated") {
-      estimatedKopeks += total;
-      partner.estimatedKopeks += total;
-    } else {
-      invoicedAccrualKopeks += total;
-      partner.invoicedKopeks += total;
-    }
+    const partner = partnerFor(row.partnerId, row.partnerName);
+    accruedKopeks += row.accruedKopeks;
+    partner.accruedKopeks += row.accruedKopeks;
+    disputedKopeks += row.disputedKopeks;
+    partner.disputedKopeks += row.disputedKopeks;
+    estimatedKopeks += row.estimatedKopeks;
+    partner.estimatedKopeks += row.estimatedKopeks;
+    invoicedAccrualKopeks += row.invoicedKopeks;
+    partner.invoicedKopeks += row.invoicedKopeks;
   }
 
   let paidKopeks = 0;

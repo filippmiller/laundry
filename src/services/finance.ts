@@ -13,6 +13,7 @@ import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 import { loadOrder } from "./orders.js";
+import { queryPartnerAccrualTotals } from "./partner-payable.js";
 
 const ACCOUNTS = [
   ["clearing", "Платежный клиринг"],
@@ -1806,7 +1807,8 @@ export async function approvePartnerCreditNote(
 /**
  * Computes a partner's available payable balance inside an open transaction whose caller holds
  * the `partners` FOR UPDATE lock:
- * - `grossPayableKopeks`: non-voided, non-disputed partner service accruals (including negative offsets)
+ * - `grossPayableKopeks`: non-voided accruals minus net disputed holds (where each disputed
+ *   accrual holds only its remaining uncredited balance, never double-deducting prior partial credits)
  * - `paidKopeks`: already approved or paid payouts
  * - `reservedKopeks`: scheduled or pending payouts (excluding `excludePayoutId` when approving one)
  * - `availablePayableKopeks`: `grossPayableKopeks - paidKopeks - reservedKopeks`
@@ -1817,14 +1819,7 @@ async function computePartnerBalanceTx(
   partnerId: string,
   excludePayoutId?: string,
 ) {
-  const [accrualRow] = await tx.select({ total: sum(partnerServiceAccruals.amountKopeks) })
-    .from(partnerServiceAccruals)
-    .where(and(
-      eq(partnerServiceAccruals.organizationId, organizationId),
-      eq(partnerServiceAccruals.partnerId, partnerId),
-      sql`${partnerServiceAccruals.status} <> 'voided'`,
-      eq(partnerServiceAccruals.disputed, false),
-    ));
+  const [accrualTotals] = await queryPartnerAccrualTotals(tx, organizationId, partnerId);
   const [paidRow] = await tx.select({ total: sum(partnerPayouts.amountKopeks) })
     .from(partnerPayouts)
     .where(and(
@@ -1840,7 +1835,7 @@ async function computePartnerBalanceTx(
       inArray(partnerPayouts.state, ["scheduled", "pending"]),
       ...(excludePayoutId ? [sql`${partnerPayouts.id} <> ${excludePayoutId}`] : []),
     ));
-  const grossPayableKopeks = Number(accrualRow?.total ?? 0);
+  const grossPayableKopeks = accrualTotals?.grossPayableKopeks ?? 0;
   const paidKopeks = Number(paidRow?.total ?? 0);
   const reservedKopeks = Number(reservedRow?.total ?? 0);
   const availablePayableKopeks = grossPayableKopeks - paidKopeks - reservedKopeks;

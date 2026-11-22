@@ -68,3 +68,29 @@
 1. **`lnd-9l7` (P0 — Owner decision):** Public `.pgdata-drill` exposure & GitHub history retention, local `%LOCALAPPDATA%/Temp/pgdrill` manual deletion, and SMS provider provisioning authorization.
 2. **`lnd-5me` (P2 — Owner decision):** Lifecycle of the public preview demo instance (`https://laundry.filippmiller.com`) and owner sign-off on real pilot prerequisites (real auth/SMS, acquiring, 54-FZ KKT/OFD, real routing, off-host backups).
 3. **`lnd-8ev` (P2 — Owner/Legal decision):** Russian legal/compliance gates register (consumer law, principal vs. agent role, 54-FZ/OFD, 152-FZ & video retention, partner terms, refund policy, unit economics).
+
+---
+
+## Return Verification Closure Wave (post-4dd3e988)
+
+Following the independent return verification of commit `4dd3e988e973e9a41b7e6b8e34b9ffa9de105218` (which closed 6/7 CLS items, left `CLS-006` partial, and opened two P2 findings `R2-001` and `R2-002` plus evidence/documentation gaps):
+
+### 1. Code Fixes Closed
+
+| ID | Severity | Fix Summary | Verification Evidence |
+| --- | --- | --- | --- |
+| **R2-002** | P2 | Extracted shared `queryPartnerAccrualTotals` (`src/services/partner-payable.ts`) used by both `computePartnerBalanceTx` (`src/services/finance.ts`) and `financeAnalytics` (`src/services/finance-analytics.ts`). Each disputed accrual holds only `GREATEST(0, amount_kopeks - non_rejected_credit_notes)`, preventing double-deduction of prior partial credits while preserving real advances/overpayments, canonical `partners FOR UPDATE` locks, and approved ledger immutability. | `EXECUTED_LOCAL`: `test/api/wave5-finance-workers.test.ts` (`R2-002` test — verifies net hold = remainder, `advanceKopeks = 0`, independent `1000` accrual fully payable, release on rejection, `createPartnerPayout` bounds, and real advance preservation). |
+| **R2-001** | P2 | Extracted `createChargebacksController` (`apps/web/src/workspaces/chargebacks-controller.ts`) with a single `loadingMode` (`"idle" \| "initial" \| "more"`) owned by request generation + `AbortController`, atomic `committedFilter` + `bucket`/`nextCursor` transitions, inline error/retry banner (`failedFilter`), and React `<StrictMode>`-safe lifecycle wiring in `apps/web/src/workspaces/FinanceWorkspace.tsx`. | `EXECUTED_LOCAL`: `test/web/chargebacks-controller.test.ts` (`3/3` controlled deferred-promise tests) + `scripts/verify-closure-browser.mjs` (`Scenario B`, `8/8` headless Chromium checks). |
+
+### 2. Verifiable Specialized Proofs & Local Gates (`EXECUTED_LOCAL`)
+
+- **Full Local Test Suite & Hygiene:** `EXECUTED_LOCAL` (`66 test files / 441 tests`), with `npm run guard:hygiene` executed after staging all tracked files.
+- **Logout 503 (`LND-PRO-010`):** `node scripts/verify-closure-browser.mjs` (`Scenario A`, `9/9` PASS in headless Chromium) — verifies session cookie present, `[data-testid="pending-logout-banner"]` and `localStorage` marker on HTTP 503, cookie retained on 503, page reload retries `POST /api/v1/auth/logout` before `GET /api/v1/me`, successful retry clears banner/marker and revokes session (`GET /api/v1/me -> 401`), 0 `pageerror`.
+- **Chargebacks UI + R2-001 (`CLS-006` / `R2-001`):** `node scripts/verify-closure-browser.mjs` (`Scenario B`, `8/8` PASS in headless Chromium) — verifies 50/52 initial page, pending load-more (`Загрузка…`) preempted by status filter change without sticking, subsequent pagination loads 52/52, simulated HTTP 500 replacement shows `[data-testid="chargebacks-error-banner"]` while preserving committed rows, retry recovers cleanly, 0 `pageerror`.
+- **Populated `0025 -> 0026 -> 0027` Migration Upgrade (`OBS-003`):** `npx tsx scripts/verify-populated-upgrade.ts` (`POPULATED_UPGRADE_0025_TO_0027_PASS`) — boots disposable embedded PostgreSQL (`laundry_upgrade_0025_0027`), applies ONLY `0000..0025`, seeds a pre-0026 active claim direct `verified` evidence asset (0 holds) and a pre-0027 invoice line with 2 duplicate active disputes (`open` + `investigating`), applies `0026..0027`, and verifies:
+  - BEFORE: `asset={status:"verified", legal_hold_count:0}`, `activeHolds=0`, `disputes=[open, investigating]`
+  - AFTER: `asset={status:"legal_hold", legal_hold_count:1}`, `holds=[{reason:"backfill_active_claim_direct_attachment", released_at:null}]`, `disputes=[resolved, investigating]`, `partner_disputes_one_open_per_line_unique` (`23505`) enforced, re-migration strict no-op.
+- **Legacy-Data Decision & Historical Outbox Requeue:**
+  - `LEGACY_DIAGNOSTICS` applies strictly to the disposable upgraded test DB (`laundry_upgrade_0025_0027`), recording `duplicateActiveDisputesRemaining = 0`, `disputedFlagDriftRows = 0`, `overCreditedLines = 0`, and `before/after` stuck outbox counts (`0 -> 0`, `historicalOutboxRequeueStatus: NOT_APPLICABLE_0_AFFECTED`). If upgrading a pre-existing external DB, run the same diagnostic queries before applying `0027` to log any duplicate-dispute survivor mappings or historical over-credits.
+- **Internal Cold Goldfish Review (`STATIC_REVIEWED`):** Internal agent pre-implementation spec review and post-implementation diff review completed (caught and fixed a React `<StrictMode>` ref-disposal blocker in `FinanceWorkspace.tsx` and an undrained child-process pipe nit in `scripts/verify-closure-browser.mjs`). External independent review of the newly published commit remains `PENDING` until re-verified on the published SHA.
+- **Hosted CI Status:** `PENDING` at commit time (final CI run link and checkout SHA recorded in PR #3 body after push; baseline CI run #62 on `4dd3e988` was `CI_VERIFIED` green with 65 files / 437 tests / 11 smoke checks).

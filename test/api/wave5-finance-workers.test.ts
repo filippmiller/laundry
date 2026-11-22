@@ -17,9 +17,10 @@ import { login, seedOrder, seedTenant, uniquePhone } from "./_fixtures.js";
 import { recordIntake } from "../../src/services/intake.js";
 import { receiveHandoff } from "../../src/services/partner.js";
 import {
-  approvePartnerCreditNote, capturePayment, createCustomerInvoice, createPartnerInvoice,
+  approvePartnerCreditNote, approvePartnerPayout, capturePayment, createCustomerInvoice, createPartnerInvoice,
   createPartnerPayout, disputePartnerLine, listChargebacks, refundPayment, resolvePartnerDispute,
 } from "../../src/services/finance.js";
+import { financeAnalytics } from "../../src/services/finance-analytics.js";
 import { processOutbox } from "../../src/services/outbox.js";
 import { processPaymentInbox, requeueFailedPaymentEvents } from "../../src/services/payment-inbox.js";
 // @ts-expect-error ESM script helper exports parseCsv and readPreviousE2eRows
@@ -348,6 +349,241 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 5 Track B: finance dispute
     ));
     const netPayable = entries.reduce((acc, e) => acc + e.creditKopeks - e.debitKopeks, 0);
     expect(netPayable).toBe(0);
+  });
+
+  it("R2-002: holds only net uncredited remainder on re-disputed line, aligns payout & analytics, and preserves real advances", async () => {
+    // 1. Billed line A, partial credit C = floor(A/3), new active dispute on remaining (A - C)
+    const c = await seedBilledPartnerLine(2_000);
+    const lineAmount = c.line.amountKopeks;
+    const partialCredit = Math.floor(lineAmount / 3);
+    const remaining = lineAmount - partialCredit;
+    expect(lineAmount).toBeGreaterThan(0);
+    expect(partialCredit).toBeGreaterThan(0);
+    expect(remaining).toBeGreaterThan(0);
+    const partnerFinance = makePrincipal(c.f.organizationId, c.partner.userId, ["partner_finance"], {
+      partnerId: c.partner.partnerId,
+    });
+
+    const partial = await resolvePartnerDispute(db, c.finance, {
+      disputeId: c.disputeId,
+      outcome: "partial",
+      creditKopeks: partialCredit,
+      reason: `Частичная скидка ${partialCredit} коп`,
+      key: `r2-002-part-${rid()}`,
+    });
+    expect(partial.creditKopeks).toBe(partialCredit);
+
+    const dispute2 = await disputePartnerLine(db, partnerFinance, {
+      lineId: c.line.id,
+      reason: `Повторный спор на остаток ${remaining} коп`,
+      key: `r2-002-d2-${rid()}`,
+    });
+
+    // Intermediate state: line contribution to payable MUST be 0, advance MUST be 0 (never partialCredit)
+    const analyticsDuringDispute = await financeAnalytics(db, c.finance);
+    const partnerRow1 = analyticsDuringDispute.payables.partners.find(p => p.partnerId === c.partner.partnerId)!;
+    expect(partnerRow1).toMatchObject({
+      accruedKopeks: remaining,
+      disputedKopeks: remaining,
+      invoicedKopeks: 0,
+      payableKopeks: 0,
+      availablePayableKopeks: 0,
+      advanceKopeks: 0,
+    });
+    expect(analyticsDuringDispute.payables).toMatchObject({
+      accruedKopeks: remaining,
+      disputedKopeks: remaining,
+      payableKopeks: 0,
+      availablePayableKopeks: 0,
+      advanceKopeks: 0,
+    });
+    await expect(createPartnerPayout(db, c.finance, {
+      partnerId: c.partner.partnerId,
+      amountKopeks: 1,
+      key: `r2-002-zero-${rid()}`,
+    })).rejects.toMatchObject({
+      message: "PAYOUT_EXCEEDS_PAYABLE",
+      details: expect.objectContaining({
+        grossPayableKopeks: 0,
+        availablePayableKopeks: 0,
+      }),
+    });
+
+    // 2. Add 1000 kopeks of independent undisputed accrual for the same partner -> full 1000 must be available
+    const [origAccrual] = await db.select().from(partnerServiceAccruals)
+      .where(eq(partnerServiceAccruals.id, c.line.accrualId))
+      .limit(1);
+    await db.insert(partnerServiceAccruals).values({
+      organizationId: c.f.organizationId,
+      partnerId: c.partner.partnerId,
+      orderLineId: origAccrual.orderLineId,
+      contractId: origAccrual.contractId,
+      contractPriceVersionId: origAccrual.contractPriceVersionId,
+      quantity: 1,
+      amountKopeks: 1_000,
+      status: "accrued",
+      disputed: false,
+    });
+
+    const analyticsWithIndependent = await financeAnalytics(db, c.finance);
+    const partnerRow2 = analyticsWithIndependent.payables.partners.find(p => p.partnerId === c.partner.partnerId)!;
+    expect(partnerRow2).toMatchObject({
+      accruedKopeks: remaining + 1_000,
+      disputedKopeks: remaining,
+      invoicedKopeks: 1_000,
+      payableKopeks: 1_000,
+      availablePayableKopeks: 1_000,
+      advanceKopeks: 0,
+    });
+
+    // Payout authorization allows the full 1000 kopeks (previously reduced by partialCredit) and rejects 1001
+    await expect(createPartnerPayout(db, c.finance, {
+      partnerId: c.partner.partnerId,
+      amountKopeks: 1_001,
+      key: `r2-002-over-1001-${rid()}`,
+    })).rejects.toMatchObject({
+      message: "PAYOUT_EXCEEDS_PAYABLE",
+      details: expect.objectContaining({ availablePayableKopeks: 1_000 }),
+    });
+    const payout1000 = await createPartnerPayout(db, c.finance, {
+      partnerId: c.partner.partnerId,
+      amountKopeks: 1_000,
+      key: `r2-002-ok-1000-${rid()}`,
+    });
+    expect(payout1000.amountKopeks).toBe(1_000);
+
+    // 3. Reject dispute #2 -> remaining balance is released and becomes payable
+    await resolvePartnerDispute(db, c.finance, {
+      disputeId: dispute2.disputeId,
+      outcome: "rejected",
+      reason: "Претензия по остатку отклонена",
+      key: `r2-002-rej-${rid()}`,
+    });
+    const analyticsAfterReject = await financeAnalytics(db, c.finance);
+    const partnerRow3 = analyticsAfterReject.payables.partners.find(p => p.partnerId === c.partner.partnerId)!;
+    expect(partnerRow3).toMatchObject({
+      accruedKopeks: remaining + 1_000,
+      disputedKopeks: 0,
+      payableKopeks: remaining + 1_000,
+      reservedKopeks: 1_000,
+      availablePayableKopeks: remaining,
+      advanceKopeks: 0,
+    });
+    await expect(createPartnerPayout(db, c.finance, {
+      partnerId: c.partner.partnerId,
+      amountKopeks: remaining + 1,
+      key: `r2-002-step3-over-${rid()}`,
+    })).rejects.toMatchObject({
+      message: "PAYOUT_EXCEEDS_PAYABLE",
+      details: expect.objectContaining({ availablePayableKopeks: remaining }),
+    });
+    const payoutRemaining = await createPartnerPayout(db, c.finance, {
+      partnerId: c.partner.partnerId,
+      amountKopeks: remaining,
+      key: `r2-002-step3-ok-${rid()}`,
+    });
+    expect(payoutRemaining.amountKopeks).toBe(remaining);
+
+    // 4. Real advance preservation: partner already paid full A, then receives partial credit C + dispute #2 on (A - C)
+    const adv = await seedBilledPartnerLine(2_000);
+    const advLineAmount = adv.line.amountKopeks;
+    const advPartialCredit = Math.floor(advLineAmount / 3);
+    const advRemaining = advLineAmount - advPartialCredit;
+    const advPartnerFinance = makePrincipal(adv.f.organizationId, adv.partner.userId, ["partner_finance"], {
+      partnerId: adv.partner.partnerId,
+    });
+    const advApproverId = await seedUser(db, adv.f.organizationId);
+    const advApproverPrincipal = makePrincipal(adv.f.organizationId, advApproverId, ["platform_finance"]);
+
+    // Reject initial dispute so full A is paid out first
+    await resolvePartnerDispute(db, adv.finance, {
+      disputeId: adv.disputeId,
+      outcome: "rejected",
+      reason: "Снято для выплаты",
+      key: `r2-002-adv-rej0-${rid()}`,
+    });
+    const paidFull = await createPartnerPayout(db, adv.finance, {
+      partnerId: adv.partner.partnerId,
+      amountKopeks: advLineAmount,
+      key: `r2-002-adv-pay-${rid()}`,
+    });
+    await approvePartnerPayout(db, advApproverPrincipal, {
+      payoutId: paidFull.payoutId,
+      key: `r2-002-adv-ap-${rid()}`,
+    });
+
+    // Now re-dispute, resolve partial C, then open dispute on remaining (A - C)
+    const advD1 = await disputePartnerLine(db, advPartnerFinance, {
+      lineId: adv.line.id,
+      reason: "Поздняя претензия 1",
+      key: `r2-002-adv-d1-${rid()}`,
+    });
+    await resolvePartnerDispute(db, adv.finance, {
+      disputeId: advD1.disputeId,
+      outcome: "partial",
+      creditKopeks: advPartialCredit,
+      reason: `Поздняя частичная скидка ${advPartialCredit}`,
+      key: `r2-002-adv-p1-${rid()}`,
+    });
+    const advD2 = await disputePartnerLine(db, advPartnerFinance, {
+      lineId: adv.line.id,
+      reason: `Поздняя претензия 2 на остаток ${advRemaining}`,
+      key: `r2-002-adv-d2-${rid()}`,
+    });
+
+    // During dispute #2: accrued=rem, disputed=rem, paid=A -> netBalance=-A -> real advanceKopeks=A
+    const advAnalyticsDuring = await financeAnalytics(db, adv.finance);
+    const advRowDuring = advAnalyticsDuring.payables.partners.find(p => p.partnerId === adv.partner.partnerId)!;
+    expect(advRowDuring).toMatchObject({
+      accruedKopeks: advRemaining,
+      disputedKopeks: advRemaining,
+      paidKopeks: advLineAmount,
+      payableKopeks: 0,
+      availablePayableKopeks: 0,
+      advanceKopeks: advLineAmount,
+    });
+    await expect(createPartnerPayout(db, adv.finance, {
+      partnerId: adv.partner.partnerId,
+      amountKopeks: 1,
+      key: `r2-002-adv-during-1-${rid()}`,
+    })).rejects.toMatchObject({
+      message: "PAYOUT_EXCEEDS_PAYABLE",
+      details: expect.objectContaining({
+        grossPayableKopeks: 0,
+        paidKopeks: advLineAmount,
+        availablePayableKopeks: -advLineAmount,
+      }),
+    });
+
+    // After rejecting dispute #2: accrued=rem, disputed=0, paid=A -> netBalance=-C -> real advanceKopeks=C
+    await resolvePartnerDispute(db, adv.finance, {
+      disputeId: advD2.disputeId,
+      outcome: "rejected",
+      reason: "Остаток подтверждён",
+      key: `r2-002-adv-rej2-${rid()}`,
+    });
+    const advAnalyticsAfter = await financeAnalytics(db, adv.finance);
+    const advRowAfter = advAnalyticsAfter.payables.partners.find(p => p.partnerId === adv.partner.partnerId)!;
+    expect(advRowAfter).toMatchObject({
+      accruedKopeks: advRemaining,
+      disputedKopeks: 0,
+      paidKopeks: advLineAmount,
+      payableKopeks: 0,
+      availablePayableKopeks: 0,
+      advanceKopeks: advPartialCredit,
+    });
+    await expect(createPartnerPayout(db, adv.finance, {
+      partnerId: adv.partner.partnerId,
+      amountKopeks: 1,
+      key: `r2-002-adv-after-1-${rid()}`,
+    })).rejects.toMatchObject({
+      message: "PAYOUT_EXCEEDS_PAYABLE",
+      details: expect.objectContaining({
+        grossPayableKopeks: advRemaining,
+        paidKopeks: advLineAmount,
+        availablePayableKopeks: -advPartialCredit,
+      }),
+    });
   });
 
   it("CLS-006 (PRO-008): listChargebacks paginates >50 chargebacks with tied timestamps, search, state filter, tenant isolation, and invalid cursor 400", async () => {
