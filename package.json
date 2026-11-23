@@ -2,6 +2,9 @@
   "name": "laundry",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "lint": "eslint .",
     "typecheck": "tsc --noEmit && tsc --noEmit -p apps/web/tsconfig.json",
