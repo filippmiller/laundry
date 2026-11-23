@@ -1,96 +1,294 @@
-import { createHash } from "node:crypto";
-import { and, eq, gt, sql } from "drizzle-orm";
-import { buildings, slotReservations, serviceWindows } from "../db/schema.js";
+import { and, eq, gt, gte, isNull, lte, sql } from "drizzle-orm";
+import type { Db } from "../db/client.js";
+import { buildings, serviceWindows, slotReservations } from "../db/schema.js";
+import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { AppError, errors } from "../core/errors.js";
+import { appendEvent } from "../core/events.js";
+import { hashRequest, withIdempotency } from "../core/idempotency.js";
 
-export type ReservationDb = { transaction<T>(fn: (tx: any) => Promise<T>): Promise<T> };
 export type HoldRequest = {
-  organizationId: string;
+  principal: Principal;
   windowId: string;
   key: string;
   expiresAt: Date;
+  orderId?: string | null;
+  quoteId?: string | null;
+  capacityUnits?: number;
+  body?: Record<string, unknown>;
   now?: Date;
 };
-export class CapacityUnavailable extends Error {
-  constructor() { super("CAPACITY_UNAVAILABLE"); }
-}
+export type HoldResult = {
+  reservationId: string;
+  windowId: string;
+  state: "held";
+  expiresAt: string;
+  replayed?: boolean;
+};
+
 function fingerprint(input: HoldRequest) {
-  return createHash("sha256").update(JSON.stringify({
-    organizationId: input.organizationId,
+  return hashRequest({
+    organizationId: input.principal.organizationId,
+    principalId: input.principal.userId,
     windowId: input.windowId,
+    key: input.key,
     expiresAt: input.expiresAt.toISOString(),
-  })).digest("hex");
+    orderId: input.orderId ?? null,
+    quoteId: input.quoteId ?? null,
+    capacityUnits: input.capacityUnits ?? 1,
+    body: input.body ?? {},
+  });
 }
-export async function holdSlot(db: ReservationDb, input: HoldRequest) {
-  if (!input.organizationId) throw new Error("ORGANIZATION_REQUIRED");
-  if (!input.key?.trim() || input.key.length > 200) throw new Error("INVALID_IDEMPOTENCY_KEY");
+
+export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> {
+  assertRole(input.principal, ...ROLE_GROUPS.customer, ...ROLE_GROUPS.dispatcher, "system_worker");
+  if (!input.principal.organizationId) throw errors.forbidden();
+  if (!input.key?.trim() || input.key.length > 200) throw new AppError("VALIDATION_ERROR", "INVALID_IDEMPOTENCY_KEY");
   const now = input.now ?? new Date();
+  const units = input.capacityUnits ?? 1;
+  if (!Number.isInteger(units) || units < 1) throw new AppError("VALIDATION_ERROR", "INVALID_CAPACITY_UNITS");
   if (!(input.expiresAt instanceof Date) || !Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= now) {
-    throw new Error("INVALID_EXPIRY");
+    throw new AppError("INVALID_EXPIRY");
   }
-  const requestHash = fingerprint(input);
-  return db.transaction(async tx => {
-    // Check ownership inside transaction; the client cannot supply another tenant's window.
-    const owned = await tx.select({ id: serviceWindows.id }).from(serviceWindows)
+  const requestHash = fingerprint({ ...input, capacityUnits: units });
+
+  const result = await withIdempotency(db, {
+    organizationId: input.principal.organizationId,
+    scope: `slot:hold:${input.windowId}`,
+    key: input.key,
+    actorId: input.principal.userId,
+    requestHash,
+  }, async tx => {
+    const [window] = await tx.select({ id: serviceWindows.id, feeKopeks: serviceWindows.feeKopeks })
+      .from(serviceWindows)
       .innerJoin(buildings, eq(serviceWindows.buildingId, buildings.id))
-      .where(and(eq(serviceWindows.id, input.windowId), eq(buildings.organizationId, input.organizationId)))
-      .limit(1);
-    if (!owned.length) throw new Error("WINDOW_NOT_FOUND");
-    const inserted = await tx.insert(slotReservations).values({
-      windowId: input.windowId, idempotencyKey: input.key,
-      requestHash, expiresAt: input.expiresAt, state: "held",
-    }).onConflictDoNothing().returning({ id: slotReservations.id });
-    if (!inserted.length) {
-      const rows = await tx.select().from(slotReservations).where(and(
-        eq(slotReservations.windowId, input.windowId), eq(slotReservations.idempotencyKey, input.key),
+      .where(and(
+        eq(serviceWindows.id, input.windowId),
+        eq(buildings.organizationId, input.principal.organizationId),
+        eq(serviceWindows.status, "open"),
+        gt(serviceWindows.endsAt, now),
       )).limit(1);
-      if (!rows.length) throw new Error("RETRY_CONFLICT");
-      if (rows[0].requestHash !== requestHash) throw new Error("IDEMPOTENCY_PAYLOAD_CONFLICT");
-      return { reservationId: rows[0].id, state: rows[0].state, replayed: true };
-    }
+    if (!window) throw new AppError("WINDOW_NOT_FOUND");
+
+    const inserted = await tx.insert(slotReservations).values({
+      organizationId: input.principal.organizationId,
+      windowId: input.windowId,
+      orderId: input.orderId ?? null,
+      quoteId: input.quoteId ?? null,
+      principalId: input.principal.userId,
+      capacityUnits: units,
+      expiresAt: input.expiresAt,
+      idempotencyKey: input.key,
+      requestHash,
+      state: "held",
+    }).returning({ id: slotReservations.id });
+    if (!inserted.length) throw new AppError("CAPACITY_UNAVAILABLE");
+
     const changed = await tx.update(serviceWindows).set({
-      reservedOrders: sql`${serviceWindows.reservedOrders} + 1`,
+      reservedOrders: sql`${serviceWindows.reservedOrders} + ${units}`,
       version: sql`${serviceWindows.version} + 1`,
     }).where(and(
       eq(serviceWindows.id, input.windowId),
-      gt(serviceWindows.capacityOrders, serviceWindows.reservedOrders),
-      gt(serviceWindows.endsAt, now),
+      sql`${serviceWindows.capacityOrders} - ${serviceWindows.reservedOrders} >= ${units}`,
     )).returning({ id: serviceWindows.id });
-    if (!changed.length) throw new CapacityUnavailable();
-    return { reservationId: inserted[0].id, state: "held" as const, replayed: false };
+    if (!changed.length) throw new AppError("CAPACITY_UNAVAILABLE");
+
+    await appendEvent(tx, {
+      principal: input.principal,
+      aggregateType: "slot_reservation",
+      aggregateId: inserted[0].id,
+      eventType: "slot.held",
+      payload: { windowId: input.windowId, capacityUnits: units, expiresAt: input.expiresAt.toISOString(), feeKopeks: window.feeKopeks },
+    });
+    return {
+      reservationId: inserted[0].id,
+      windowId: input.windowId,
+      state: "held" as const,
+      expiresAt: input.expiresAt.toISOString(),
+    };
   });
+  return { ...result.value, replayed: result.replayed };
 }
-export async function confirmSlot(db: ReservationDb, reservationId: string, now = new Date()) {
-  return db.transaction(async tx => {
-    const changed = await tx.update(slotReservations).set({ state: "confirmed" })
-      .where(and(eq(slotReservations.id, reservationId), eq(slotReservations.state, "held"), gt(slotReservations.expiresAt, now)))
-      .returning({ id: slotReservations.id });
-    if (changed.length) return "confirmed" as const;
-    const rows = await tx.select().from(slotReservations).where(eq(slotReservations.id, reservationId)).limit(1);
-    if (rows[0]?.state === "confirmed") return "confirmed" as const;
-    throw new Error("RESERVATION_NOT_CONFIRMABLE");
+
+export type ConfirmResult = { reservationId: string; state: "confirmed"; replayed?: boolean };
+export async function confirmSlot(
+  db: Db,
+  input: { principal: Principal; reservationId: string; key?: string; now?: Date },
+): Promise<ConfirmResult> {
+  assertRole(input.principal, ...ROLE_GROUPS.customer, ...ROLE_GROUPS.dispatcher, "system_worker");
+  const now = input.now ?? new Date();
+  const result = await withIdempotency(db, {
+    organizationId: input.principal.organizationId,
+    scope: "slot:confirm",
+    key: input.key ?? input.reservationId,
+    actorId: input.principal.userId,
+    requestHash: hashRequest({ reservationId: input.reservationId, organizationId: input.principal.organizationId }),
+  }, async tx => {
+    const [reservation] = await tx.select().from(slotReservations).where(and(
+      eq(slotReservations.id, input.reservationId),
+      eq(slotReservations.organizationId, input.principal.organizationId),
+    )).limit(1);
+    if (!reservation) throw errors.notFound("reservation");
+
+    if (reservation.state === "confirmed") {
+      return { reservationId: reservation.id, state: "confirmed" as const };
+    }
+    if (reservation.state !== "held" || reservation.expiresAt <= now) {
+      throw new AppError("INVALID_TRANSITION", "RESERVATION_NOT_CONFIRMABLE", { state: reservation.state });
+    }
+    const changed = await tx.update(slotReservations).set({ state: "confirmed" }).where(and(
+      eq(slotReservations.id, reservation.id),
+      eq(slotReservations.state, "held"),
+      gt(slotReservations.expiresAt, now),
+    )).returning({ id: slotReservations.id });
+    if (!changed.length) throw new AppError("INVALID_TRANSITION", "RESERVATION_NOT_CONFIRMABLE");
+    await appendEvent(tx, {
+      principal: input.principal,
+      aggregateType: "slot_reservation",
+      aggregateId: reservation.id,
+      eventType: "slot.confirmed",
+      payload: { windowId: reservation.windowId, orderId: reservation.orderId },
+    });
+    return { reservationId: reservation.id, state: "confirmed" as const };
   });
+  return { ...result.value, replayed: result.replayed };
 }
-async function terminate(db: ReservationDb, reservationId: string, target: "released" | "expired", now: Date) {
-  return db.transaction(async tx => {
+
+async function terminate(
+  db: Db,
+  input: { principal: Principal; reservationId: string; reason: string; key?: string; now?: Date },
+  target: "released" | "expired",
+) {
+  const now = input.now ?? new Date();
+  assertRole(input.principal, ...(target === "expired"
+    ? ROLE_GROUPS.worker
+    : [...ROLE_GROUPS.dispatcher, "customer" as const]));
+  if (target === "released" && !input.reason?.trim()) throw new AppError("VALIDATION_ERROR", "REASON_REQUIRED");
+  const result = await withIdempotency(db, {
+    organizationId: input.principal.organizationId,
+    scope: `slot:${target}`,
+    key: input.key ?? input.reservationId,
+    actorId: input.principal.userId,
+    requestHash: hashRequest({ reservationId: input.reservationId, target, reason: input.reason }),
+  }, async tx => {
+    const [reservation] = await tx.select().from(slotReservations).where(and(
+      eq(slotReservations.id, input.reservationId),
+      eq(slotReservations.organizationId, input.principal.organizationId),
+    )).limit(1);
+    if (!reservation) throw errors.notFound("reservation");
+    if (target === "released" && hasRole(input.principal, "customer") && reservation.principalId !== input.principal.userId) {
+      throw errors.notFound("reservation");
+    }
+    if (reservation.state === target) return { reservationId: reservation.id, state: target, changed: false };
     const condition = target === "expired"
-      ? and(eq(slotReservations.id, reservationId), eq(slotReservations.state, "held"), sql`${slotReservations.expiresAt} <= ${now}`)
-      : and(eq(slotReservations.id, reservationId), sql`${slotReservations.state} IN ('held','confirmed')`);
+      ? and(eq(slotReservations.id, reservation.id), eq(slotReservations.state, "held"), lte(slotReservations.expiresAt, now))
+      : and(eq(slotReservations.id, reservation.id), sql`${slotReservations.state} IN ('held','confirmed')`);
     const changed = await tx.update(slotReservations).set({ state: target }).where(condition)
-      .returning({ windowId: slotReservations.windowId });
-    if (!changed.length) return false;
+      .returning({ windowId: slotReservations.windowId, capacityUnits: slotReservations.capacityUnits });
+    if (!changed.length) {
+      // A confirmed hold must never be released by TTL; the sweep treats it as a no-op.
+      if (reservation.state === target || (target === "expired" && reservation.state === "confirmed")) {
+        return { reservationId: reservation.id, state: reservation.state, changed: false };
+      }
+      throw new AppError("INVALID_TRANSITION", "RESERVATION_NOT_TERMINABLE", { state: reservation.state });
+    }
     const counter = await tx.update(serviceWindows).set({
-      reservedOrders: sql`${serviceWindows.reservedOrders} - 1`,
+      reservedOrders: sql`GREATEST(${serviceWindows.reservedOrders} - ${changed[0].capacityUnits}, 0)`,
       version: sql`${serviceWindows.version} + 1`,
-    }).where(and(eq(serviceWindows.id, changed[0].windowId), gt(serviceWindows.reservedOrders, 0)))
+    }).where(and(eq(serviceWindows.id, changed[0].windowId), gte(serviceWindows.reservedOrders, changed[0].capacityUnits)))
       .returning({ id: serviceWindows.id });
-    if (!counter.length) throw new Error("CAPACITY_COUNTER_INCONSISTENT"); // rollback reservation state
-    return true;
+    if (!counter.length) throw new AppError("INVALID_TRANSITION", "CAPACITY_COUNTER_INCONSISTENT");
+    await appendEvent(tx, {
+      principal: input.principal,
+      aggregateType: "slot_reservation",
+      aggregateId: reservation.id,
+      eventType: target === "expired" ? "slot.expired" : "slot.released",
+      payload: { windowId: reservation.windowId, capacityUnits: changed[0].capacityUnits },
+      reason: input.reason,
+    });
+    return { reservationId: reservation.id, state: target, changed: true };
+  });
+  return { ...result.value, replayed: result.replayed };
+}
+
+export function releaseSlot(db: Db, input: { principal: Principal; reservationId: string; reason: string; key?: string }) {
+  return terminate(db, input, "released");
+}
+export function expireSlot(db: Db, input: { principal: Principal; reservationId: string; reason?: string; key?: string; now?: Date }) {
+  return terminate(db, { ...input, reason: input.reason ?? "TTL expired" }, "expired");
+}
+
+export async function expireDueHolds(
+  db: Db,
+  input: { principal: Principal; now?: Date; limit?: number },
+) {
+  assertRole(input.principal, ...ROLE_GROUPS.worker);
+  const now = input.now ?? new Date();
+  const due = await db.select({ id: slotReservations.id }).from(slotReservations).where(and(
+    eq(slotReservations.organizationId, input.principal.organizationId),
+    eq(slotReservations.state, "held"),
+    lte(slotReservations.expiresAt, now),
+  )).limit(input.limit ?? 100);
+  let expired = 0;
+  for (const row of due) {
+    try {
+      const result = await expireSlot(db, { principal: input.principal, reservationId: row.id, now });
+      if (result.changed) expired++;
+    } catch (error) {
+      if (!(error instanceof AppError)) throw error;
+      // A concurrent confirm/win is expected; the sweep continues.
+    }
+  }
+  return { scanned: due.length, expired };
+}
+
+export type CapacityMismatch = { windowId: string; stored: number; actual: number };
+export async function reconcileCapacity(db: Db, organizationId: string): Promise<CapacityMismatch[]> {
+  const rows = await db.execute(sql`
+    SELECT w.id AS "windowId", w.reserved_orders AS stored,
+           COALESCE(SUM(CASE WHEN r.state IN ('held','confirmed') THEN r.capacity_units ELSE 0 END), 0) AS actual
+    FROM service_windows w
+    LEFT JOIN slot_reservations r ON r.window_id = w.id
+    WHERE w.organization_id = ${organizationId}
+    GROUP BY w.id, w.reserved_orders
+    HAVING w.reserved_orders <> COALESCE(SUM(CASE WHEN r.state IN ('held','confirmed') THEN r.capacity_units ELSE 0 END), 0)
+  `);
+  return (rows.rows as unknown as Array<{ windowId: string; stored: number; actual: number | string }>)
+    .map(row => ({ windowId: row.windowId, stored: Number(row.stored), actual: Number(row.actual) }));
+}
+
+export async function repairCapacity(
+  db: Db,
+  input: { principal: Principal; windowId: string; reason: string },
+) {
+  assertRole(input.principal, "platform_admin");
+  if (!input.reason?.trim()) throw new AppError("VALIDATION_ERROR", "REASON_REQUIRED");
+  return db.transaction(async tx => {
+    const [window] = await tx.select().from(serviceWindows).where(and(
+      eq(serviceWindows.id, input.windowId),
+      eq(serviceWindows.organizationId, input.principal.organizationId),
+    )).limit(1);
+    if (!window) throw errors.notFound("window");
+    const [totals] = await tx.select({
+      actual: sql<number>`COALESCE(SUM(${slotReservations.capacityUnits}), 0)`,
+    }).from(slotReservations).where(and(
+      eq(slotReservations.windowId, input.windowId),
+      sql`${slotReservations.state} IN ('held','confirmed')`,
+    ));
+    const actual = Number(totals?.actual ?? 0);
+    await tx.update(serviceWindows).set({
+      reservedOrders: actual,
+      version: sql`${serviceWindows.version} + 1`,
+    }).where(eq(serviceWindows.id, window.id));
+    await appendEvent(tx, {
+      principal: input.principal,
+      aggregateType: "service_window",
+      aggregateId: window.id,
+      eventType: "capacity.repaired",
+      payload: { from: window.reservedOrders, to: actual },
+      reason: input.reason,
+    });
+    return { windowId: window.id, from: window.reservedOrders, to: actual };
   });
 }
-/** Only call after authorization of cancellation and refund policy. */
-export function releaseSlot(db: ReservationDb, reservationId: string) {
-  return terminate(db, reservationId, "released", new Date());
-}
-export function expireSlot(db: ReservationDb, reservationId: string, now = new Date()) {
-  return terminate(db, reservationId, "expired", now);
-}
+
+export { isNull };
