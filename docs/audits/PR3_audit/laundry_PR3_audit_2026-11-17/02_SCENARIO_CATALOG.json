@@ -1,0 +1,3878 @@
+{
+  "as_of": "2026-11-17",
+  "baseline_sha": "b4e240f08f214ef5967f9c3c35514636e932430c",
+  "important": "These are proposed unique scenarios and coverage dimensions, NOT executed or passing tests.",
+  "scenario_count": 217,
+  "role_counts": {
+    "AU — Guest and authentication": 18,
+    "CU — Customer": 32,
+    "CO — Courier and driver": 30,
+    "PA — Laundry partner": 25,
+    "DI — Dispatcher and operations": 24,
+    "SU — Support and claims": 20,
+    "FI — Finance and settlement": 24,
+    "AD — Administration, security and compliance": 24,
+    "OP — Platform, workers, and production operations": 20
+  },
+  "scenarios": [
+    {
+      "id": "AU-001",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Anonymous home/building landing",
+      "required_acceptance": "Shows supported locations and service terms without exposing private orders",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-002",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "QR referral/building entry",
+      "required_acceptance": "Opaque token resolves to allowed building; arbitrary token cannot reveal customer data",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-003",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Address availability before account",
+      "required_acceptance": "Shows eligible service zone, timezone and windows without assuming eligibility",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-004",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Guest quote preview",
+      "required_acceptance": "Clearly labels estimates and requires login/verification before committing customer order",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-005",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "OTP request",
+      "required_acceptance": "Sends challenge only through approved provider, rate-limited per IP/phone; never logs code",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-006",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "OTP verify",
+      "required_acceptance": "One valid unexpired single-use code establishes a scoped session; repeated/wrong attempt denied",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-007",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "OTP brute force",
+      "required_acceptance": "Attempt counter, cooldown and abuse alerts do not disclose whether phone exists",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-008",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Concurrent OTP challenges",
+      "required_acceptance": "Only the current valid challenge/approved policy succeeds once",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-009",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Session logout and revocation",
+      "required_acceptance": "Logout prevents new mutations; all tabs reflect revoked state",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-010",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Multiple active devices",
+      "required_acceptance": "User can list/revoke only own sessions; lost device access blocked promptly",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-011",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Role invitation",
+      "required_acceptance": "Staff role assigned only by permitted admin and invitation; no self-grant or arbitrary role flag",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-012",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Suspended user",
+      "required_acceptance": "All API and offline reconnect actions reject suspended membership",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-013",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Preview-mode access",
+      "required_acceptance": "Dedicated isolated demo tenant requires preview gate; no public role picker with real data",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-014",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Missing phone provider",
+      "required_acceptance": "Registration blocked visibly, never pretends SMS sent",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-015",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Cross-org identity",
+      "required_acceptance": "Same phone in multiple orgs cannot leak memberships, sessions or orders",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-016",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Account recovery",
+      "required_acceptance": "Re-verification and audit; no insecure phone-only role escalation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-017",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Guest order tracking",
+      "required_acceptance": "Public number + authorized verification yields minimal status; wrong phone indistinguishable from missing",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AU-018",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Accessibility and localization",
+      "required_acceptance": "Keyboard/mobile auth with Russian errors, labels, and reduced-motion behavior",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-001",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "First order onboarding",
+      "required_acceptance": "Verified customer adds an eligible address and sees transparent next steps",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-002",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Multiple addresses",
+      "required_acceptance": "Add/change/remove own addresses, validate building/entrance and references",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-003",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Building unsupported",
+      "required_acceptance": "No order/charge; provide honest unavailable state and alternative",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-004",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Economy wash by weight",
+      "required_acceptance": "Quote minor units and minimum rounding correct; bag-level evidence disclosure",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-005",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Protected item-by-item",
+      "required_acceptance": "Item card, declared condition and agreed procedures recorded before intake",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-006",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Mixed Economy and Protected",
+      "required_acceptance": "Two separate logical/physical containers; billed accurately and traced separately",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-007",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Service catalog restrictions",
+      "required_acceptance": "Unwashable and excluded categories blocked with specific explanation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-008",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer chooses free shared pickup/delivery",
+      "required_acceptance": "Both legs hold capacity and fees are zero under versioned tariff",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-009",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer chooses individual pickup",
+      "required_acceptance": "Feasible exception shown +500 RUB illustrative; explicit acceptance and unique fee line",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-010",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer chooses individual return",
+      "required_acceptance": "Feasible delivery exception has separate consent and fee line",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-011",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Both paid exceptions",
+      "required_acceptance": "Two independent fee lines; no duplicates on retry or payment timeout",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-012",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Quote expires or price changes",
+      "required_acceptance": "Cannot confirm stale hash/terms; re-quote and consent required",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-013",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Last-slot race",
+      "required_acceptance": "Only one booking succeeds with exact availability; no orphan charge",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-014",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Checkout network timeout",
+      "required_acceptance": "Retry same request key resumes exactly one order and payment obligation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-015",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Fake payment declined/authorized/captured",
+      "required_acceptance": "Status distinct from actual fiscal receipt; no false paid banner",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-016",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Invoice/receipt download",
+      "required_acceptance": "Customer may print signed provisional document; full legal requisites or blocked disclaimer",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-017",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Order history and timeline",
+      "required_acceptance": "Shows only own orders and sanitized events on desktop/mobile",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-018",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Reschedule two legs",
+      "required_acceptance": "Atomic swap preserves old booking on failed second leg and sends notice",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-019",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Cancel before dispatch",
+      "required_acceptance": "Release capacity, compute lawful refund/fees, preserve audit history",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-020",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Cancel after pickup",
+      "required_acceptance": "Returns possessions with custody proof, legal policy decision and independent refund",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-021",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Partner proposes additional service",
+      "required_acceptance": "Customer sees delta, reason, expiry, and choices without forced charge",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-022",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer accepts adjustment",
+      "required_acceptance": "Versioned consent binds new price and processing; updated invoice/payment reconcile",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-023",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer declines adjustment",
+      "required_acceptance": "No processing under altered terms; return-unprocessed is an actionable path",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-024",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Delivery tracking and ETA change",
+      "required_acceptance": "Shows real state not fabricated route ETA; notifies delays",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-025",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Delivery to wrong recipient",
+      "required_acceptance": "Proof/recipient mismatch blocks closure and opens incident",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-026",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Missing or damaged garment",
+      "required_acceptance": "Claim linked to correct item, custody, evidence and statutory remedy review",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-027",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Partial delivery then recovery",
+      "required_acceptance": "Outstanding garment visible, reattempt order created and one final reconciliation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-028",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Request cancellation/refund dispute",
+      "required_acceptance": "Clear support SLA and ledger/fiscal references; no self-issued refund",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-029",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Review after real delivery",
+      "required_acceptance": "Only eligible delivered order reviewed, moderation reason and audit visible",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-030",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Support conversation",
+      "required_acceptance": "Create own-order ticket, respond, reopen and preserve message history",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-031",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Notification preferences",
+      "required_acceptance": "Opt-ins and transactional essential notices separated; failed delivery honest",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CU-032",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Repeat order",
+      "required_acceptance": "Prepopulate old service but require new tariff, quote and capacity acceptance",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-001",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Accept assigned shift",
+      "required_acceptance": "Authenticated courier sees only own valid shift and vehicle",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-002",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Reject conflicting shift",
+      "required_acceptance": "Overlapping shift/vehicle assignment safely blocked",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-003",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Assigned stop list",
+      "required_acceptance": "Only assigned active pickup/return stops, ordered by real route and windows",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-004",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Route navigation",
+      "required_acceptance": "Valid real building location and road route; no hashed synthetic distances",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-005",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Arrive at stop",
+      "required_acceptance": "Assigned actor and shift, version guard, exact arrival audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-006",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Customer absent for pickup",
+      "required_acceptance": "Failed attempt with reason and rebook path; no false custody transfer",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-007",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Locked entrance / denied access",
+      "required_acceptance": "Operator incident and consent-safe contact fallback",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-008",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Scan order QR",
+      "required_acceptance": "Opaque signed/validated identifier, no secrets/PII encoded, assignment checked",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-009",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Scan bag and seal",
+      "required_acceptance": "Container and seal belong to same assigned order, unique and available",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-010",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Economy bag weigh",
+      "required_acceptance": "Scale/manual fallback recorded, numeric bounds checked, customer confirms bag count",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-011",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Protected condition capture",
+      "required_acceptance": "Item scan, care labels and private photos linked to signed manifest",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-012",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Mixed order pickup",
+      "required_acceptance": "Protected and Economy items physically separated and recorded",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-013",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Two-party handoff",
+      "required_acceptance": "Customer and courier independently confirm manifest/version/weight/ID",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-014",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Customer disputes count",
+      "required_acceptance": "No automatic acceptance; incident, pending custody and documented resolution",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-015",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Camera permission denied",
+      "required_acceptance": "Manual code entry with equal server validation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-016",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Offline store then page reload",
+      "required_acceptance": "Queue persists, explicit UNSYNCED state; no remote-success claim",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-017",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Offline out-of-order events",
+      "required_acceptance": "Server validates state/version and responds per-event acceptance/conflict",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-018",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Duplicate or modified scan replay",
+      "required_acceptance": "Idempotent once; changed payload/hash/actor/device fails",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-019",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Device stolen or reassigned",
+      "required_acceptance": "Revoked device cannot post new scans; old queued scans segregated",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-020",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Transfer to hub/partner",
+      "required_acceptance": "Receiver co-signs, broken seal/missing bag blocks auto custody",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-021",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Pickup after cancellation",
+      "required_acceptance": "Old stop assignment invalidated; no custody event created",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-022",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Delivery manifest pickup",
+      "required_acceptance": "Only ready accounted containers assigned to driver",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-023",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Delivery to customer",
+      "required_acceptance": "Recipient proof tied to correct package/item set",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-024",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "No-answer delivery",
+      "required_acceptance": "Secure custody kept; return/reattempt slot and exception created",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-025",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Customer refuses delivery",
+      "required_acceptance": "Reason and return-to-hub workflow; no delivered status",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-026",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Partial delivery",
+      "required_acceptance": "Outstanding items/containers and next stop created without double delivered state",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-027",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Shift abruptly abandoned",
+      "required_acceptance": "Dispatcher alerted; remaining stops reassigned with new permission boundary",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-028",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Complete shift and reconcile",
+      "required_acceptance": "No unresolved physical custody or unsynced scans silently ignored",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-029",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Driver transport-only mode",
+      "required_acceptance": "No protected item edit or finance access; minimal location/contact data",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "CO-030",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Battery/network failure mid-confirm",
+      "required_acceptance": "Resume with same idempotency, no phantom handoff",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-001",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner account/login",
+      "required_acceptance": "Only invited assigned partner members access partner portal",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-002",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Expected inbound queue",
+      "required_acceptance": "Shows only orders explicitly assigned to this partner",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-003",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Order unassigned or belongs to partner B",
+      "required_acceptance": "No claim by first scan; safe 404 and audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-004",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Receipt by bag and seal",
+      "required_acceptance": "Independent receiver scan matches courier manifest and transfer proof",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-005",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Broken or reused seal",
+      "required_acceptance": "Incident and hold, no silent accept",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-006",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Weight discrepancy",
+      "required_acceptance": "Measured vs expected stored; price delta needs customer consent",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-007",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Wrong bag in batch",
+      "required_acceptance": "Cross-order or partner mismatch rejected before processing",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-008",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Protected item condition inspection",
+      "required_acceptance": "Care label, known defects and evidence associated with each item",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-009",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Unsupported cleaning method",
+      "required_acceptance": "Request customer decision or return-unprocessed without substitute method",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-010",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Customer approves change",
+      "required_acceptance": "Immutable updated price/technology consent and invoice/reconciliation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-011",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Customer refuses change",
+      "required_acceptance": "No new work, safe packing/return task, refund review",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-012",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Inspection while customer unreachable",
+      "required_acceptance": "Hold pending approval, SLA timer and escalation; no default consent",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-013",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Create processing batch",
+      "required_acceptance": "Only accepted assigned garments; record recipe/technician/start time",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-014",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Batch across multiple orders",
+      "required_acceptance": "Item identities preserved, no mixup of two customers",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-015",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partial batch completion",
+      "required_acceptance": "Remaining items tracked; cannot mark entire order ready",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-016",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "QC passes all items",
+      "required_acceptance": "Exact expected set and bag-level rules satisfied before packing",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-017",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "QC fails / needs rewash",
+      "required_acceptance": "State returns to processing, no unjustified customer fee, ETA updated",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-018",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Lost item after processing",
+      "required_acceptance": "Mark missing, seal evidence, claim and partial fulfillment; cannot silently close",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-019",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Damage discovered in processing",
+      "required_acceptance": "Evidence, incident and authorized compensation analysis",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-020",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Ready-for-return packing",
+      "required_acceptance": "Verified output manifest, new bag/seal and courier receiving proof",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-021",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner unavailable or SLA breach",
+      "required_acceptance": "Dispatcher gets escalated backlog; customer revised schedule/compensation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-022",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner invoice period",
+      "required_acceptance": "Only own accruals, immutable contract price version and correct quantity",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-023",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner disputes line",
+      "required_acceptance": "Only own line, evidence and separate credit note approval",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-024",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner finance vs operator",
+      "required_acceptance": "Operator cannot see platform-wide revenue or other partners' invoices",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "PA-025",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner operator leaves company",
+      "required_acceptance": "Session/device revoked and pending tasks safely reassigned",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-001",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Read dashboard",
+      "required_acceptance": "Shows scoped queues/counts without customer sensitive fields",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-002",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Create/configure building windows",
+      "required_acceptance": "Geography, shifts and capacity verified; changes audited",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-003",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Capacity concurrent booking",
+      "required_acceptance": "No oversell despite two customers; stale counters reconciled",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-004",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Plan courier shift",
+      "required_acceptance": "Vehicle, person, legal working hours and region compatible",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-005",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Assign pickup to courier",
+      "required_acceptance": "Exactly one active stop, correct order state and shift",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-006",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Assign laundry partner",
+      "required_acceptance": "Partner contract/zone/capacity check precedes partner receipt",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-007",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Grouped house pickup",
+      "required_acceptance": "Cluster compatible windows without fake distance claims",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-008",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Optimized route proposal",
+      "required_acceptance": "Real geocoding/matrix, window/weight feasibility, auditable comparison",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-009",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Manual route override",
+      "required_acceptance": "Versioned planner reason, valid handoffs, no silent custody edit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-010",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Router/optimizer outage",
+      "required_acceptance": "Fall back to safe manual plan without misleading ETA",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-011",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Late courier",
+      "required_acceptance": "Customer notified and dispatcher offered reassignment/reschedule",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-012",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Courier no-show",
+      "required_acceptance": "Assigned stops requeued and legal off-schedule fee waived if operator fault",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-013",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Customer no-show",
+      "required_acceptance": "Proof/attempt and lawful policy, no invented penalty",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-014",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Reassign stop after shift cancelled",
+      "required_acceptance": "Previous device loses access, queued scans reconciled",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-015",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Partner rejects inbound handoff",
+      "required_acceptance": "Incident assigned, custody remains with correct holder",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-016",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Partner SLA breach",
+      "required_acceptance": "Capacity and downstream return plans updated",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-017",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Protected special delivery",
+      "required_acceptance": "Premium capacity and second charge/consent tied to actual route",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-018",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Partial delivery recovery",
+      "required_acceptance": "Outstanding garments/containers generate a real next stop",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-019",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Recipient unavailable",
+      "required_acceptance": "Safe storage, reattempt window and customer contact",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-020",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Returns without processing",
+      "required_acceptance": "Physical return chain created after declined adjustment",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-021",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "No supported partner available",
+      "required_acceptance": "Do not sell booking; operational exception with clear customer response",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-022",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Safety and physical custody anomaly",
+      "required_acceptance": "Stop processing, create claim/investigation and audit resolution",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-023",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Cross-city dispatcher",
+      "required_acceptance": "Cannot silently access unrelated tenant/city or partner contracts",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "DI-024",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Dispatch completion metrics",
+      "required_acceptance": "Real on-time %, cost per stop and backlogs from persisted events",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-001",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Search customer by public number",
+      "required_acceptance": "Scoped exact match with minimal customer contact fields",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-002",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Open support thread",
+      "required_acceptance": "References an owned order and immutable participant trail",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-003",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Respond to ticket",
+      "required_acceptance": "Correct participant, no cross-tenant messages, audit timestamp",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-004",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Close/reopen thread",
+      "required_acceptance": "Permissions and state history preserved",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-005",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Open missing-item claim",
+      "required_acceptance": "References only real garment of order; legal hold on its assets",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-006",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Open damage claim",
+      "required_acceptance": "Retains pre-intake and post-QC evidence and treatment history",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-007",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Claim without photos",
+      "required_acceptance": "Accept statutory complaint, request further evidence without unlawful blanket refusal",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-008",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Cross-order evidence ID",
+      "required_acceptance": "Reject object-level references, no exposure of storage keys",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-009",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Investigation assignment",
+      "required_acceptance": "Case-based role access with expiry and access audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-010",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Decision and rationale",
+      "required_acceptance": "Approver authorized; prior decisions immutable, support cannot self-approve",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-011",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Appeal/reopen",
+      "required_acceptance": "Adds revision and review, never overwrites previous denial",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-012",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Partial lost/returned items",
+      "required_acceptance": "Physical exception and financial remedy linked without forced closure",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-013",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Compensation proposal",
+      "required_acceptance": "Support recommends, finance approves and payout separate",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-014",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Customer retracts consent",
+      "required_acceptance": "Consent record and lawful retention hold handled correctly",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-015",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Evidence export",
+      "required_acceptance": "Justified access, short-lived URL, watermark and audit, no partner-wide leak",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-016",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Retention expiry while case open",
+      "required_acceptance": "Legal hold prevents deletion and grants are time bounded",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-017",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Customer requests data deletion",
+      "required_acceptance": "Lawful retention matrix, erase only unheld data with export/audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-018",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Response SLA escalation",
+      "required_acceptance": "Reminders and assignment on overdue ticket without fabricated delivery",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-019",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Suspicious repeat claims",
+      "required_acceptance": "Fraud signal informs review, never auto-denies statutory claim",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "SU-020",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Support employee leaves",
+      "required_acceptance": "Revoke case access/session while preserving case audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-001",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "See finance dashboard",
+      "required_acceptance": "Only finance staff, real scoped amounts, no unapproved metrics",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-002",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Quote and invoice",
+      "required_acceptance": "Line totals, version snapshots, tax/legal label and rounding match",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-003",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Fake payment capture",
+      "required_acceptance": "One obligation/one posting; no real-acquiring claim",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-004",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Duplicate capture with new key",
+      "required_acceptance": "Unique obligation guard prevents second payment",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-005",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Provider webhook validation",
+      "required_acceptance": "Verified signature, timestamp/replay and intent/tenant/amount mapping",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-006",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Provider event retried",
+      "required_acceptance": "Exactly-once business posting and no extra fiscal document",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-007",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Provider event delayed/out of order",
+      "required_acceptance": "State machine defers/applies safely with reconciliation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-008",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Two simultaneous refunds",
+      "required_acceptance": "Sum never exceeds net captured under row locking",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-009",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Refund and chargeback race",
+      "required_acceptance": "Financial hold prevents double payout and records provider truth",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-010",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Partial service refund",
+      "required_acceptance": "Unrendered service credited, delivered portion accounted and consent preserved",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-011",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Cancellation fees",
+      "required_acceptance": "Only legal documented costs; off-schedule failure refunded if operator fault",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-012",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Price adjustment accepted",
+      "required_acceptance": "New invoice line/debit note posted only after consent and service",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-013",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Price adjustment declined",
+      "required_acceptance": "No delta charge; cancellation/return and refund examined",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-014",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Ledger journal balance",
+      "required_acceptance": "Every journal balanced, immutable entries, idempotent posting and reversals",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-015",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Customer invoice PDF/print",
+      "required_acceptance": "Correct customer and legal requisites, demo label where applicable",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-016",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Fiscal receipt pending",
+      "required_acceptance": "Explicit pending until KKT/OFD provider ack; failed/retry alert",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-017",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Fiscal refund/correction",
+      "required_acceptance": "Independent lawful fiscal state and provider reconciliation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-018",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Partner accrued services",
+      "required_acceptance": "Contract version, quantity, acceptance and nonduplicated basis",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-019",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Partner disputed invoice",
+      "required_acceptance": "Dispute and credit note before approved payment, original line preserved",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-020",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Partner payout approved",
+      "required_acceptance": "Two-person control threshold and provider idempotency; money not moved in fake mode",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-021",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Compensation approved",
+      "required_acceptance": "Separate payable and actual transfer reconciliation; approval alone not paid",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-022",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "End-of-day reconciliation",
+      "required_acceptance": "Capture/refund/chargeback/cash receipt and provider differences visible",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-023",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Margin by building and route",
+      "required_acceptance": "Real partner/courier/fuel/fees allocated; no invented profitability",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "FI-024",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Finance export",
+      "required_acceptance": "Audited, least privilege, redacted report with consistent totals",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-001",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Platform admin sign-in",
+      "required_acceptance": "Invited MFA/OTP session and no demo role picker in real environment",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-002",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Grant role",
+      "required_acceptance": "Only authorized admin, reason required, audit and no self-elevation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-003",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Revoke role",
+      "required_acceptance": "Current session and access revoked; last-admin guard holds under concurrency",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-004",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Suspend employee",
+      "required_acceptance": "No self lockout, no last active admin lockout, all devices expire",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-005",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Partner invite and scope",
+      "required_acceptance": "PartnerId not user-supplied; restrict to contract/service area",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-006",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Admin lists memberships",
+      "required_acceptance": "Tenant-scoped with pagination and sensitive-field minimization",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-007",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Admin revoke sessions",
+      "required_acceptance": "Target belongs to tenant, audit reason, immediate effect",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-008",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure service catalog",
+      "required_acceptance": "Versioned service restrictions/availability and test quote",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-009",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Publish tariff version",
+      "required_acceptance": "Two-step approval, effective dates, no retroactive existing quote edit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-010",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure premium surcharge",
+      "required_acceptance": "Approved price/feasibility, transparent customer line and audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-011",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure city/building",
+      "required_acceptance": "Validated address/timezone/real geocoding and service zone",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-012",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configure partner contract",
+      "required_acceptance": "Legal/SLA, wholesale versions and role boundaries",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-013",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configure notifications",
+      "required_acceptance": "Templates, provider approved, privacy opt-out and delivery audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-014",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configure retention schedule",
+      "required_acceptance": "Purpose/category, legal hold, documented owner sign-off",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-015",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure KKT/payment providers",
+      "required_acceptance": "Secrets outside repo, real vs fake flags and dry-run verification",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-016",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Inspect fraud queue",
+      "required_acceptance": "No automatic adverse determination, scoped investigation and appeal",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-017",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Audit event search",
+      "required_acceptance": "Append-only and field-redacted, correlated request and user",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-018",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Secure media access",
+      "required_acceptance": "Case-based and logged; admin not automatically able to browse all videos",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-019",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Restore operation",
+      "required_acceptance": "Off-host backup, clean-instance restore, access and ledger reconciliation",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-020",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Permission matrix audit",
+      "required_acceptance": "Every route/action/field denied by default to wrong tenant/role",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-021",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Feature flags rollout",
+      "required_acceptance": "Canary/risk-limited activation, rollback and identical SHA evidence",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-022",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Security incident",
+      "required_acceptance": "Contain affected account/provider, revoke keys, retain forensic evidence",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-023",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "User data export/deletion",
+      "required_acceptance": "Privacy request tracked with lawful holds and actor audit",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "AD-024",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configuration change race",
+      "required_acceptance": "Two admins cannot unknowingly overwrite critical versions",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-001",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Fresh-install migrations",
+      "required_acceptance": "PostgreSQL 16 migration chain succeeds and schema drift check clean",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-002",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Upgrade populated DB",
+      "required_acceptance": "Upgrade preserves orders, custody, ledger, future-compatible columns",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-003",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Rollback strategy",
+      "required_acceptance": "No destructive implicit schema revert; rehearsed app/data rollback plan",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-004",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Backup on different host",
+      "required_acceptance": "Actual pg_dump/pg_restore or verified PITR, not same-instance template clone",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-005",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Application liveness",
+      "required_acceptance": "GET /health returns fast process health",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-006",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Application readiness",
+      "required_acceptance": "GET /health/ready checks DB/migrations and Compose reaches healthy",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-007",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Outbox retry under failure",
+      "required_acceptance": "Backoff, dedupe, DLQ, no notification lost or double-sent",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-008",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Payment inbox crash halfway",
+      "required_acceptance": "Atomic per-event processing and safe replay after process kill",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-009",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Worker concurrency",
+      "required_acceptance": "FOR UPDATE SKIP LOCKED and recovery from stuck processing",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-010",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Scheduler expiry vs confirmation",
+      "required_acceptance": "Held slot expires once; confirmed order cannot be released by TTL",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-011",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Cross-tenant query scanner",
+      "required_acceptance": "Every new GET and mutation carries org/resource/actor projection tests",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-012",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Rate limit and abuse",
+      "required_acceptance": "OTP/search/tracking/preview/webhooks appropriate per-client controls",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-013",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "API contract generated from actual routes",
+      "required_acceptance": "OpenAPI has reliable methods, responses, role and optional param status",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-014",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Frontend route contract CI",
+      "required_acceptance": "No UI import/mount references an unregistered endpoint",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-015",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Browser E2E all roles",
+      "required_acceptance": "Six+ role journeys in Playwright mobile/desktop with screenshots/traces",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-016",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Courier offline realistic",
+      "required_acceptance": "IndexedDB persists reload and duplicate/reorder/revoked-device sync tests",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-017",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Drill artifacts hygiene",
+      "required_acceptance": "No raw DB, WAL, secrets, PII or local cache in Git/PR artifact",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-018",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Third-party license provenance",
+      "required_acceptance": "Pinned version/commit, licenses, notices, SBOM and security",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-019",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Metrics and alerts",
+      "required_acceptance": "Real SLA, failed queues, refund drift, custody mismatches, latency and backup age",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    },
+    {
+      "id": "OP-020",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Release/soak",
+      "required_acceptance": "Exact SHA, smoke/evidence, rollback, approval gates and monitored pilot",
+      "baseline_verification": "NOT_RUN_CURRENT_HEAD",
+      "implemented_status": "RECHECK_IN_CODE",
+      "verification_targets": [
+        "API_or_service",
+        "DB_state_and_events",
+        "authorization_negative",
+        "browser_if_user_facing"
+      ],
+      "evidence": null
+    }
+  ],
+  "cross_role_flows": [
+    {
+      "id": "F01",
+      "flow": "Economy building pickup → partner wash → QC → shared delivery → close",
+      "roles": [
+        "customer",
+        "courier",
+        "partner",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F02",
+      "flow": "Protected jacket + Economy bag separated → itemized QC → combined return",
+      "roles": [
+        "customer",
+        "courier",
+        "partner",
+        "dispatcher"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F03",
+      "flow": "Both +500 RUB illustrative exceptional trips → consent → feasible route → one invoice",
+      "roles": [
+        "customer",
+        "dispatcher",
+        "courier",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F04",
+      "flow": "Two concurrent customers compete for last pickup slot",
+      "roles": [
+        "customer",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F05",
+      "flow": "Reservation expires while payment pending; compensation void/refund",
+      "roles": [
+        "customer",
+        "finance",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F06",
+      "flow": "Client reschedules pickup and delivery; second new hold fails; old holds intact",
+      "roles": [
+        "customer",
+        "dispatcher"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F07",
+      "flow": "Cancel after dispatch before handoff → remove courier stop + lawful refund",
+      "roles": [
+        "customer",
+        "dispatcher",
+        "courier",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F08",
+      "flow": "Cancelled order scanned later by offline courier → reject stale event",
+      "roles": [
+        "customer",
+        "courier",
+        "dispatcher"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F09",
+      "flow": "Customer missing at door → proof → operator rebooks without false custody",
+      "roles": [
+        "courier",
+        "dispatcher",
+        "customer"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F10",
+      "flow": "Wrong seal at partner receipt → dispute pending, custody not transferred",
+      "roles": [
+        "courier",
+        "partner",
+        "dispatcher",
+        "support"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F11",
+      "flow": "Protected garment mislabelled and moves to another customer's batch → block",
+      "roles": [
+        "partner",
+        "dispatcher",
+        "claims"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F12",
+      "flow": "Partner weight adjustment accepted → revised invoice and processing",
+      "roles": [
+        "partner",
+        "customer",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F13",
+      "flow": "Partner adjustment declined → return without processing + refund decision",
+      "roles": [
+        "partner",
+        "customer",
+        "courier",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F14",
+      "flow": "QC failure → rewash → new ETA and notification → successful delivery",
+      "roles": [
+        "partner",
+        "dispatcher",
+        "courier",
+        "customer"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F15",
+      "flow": "Partner outage → reassign pending contracted orders, custody safe",
+      "roles": [
+        "partner",
+        "dispatcher",
+        "admin"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F16",
+      "flow": "Item lost while other items ready → partial delivery → claim and compensation",
+      "roles": [
+        "partner",
+        "courier",
+        "customer",
+        "claims",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F17",
+      "flow": "Customer recipient unavailable → secure return + repeat delivery",
+      "roles": [
+        "courier",
+        "dispatcher",
+        "customer"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F18",
+      "flow": "Customer reports missing item after closure → reopen claim + legal hold",
+      "roles": [
+        "customer",
+        "support",
+        "claims"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F19",
+      "flow": "Phone/device revoked while courier offline → no unauthorized sync",
+      "roles": [
+        "courier",
+        "admin",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F20",
+      "flow": "Offline scan captured → browser reload → reconnect unordered → dedup/conflict",
+      "roles": [
+        "courier",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F21",
+      "flow": "Partner B attempts partner A's manifest, evidence and finance dispute",
+      "roles": [
+        "partner",
+        "finance",
+        "security"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F22",
+      "flow": "Customer B attempts customer A's order, invoice, claim and media IDs",
+      "roles": [
+        "customer",
+        "security"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F23",
+      "flow": "Refund two different keys simultaneously, both full; only one granted",
+      "roles": [
+        "finance",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F24",
+      "flow": "Refund and chargeback cross at ledger posting; no double payout",
+      "roles": [
+        "finance",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F25",
+      "flow": "Payment webhook duplicate and out-of-order; fiscal still pending until provider ACK",
+      "roles": [
+        "finance",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F26",
+      "flow": "Partner disputes accrual and gets an approved credit note; history preserved",
+      "roles": [
+        "partner",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F27",
+      "flow": "Compensation proposed by support → dual-approved finance → fake settlement",
+      "roles": [
+        "support",
+        "finance",
+        "customer"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F28",
+      "flow": "Data deletion request during active claim hold; lawful held data remains",
+      "roles": [
+        "customer",
+        "support",
+        "admin",
+        "privacy"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F29",
+      "flow": "Admin revokes role and session mid-request; next mutation fails",
+      "roles": [
+        "admin",
+        "security",
+        "platform"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F30",
+      "flow": "Two admins concurrently attempt to remove last active admin; lockout prevented",
+      "roles": [
+        "admin",
+        "security"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F31",
+      "flow": "Routing engine unavailable; manual plan with true data, no fictitious ETA",
+      "roles": [
+        "dispatcher",
+        "courier"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F32",
+      "flow": "Large night/off-schedule request exceeds safe route capacity; no charge",
+      "roles": [
+        "customer",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F33",
+      "flow": "Disaster recovery: migrate, pay(fake), claim, backup, destroy, restore, reconcile",
+      "roles": [
+        "platform",
+        "finance",
+        "support"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F34",
+      "flow": "Two tenants share phone number; sessions/orders/media/ledger cannot cross",
+      "roles": [
+        "customer",
+        "admin",
+        "security"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F35",
+      "flow": "Public guest tracking guesses wrong phone; no order existence or PII leak",
+      "roles": [
+        "guest",
+        "security"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F36",
+      "flow": "Realistic multi-house pickup load: route, partner capacity, SLA margin and returns",
+      "roles": [
+        "customer",
+        "courier",
+        "partner",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "NOT_RUN_CURRENT_HEAD"
+    }
+  ],
+  "suggested_variants": [
+    {
+      "id": "V1",
+      "description": "Happy path + real positive outcome, state and audit"
+    },
+    {
+      "id": "V2",
+      "description": "Invalid/expired/stale data and safe rejection"
+    },
+    {
+      "id": "V3",
+      "description": "Unauthenticated, wrong actor, role, tenant and object authorization"
+    },
+    {
+      "id": "V4",
+      "description": "Duplicate/idempotent, concurrency, offline retry, out-of-order events where applicable"
+    },
+    {
+      "id": "V5",
+      "description": "Dependency failure, cancellation, dispute, compensation and recovery where applicable"
+    }
+  ]
+}

@@ -1,18 +1,22 @@
+import { randomUUID } from "node:crypto";
 import type { Db } from "../src/db/client.js";
 import {
-  courierShifts, routes, routeStops, seals, evidenceAssets, orders,
-  memberships, membershipRoles, partnerContracts, partners,
+  courierShifts, courierDevices, routes, routeStops, seals, evidenceAssets, orders,
+  memberships, membershipRoles, partnerContracts, partnerPriceVersions, partners,
 } from "../src/db/schema.js";
 import { eq } from "drizzle-orm";
 import { makePrincipal, seedAddress, seedCatalog, seedDeliveryWindow, seedUser, seedWindow } from "./fixtures.js";
 import { createQuote } from "../src/services/quotes.js";
 import { createOrder, scheduleOrder } from "../src/services/orders.js";
+import { assignOrderToPartner } from "../src/services/partner.js";
 import { holdSlot } from "../src/domain/slot-reservation.js";
 import type { Principal } from "../src/core/context.js";
 
 export const COURIER_DEVICE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-
-export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pickup_assigned" } = {}) {
+export async function seedFullOrder(
+  db: Db,
+  options: { state?: "scheduled" | "pickup_assigned"; tier?: "economy" | "protected" } = {},
+) {
   const seed = await seedWindow(db, { capacity: 3 });
   const deliveryWindowId = await seedDeliveryWindow(db, seed);
   const catalog = await seedCatalog(db, seed.organizationId);
@@ -20,7 +24,14 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
   const principal: Principal = makePrincipal(seed.organizationId, seed.userId, ["customer"]);
   const dispatcher: Principal = makePrincipal(seed.organizationId, await seedUser(db, seed.organizationId), ["dispatcher"]);
   const courierId = await seedUser(db, seed.organizationId);
-  const courier: Principal = makePrincipal(seed.organizationId, courierId, ["courier"], { deviceId: COURIER_DEVICE });
+  const deviceIdForFixture = randomUUID();
+  const courier: Principal = makePrincipal(seed.organizationId, courierId, ["courier"], { deviceId: deviceIdForFixture });
+  await db.insert(courierDevices).values({
+    id: deviceIdForFixture,
+    organizationId: seed.organizationId,
+    courierId,
+    label: "test courier device",
+  }).onConflictDoNothing();
 
   const quote = await createQuote(db, principal, {
     buildingId: seed.buildingId,
@@ -28,7 +39,7 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
     deliveryWindowId,
     tariffVersionId: catalog.tariffVersionId,
     key: `quote-${Math.random().toString(36).slice(2)}`,
-    lines: [{ serviceId: catalog.serviceId, tier: "economy", quantity: 1_000, unit: "gram" }],
+    lines: [{ serviceId: catalog.serviceId, tier: options.tier ?? "economy", quantity: 1_000, unit: "gram" }],
   });
   const order = await createOrder(db, principal, {
     quoteId: quote.id,
@@ -40,8 +51,12 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
     principal, windowId: seed.windowId, key: `hold-${Math.random().toString(36).slice(2)}`,
     now: new Date("2026-11-16T12:00:00Z"), expiresAt: new Date("2026-11-16T12:10:00Z"),
   });
+  const deliveryHold = await holdSlot(db, {
+    principal, windowId: deliveryWindowId, key: `dhold-${Math.random().toString(36).slice(2)}`,
+    now: new Date("2026-11-16T12:00:00Z"), expiresAt: new Date("2026-11-16T12:10:00Z"),
+  });
   await scheduleOrder(db, principal, {
-    orderId: order.id, pickupReservationId: hold.reservationId,
+    orderId: order.id, pickupReservationId: hold.reservationId, deliveryReservationId: deliveryHold.reservationId,
     key: `schedule-${Math.random().toString(36).slice(2)}`,
     now: new Date("2026-11-16T12:00:00Z"),
   });
@@ -50,8 +65,8 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
     organizationId: seed.organizationId,
     courierId,
     state: "active",
-    startsAt: new Date("2026-12-01T09:00:00Z"),
-    endsAt: new Date("2026-12-01T18:00:00Z"),
+    startsAt: new Date("2026-12-01T08:00:00Z"),
+    endsAt: new Date("2026-12-02T20:00:00Z"),
   }).returning();
   const [route] = await db.insert(routes).values({
     organizationId: seed.organizationId,
@@ -78,6 +93,7 @@ export async function seedFullOrder(db: Db, options: { state?: "scheduled" | "pi
   return {
     ...seed, deliveryWindowId, catalog, principal, dispatcher, courier,
     orderId: order.id, quoteId: quote.id, courierId, shiftId: shift.id, routeId: route.id, stopId: stop.id,
+    deviceId: deviceIdForFixture,
   };
 }
 
@@ -93,8 +109,26 @@ export async function seedPartner(db: Db, organizationId: string) {
     signed: true,
     termsJson: { wholesalePerKgKopeks: 600 },
   }).returning();
+  const [priceVersion] = await db.insert(partnerPriceVersions).values({
+    contractId: contract.id,
+    version: "v1",
+    effectiveFrom: new Date("2026-01-01T00:00:00Z"),
+    pricesJson: { wholesalePerKgKopeks: 600 },
+  }).returning();
   const principal: Principal = makePrincipal(organizationId, userId, ["laundry_operator"], { partnerId: partner.id });
-  return { partnerId: partner.id, contractId: contract.id, userId, principal };
+  return { partnerId: partner.id, contractId: contract.id, priceVersionId: priceVersion.id, userId, principal };
+}
+
+export async function seedPartnerForOrder(
+  db: Db,
+  order: { orderId: string; organizationId: string; dispatcher: Principal },
+) {
+  const partner = await seedPartner(db, order.organizationId);
+  await assignOrderToPartner(db, order.dispatcher, {
+    orderId: order.orderId, partnerId: partner.partnerId,
+    key: `assign-partner-${Math.random().toString(36).slice(2)}`,
+  });
+  return partner;
 }
 
 export async function seedSeal(db: Db, organizationId: string, serial = `SEAL-${Math.random().toString(36).slice(2)}`) {

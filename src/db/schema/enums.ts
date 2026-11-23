@@ -33,4 +33,4 @@ export const paymentState = pgEnum("payment_state", ["pending", "authorized", "c
 export const fiscalState = pgEnum("fiscal_state", ["not_created", "pending_registration", "registered", "retry_pending", "correction_requested", "correction_pending", "corrected", "failed"]);
 export const ledgerState = pgEnum("ledger_state", ["draft", "posted", "reversed"]);
 export const claimState = pgEnum("claim_state", ["opened", "triage", "investigating", "decision_pending", "resolved", "denied_with_reason", "escalated", "reopened"]);
-export const outboxState = pgEnum("outbox_state", ["pending", "processing", "processed", "failed"]);
+export const outboxState = pgEnum("outbox_state", ["pending", "processing", "processed", "failed", "dead_letter"]);

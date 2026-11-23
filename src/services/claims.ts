@@ -1,12 +1,16 @@
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, orders,
+  claimDecisions, claimItems, claims, evidenceAssets, evidenceLegalHolds, garments, orders,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
+
+/** Evidence purposes that may legally be attached to a customer claim. */
+const CLAIM_EVIDENCE_PURPOSES = new Set(["intake_condition", "delivery_proof", "claim_evidence", "qc"]);
 
 export async function openClaim(
   db: Db,
@@ -19,25 +23,52 @@ export async function openClaim(
   assertRole(principal, "customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.dispatcher);
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId, scope: "claim:open", key: input.key, actorId: principal.userId,
-    requestHash: hashRequest(input),
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+    replayGuard: async tx => {
+      const [order] = await tx.select().from(orders).where(and(
+        eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
+      )).limit(1);
+      if (!order) throw errors.notFound("order");
+      if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
+    },
   }, async tx => {
     const [order] = await tx.select().from(orders).where(and(
       eq(orders.id, input.orderId), eq(orders.organizationId, principal.organizationId),
-    )).limit(1);
+    )).for("share").limit(1);
     if (!order) throw errors.notFound("order");
     if (hasRole(principal, "customer") && order.customerId !== principal.userId) throw errors.notFound("order");
 
-    const orderEvidence = await tx.select().from(evidenceAssets).where(and(
+    // Claim items must be garments of this exact order, never another order's inventory.
+    if (input.garmentIds?.length) {
+      const claimedGarments = await tx.select({ id: garments.id }).from(garments).where(and(
+        eq(garments.organizationId, principal.organizationId),
+        eq(garments.orderId, order.id),
+        inArray(garments.id, input.garmentIds),
+      ));
+      if (claimedGarments.length !== new Set(input.garmentIds).size) throw errors.notFound("garment");
+    }
+
+    // Evidence is bound to the order owner, a verified/held state and a claim-appropriate purpose.
+    // Lock candidate rows in deterministic id ASC order FOR UPDATE so concurrent deleteEvidence
+    // cannot tombstone an asset between eligibility check and legal hold insertion.
+    const evidenceScope = and(
       eq(evidenceAssets.organizationId, principal.organizationId),
+      eq(evidenceAssets.ownerType, "order"),
       eq(evidenceAssets.ownerId, order.id),
-      or(eq(evidenceAssets.status, "verified"), eq(evidenceAssets.status, "legal_hold")),
-    ));
-    const evidence = input.evidenceIds?.length
-      ? await tx.select().from(evidenceAssets).where(and(
-        eq(evidenceAssets.organizationId, principal.organizationId),
-        inArray(evidenceAssets.id, input.evidenceIds),
-      ))
-      : orderEvidence;
+      isNull(evidenceAssets.deletedAt),
+      inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
+      inArray(evidenceAssets.purpose, [...CLAIM_EVIDENCE_PURPOSES]),
+    );
+    const evidenceWhere = input.evidenceIds?.length
+      ? and(evidenceScope, inArray(evidenceAssets.id, input.evidenceIds))
+      : evidenceScope;
+    const lockedCandidates = await tx.select().from(evidenceAssets)
+      .where(evidenceWhere)
+      .orderBy(asc(evidenceAssets.id))
+      .for("update");
+    const evidence = lockedCandidates.filter(
+      asset => asset.deletedAt === null && ["verified", "legal_hold", "retained"].includes(asset.status),
+    );
     if (input.evidenceIds?.length && evidence.length !== new Set(input.evidenceIds).size) {
       throw errors.notFound("evidence asset");
     }
@@ -55,6 +86,9 @@ export async function openClaim(
       await tx.insert(claimItems).values({ claimId: claim.id, garmentId, issue: input.claimType });
     }
     for (const asset of evidence) {
+      // The `evidence_legal_holds_sync` trigger already keeps the counter and the status in step
+      // with the hold rows. Counting it here as well made every hold count twice, so the counter
+      // could never come back down.
       await tx.insert(evidenceLegalHolds).values({
         organizationId: principal.organizationId,
         assetId: asset.id,
@@ -62,8 +96,6 @@ export async function openClaim(
         reason: `claim:${claim.id}`,
         placedBy: principal.userId,
       });
-      await tx.update(evidenceAssets).set({ status: "legal_hold" })
-        .where(eq(evidenceAssets.id, asset.id));
     }
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.opened",
@@ -71,6 +103,110 @@ export async function openClaim(
     });
     return { claimId: claim.id, orderId: order.id, state: "opened" as const };
   });
+}
+
+/** Scoped claims list with stable keyset pagination on (openedAt, id), optional search and accurate totalCount. */
+export async function listClaimsPage(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number; cursor?: string; query?: string; state?: string } = {},
+) {
+  assertRole(principal, "customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 100);
+  const decoded = input.cursor ? decodeKeysetCursor(input.cursor) : null;
+  const trimmedQuery = input.query?.trim();
+  const likePattern = trimmedQuery ? `%${escapeLikePattern(trimmedQuery)}%` : null;
+  const stateFilter = input.state?.trim() || null;
+
+  const customerOnly = hasRole(principal, "customer")
+    && !hasRole(principal, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin);
+
+  const baseWhere = and(
+    eq(claims.organizationId, principal.organizationId),
+    customerOnly
+      ? or(
+        eq(claims.openedBy, principal.userId),
+        eq(orders.customerId, principal.userId),
+      )
+      : undefined,
+    stateFilter ? sql`${claims.state} = ${stateFilter}` : undefined,
+    likePattern
+      ? or(
+        sql`${claims.description} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${claims.claimType} ILIKE ${likePattern} ESCAPE '\\'`,
+        sql`${orders.publicNumber} ILIKE ${likePattern} ESCAPE '\\'`,
+      )
+      : undefined,
+  );
+
+  const pageWhere = and(
+    baseWhere,
+    decoded
+      ? sql`(${claims.openedAt}, ${claims.id}) < (${decoded.ts}::timestamptz, ${decoded.id})`
+      : undefined,
+  );
+
+  const [[countRow], rows] = await Promise.all([
+    db.select({ count: sql<number>`count(*)::int` })
+      .from(claims)
+      .innerJoin(orders, and(eq(orders.id, claims.orderId), eq(orders.organizationId, claims.organizationId)))
+      .where(baseWhere),
+    db.select({
+      id: claims.id,
+      organizationId: claims.organizationId,
+      orderId: claims.orderId,
+      orderPublicNumber: orders.publicNumber,
+      openedBy: claims.openedBy,
+      claimType: claims.claimType,
+      state: claims.state,
+      description: claims.description,
+      version: claims.version,
+      dueAt: claims.dueAt,
+      openedAt: claims.openedAt,
+      cursorTs: pgCursorTimestampSql(claims.openedAt),
+    }).from(claims)
+      .innerJoin(orders, and(eq(orders.id, claims.orderId), eq(orders.organizationId, claims.organizationId)))
+      .where(pageWhere)
+      .orderBy(desc(claims.openedAt), desc(claims.id))
+      .limit(limit + 1),
+  ]);
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.cursorTs, last.id) : null;
+  return {
+    items: pageRows.map(({ cursorTs: _cursorTs, ...row }) => row),
+    totalCount: countRow?.count ?? 0,
+    hasMore,
+    nextCursor,
+  };
+}
+
+/** Claim detail for its customer or support staff, with items, decisions and held evidence ids. */
+export async function getClaim(db: Db, principal: Principal, claimId: string) {
+  assertRole(principal, "customer", ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.dispatcher);
+  const [claim] = await db.select().from(claims).where(and(
+    eq(claims.id, claimId),
+    eq(claims.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!claim) throw errors.notFound("claim");
+  const [order] = await db.select({ customerId: orders.customerId }).from(orders).where(and(
+    eq(orders.id, claim.orderId),
+    eq(orders.organizationId, principal.organizationId),
+  )).limit(1);
+  const staff = hasRole(principal, ...ROLE_GROUPS.support, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.dispatcher);
+  if (!staff && order?.customerId !== principal.userId) throw errors.notFound("claim");
+  const items = await db.select().from(claimItems).where(eq(claimItems.claimId, claim.id));
+  const decisions = await db.select().from(claimDecisions).where(eq(claimDecisions.claimId, claim.id));
+  const holds = await db.select({
+    id: evidenceLegalHolds.id,
+    assetId: evidenceLegalHolds.assetId,
+    reason: evidenceLegalHolds.reason,
+    createdAt: evidenceLegalHolds.createdAt,
+    releasedAt: evidenceLegalHolds.releasedAt,
+  }).from(evidenceLegalHolds).where(eq(evidenceLegalHolds.claimId, claim.id));
+  return { claim, items, decisions, evidenceHolds: holds };
 }
 
 export async function decideClaim(
@@ -85,7 +221,7 @@ export async function decideClaim(
   }, async tx => {
     const [claim] = await tx.select().from(claims).where(and(
       eq(claims.id, input.claimId), eq(claims.organizationId, principal.organizationId),
-    )).limit(1);
+    )).for("update").limit(1);
     if (!claim) throw errors.notFound("claim");
     if (!["opened", "triage", "investigating", "decision_pending", "escalated", "reopened"].includes(claim.state)) {
       throw new AppError("CONFLICT_VERSION", "CLAIM_NOT_DECIDABLE", { state: claim.state });
@@ -100,11 +236,25 @@ export async function decideClaim(
     });
     await tx.update(claims).set({ state: input.outcome, version: claim.version + 1 })
       .where(and(eq(claims.id, claim.id), eq(claims.version, claim.version)));
+    const releasedHolds = await tx.update(evidenceLegalHolds)
+      .set({ releasedAt: new Date() })
+      .where(and(
+        eq(evidenceLegalHolds.organizationId, principal.organizationId),
+        eq(evidenceLegalHolds.claimId, claim.id),
+        isNull(evidenceLegalHolds.releasedAt),
+      ))
+      .returning({ id: evidenceLegalHolds.id, assetId: evidenceLegalHolds.assetId });
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.decided",
-      payload: { outcome: input.outcome, previousVersion: claim.version }, reason: input.rationale,
+      payload: {
+        orderId: claim.orderId,
+        outcome: input.outcome,
+        previousVersion: claim.version,
+        releasedHoldCount: releasedHolds.length,
+      },
+      reason: input.rationale,
     });
-    return { claimId: claim.id, state: input.outcome, version: claim.version + 1 };
+    return { claimId: claim.id, state: input.outcome, version: claim.version + 1, releasedHoldCount: releasedHolds.length };
   });
 }
 
@@ -116,15 +266,73 @@ export async function reopenClaim(db: Db, principal: Principal, input: { claimId
   }, async tx => {
     const [claim] = await tx.select().from(claims).where(and(
       eq(claims.id, input.claimId), eq(claims.organizationId, principal.organizationId),
-    )).limit(1);
+    )).for("update").limit(1);
     if (!claim) throw errors.notFound("claim");
     if (!["resolved", "denied_with_reason"].includes(claim.state)) throw errors.transition(claim.state, "reopen");
-    await tx.update(claims).set({ state: "reopened", version: claim.version + 1 })
-      .where(and(eq(claims.id, claim.id), eq(claims.version, claim.version)));
+    const [updated] = await tx.update(claims).set({ state: "reopened", version: claim.version + 1 })
+      .where(and(eq(claims.id, claim.id), eq(claims.version, claim.version)))
+      .returning({ id: claims.id });
+    if (!updated) throw errors.version(claim.version);
+
+    // Re-place active legal holds on the claim's previously held evidence (or current order
+    // evidence if none were held) AND direct claim attachments (`ownerType = "claim"`),
+    // locking candidate evidence_assets in deterministic id ASC order FOR UPDATE.
+    const priorHolds = await tx.select({
+      assetId: evidenceLegalHolds.assetId,
+      releasedAt: evidenceLegalHolds.releasedAt,
+    }).from(evidenceLegalHolds).where(and(
+      eq(evidenceLegalHolds.organizationId, principal.organizationId),
+      eq(evidenceLegalHolds.claimId, claim.id),
+    ));
+    const alreadyActiveAssetIds = new Set(
+      priorHolds.filter(h => h.releasedAt === null).map(h => h.assetId),
+    );
+    const priorAssetIds = [...new Set(priorHolds.map(h => h.assetId))];
+
+    const directClaimFilter = and(
+      eq(evidenceAssets.ownerType, "claim"),
+      eq(evidenceAssets.ownerId, claim.id),
+    );
+    const orderOwnedFilter = and(
+      eq(evidenceAssets.ownerType, "order"),
+      eq(evidenceAssets.ownerId, claim.orderId),
+      inArray(evidenceAssets.purpose, [...CLAIM_EVIDENCE_PURPOSES]),
+    );
+    const candidateScope = priorAssetIds.length > 0
+      ? or(inArray(evidenceAssets.id, priorAssetIds), directClaimFilter)
+      : or(orderOwnedFilter, directClaimFilter);
+
+    const candidateAssets = await tx.select({
+      id: evidenceAssets.id,
+      status: evidenceAssets.status,
+      deletedAt: evidenceAssets.deletedAt,
+    }).from(evidenceAssets).where(and(
+      eq(evidenceAssets.organizationId, principal.organizationId),
+      isNull(evidenceAssets.deletedAt),
+      inArray(evidenceAssets.status, ["verified", "legal_hold", "retained"]),
+      candidateScope,
+    )).orderBy(asc(evidenceAssets.id)).for("update");
+
+    let reheldCount = 0;
+    for (const asset of candidateAssets) {
+      if (asset.deletedAt !== null || !["verified", "legal_hold", "retained"].includes(asset.status)) {
+        continue;
+      }
+      if (alreadyActiveAssetIds.has(asset.id)) continue;
+      await tx.insert(evidenceLegalHolds).values({
+        organizationId: principal.organizationId,
+        assetId: asset.id,
+        claimId: claim.id,
+        reason: `claim:${claim.id}:reopen`,
+        placedBy: principal.userId,
+      });
+      reheldCount += 1;
+    }
+
     await appendEvent(tx, {
       principal, aggregateType: "claim", aggregateId: claim.id, eventType: "claim.reopened",
-      payload: { previousState: claim.state }, reason: input.reason,
+      payload: { previousState: claim.state, reheldCount }, reason: input.reason,
     });
-    return { claimId: claim.id, state: "reopened" as const, version: claim.version + 1 };
+    return { claimId: claim.id, state: "reopened" as const, version: claim.version + 1, reheldCount };
   });
 }

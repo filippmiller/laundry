@@ -1,4 +1,4 @@
-import { and, eq, gt, gte, isNull, lte, or } from "drizzle-orm";
+import { and, desc, eq, gt, gte, isNull, lte, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { buildings, cities, serviceWindows, services, tariffPlans, tariffVersions } from "../db/schema.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -6,7 +6,11 @@ import { errors } from "../core/errors.js";
 
 export async function listServices(db: Db, principal: Principal) {
   assertRole(principal, ...ROLE_GROUPS.customer, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.partner);
-  return db.select().from(services).where(eq(services.organizationId, principal.organizationId));
+  // A service withdrawn from the catalogue must not be offered any more.
+  return db.select().from(services).where(and(
+    eq(services.organizationId, principal.organizationId),
+    eq(services.active, true),
+  ));
 }
 
 export async function resolveAddress(db: Db, principal: Principal, buildingId: string) {
@@ -59,7 +63,10 @@ export async function activeTariff(db: Db, principal: Principal, tariffVersionId
     .from(tariffVersions)
     .innerJoin(tariffPlans, eq(tariffVersions.planId, tariffPlans.id))
     .where(and(...conditions))
-    .orderBy(tariffVersions.effectiveFrom)
+    // The newest version that has already taken effect is the current one. Ordering ascending
+    // picked the oldest still-published version, so a price increase never reached a quote as
+    // long as the previous version had not been closed.
+    .orderBy(desc(tariffVersions.effectiveFrom))
     .limit(1);
   if (!version) throw errors.notFound("tariff version");
   return version.version;

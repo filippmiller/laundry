@@ -4,10 +4,10 @@ import { eq } from "drizzle-orm";
 import { createDb, type Db } from "../src/db/client.js";
 import { custodyEvents, orders, paymentEvents } from "../src/db/schema.js";
 import { makePrincipal, seedUser } from "./fixtures.js";
-import { COURIER_DEVICE, seedFullOrder, seedPartner, seedSeal } from "./operations-fixtures.js";
-import { recordIntake, syncScanEvents } from "../src/services/intake.js";
+import { seedFullOrder, seedPartnerForOrder, seedSeal } from "./operations-fixtures.js";
+import { canonicalScanHash } from "../src/core/scan-hash.js";import { recordIntake, syncScanEvents } from "../src/services/intake.js";
 import {
-  decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
+  completeProcessing, decideAdjustment, proposeAdjustment, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
 } from "../src/services/partner.js";
 import { arriveStop, assignDelivery, recordDeliveryAttempt } from "../src/services/delivery.js";
 import { openClaim, decideClaim } from "../src/services/claims.js";
@@ -44,27 +44,28 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
     expect(events[0].fromParty).toBe("customer");
     expect(events[0].toParty).toBe("courier");
 
-    const scan = {
+    const scanBase = {
       clientEventId: randomUUID(),
-      deviceId: COURIER_DEVICE,
+      deviceId: f.deviceId,
       scannedType: "order" as const,
       scannedId: f.orderId,
-      capturedAt: "2026-12-01T10:00:00.000Z",
+      capturedAt: new Date().toISOString(),
       context: { stopId: f.stopId },
-      payloadHash: "hash",
     };
+    const scan = { ...scanBase, payloadHash: canonicalScanHash(scanBase) };
     const first = await syncScanEvents(db, f.courier, [scan]);
     const second = await syncScanEvents(db, f.courier, [scan]);
     expect(first.accepted).toHaveLength(1);
     expect(second.duplicate).toHaveLength(1);
-    const forged = { ...scan, clientEventId: randomUUID(), scannedId: randomUUID() };
+    const forgedBase = { ...scanBase, clientEventId: randomUUID(), scannedId: randomUUID() };
+    const forged = { ...forgedBase, payloadHash: canonicalScanHash(forgedBase) };
     expect((await syncScanEvents(db, f.courier, [forged])).rejected[0].reason).toBe("ORDER_NOT_ASSIGNED");
   });
 
   it("C01: a wrong seal at partner receipt blocks automatic custody transfer and opens an incident", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-C01");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -83,7 +84,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("C05/D03: QC passes to ready, partial delivery never closes the order", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-D03");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -97,7 +98,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
     });
     await startInspection(db, partner.principal, { orderId: f.orderId, key: "inspect-d03" });
     await startProcessing(db, partner.principal, { orderId: f.orderId, processType: "wash", key: "batch-d03" });
-    const qc = await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], key: "qc-d03" });
+    await completeProcessing(db, partner.principal, { orderId: f.orderId, key: "complete-d03" });
+    const qc = await recordQualityCheck(db, partner.principal, { orderId: f.orderId, results: [], bagPassed: true, key: "qc-d03" });
     expect(qc.state).toBe("ready");
 
     const assigned = await assignDelivery(db, f.dispatcher, { orderId: f.orderId, shiftId: f.shiftId, key: "assign-d03" });
@@ -114,7 +116,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("C04: a declined partner price change never starts processing", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-C04");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -143,7 +145,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("D04/E01: claim holds evidence, duplicate webhook records once, refund cannot exceed capture", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-E01");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",
@@ -191,7 +193,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Slices C-E: operations and mone
   it("E04: partner invoice accrues accepted work and a line can be disputed", async () => {
     const f = await seedFullOrder(db, { state: "pickup_assigned" });
     const seal = await seedSeal(db, f.organizationId);
-    const partner = await seedPartner(db, f.organizationId);
+    const partner = await seedPartnerForOrder(db, f);
     const bag = bagCode("BAG-E04");
     const intake = await recordIntake(db, f.courier, {
       orderId: f.orderId, mode: "economy_bag",

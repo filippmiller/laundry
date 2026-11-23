@@ -71,6 +71,7 @@ export const notifications = pgTable("notifications", {
   payloadJson: jsonb("payload_json").notNull().default({}),
   dedupeKey: text("dedupe_key").notNull(),
   state: text("state").notNull().default("pending"),
+  readAt: timestamp("read_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [uniqueIndex("notifications_dedupe_unique").on(t.organizationId, t.dedupeKey)]);
 
@@ -95,7 +96,11 @@ export const outboxEvents = pgTable("outbox_events", {
   eventType: text("event_type").notNull(),
   payloadJson: jsonb("payload_json").notNull().default({}),
   state: outboxState("state").notNull().default("pending"),
+  deliveryStatus: text("delivery_status").notNull().default("queued"),
+  providerReceipt: text("provider_receipt"),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true }),
   attempts: integer("attempts").notNull().default(0),
+  error: text("error"),
   availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [index("outbox_pending_idx").on(t.state, t.availableAt)]);

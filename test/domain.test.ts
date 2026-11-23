@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { calculateQuote } from "../src/domain/pricing.js";
-import { nextState, projectUiState } from "../src/domain/order-state.js";
+import { calculateQuote, priceServiceAmount } from "../src/domain/pricing.js";
+import { nextState, nextStateAsSystem, projectUiState } from "../src/domain/order-state.js";
+import { authorize, type AuthorizeDenial, type Principal } from "../src/core/context.js";
 import { hashRequest } from "../src/core/idempotency.js";
 import { makePrincipal } from "./fixtures.js";
 
@@ -35,6 +36,25 @@ describe("pricing", () => {
     expect(quote.lines[0].amountKopeks).toBe(220);
   });
 
+  it("distinguishes exact, gram_up_to_100, and gram_up_to_1000 rounding rules for gram lines", () => {
+    // 1500g at 1000 RUB/kg (100_000 kopeks/kg): exact = 1500 RUB, kg-ceil = 2000 RUB.
+    expect(priceServiceAmount({
+      quantity: 1_500, unit: "gram", unitPriceKopeks: 100_000, roundingRule: "exact",
+    })).toBe(150_000);
+    expect(priceServiceAmount({
+      quantity: 1_550, unit: "gram", unitPriceKopeks: 100_000, roundingRule: "exact",
+    })).toBe(155_000);
+    expect(priceServiceAmount({
+      quantity: 1_500, unit: "gram", unitPriceKopeks: 10_000, roundingRule: "gram_up_to_100",
+    })).toBe(150_000);
+    expect(priceServiceAmount({
+      quantity: 1_550, unit: "gram", unitPriceKopeks: 10_000, roundingRule: "gram_up_to_100",
+    })).toBe(160_000);
+    expect(priceServiceAmount({
+      quantity: 1_500, unit: "gram", unitPriceKopeks: 100_000, roundingRule: "gram_up_to_1000",
+    })).toBe(200_000);
+  });
+
   it("binds the hash to price and expiry", () => {
     const input = {
       ...base, pickupShared: false, deliveryShared: true,
@@ -57,6 +77,41 @@ describe("order state machine", () => {
     expect(nextState("scheduled", "assign_pickup", dispatcher)).toBe("pickup_assigned");
     expect(() => nextState("draft", "confirm", courier)).toThrow("FORBIDDEN");
     expect(() => nextState("closed", "confirm", customer)).toThrow("INVALID_TRANSITION");
+  });
+
+  it("refuses missing or empty-role principal in nextState (lnd-qfy)", () => {
+    expect(() => nextState("draft", "confirm", undefined as unknown as Principal)).toThrow("FORBIDDEN");
+    expect(() => nextState("quality_check", "rewash", makePrincipal("org-1", "user-4", []))).toThrow("FORBIDDEN");
+    expect(() => nextState("quality_check", "rewash", makePrincipal("org-1", "user-5", ["laundry_operator"]))).toThrow("FORBIDDEN");
+    expect(nextStateAsSystem("quality_check", "rewash", {
+      systemActor: "recordQualityCheck",
+      reason: "automatic rewash after QC failure",
+    })).toBe("processing");
+    expect(() => nextStateAsSystem("quality_check", "rewash", { systemActor: "", reason: "x" })).toThrow("FORBIDDEN");
+    expect(() => nextStateAsSystem("quality_check", "rewash", { systemActor: "sys", reason: "  " })).toThrow("FORBIDDEN");
+  });
+
+  it("centralized authorize enforces fail-closed role, tenant, partner, and owner checks (lnd-8vs)", () => {
+    const denials: AuthorizeDenial[] = [];
+    const onDeny = (d: AuthorizeDenial) => denials.push(d);
+
+    expect(() => authorize(customer, {
+      resource: "order", action: "read", roles: ["customer"], organizationId: "org-1", ownerUserId: "user-1", onDeny,
+    })).not.toThrow();
+
+    expect(() => authorize(customer, {
+      resource: "order", action: "assign", roles: ["dispatcher"], onDeny,
+    })).toThrow("FORBIDDEN");
+
+    expect(() => authorize(customer, {
+      resource: "order", action: "read", organizationId: "org-2", resourceId: "ord-1", onDeny,
+    })).toThrow("NOT_FOUND");
+
+    expect(() => authorize(makePrincipal("org-1", "p-1", ["laundry_operator"], { partnerId: "partner-1" }), {
+      resource: "order", action: "read", organizationId: "org-1", partnerId: "partner-2", resourceId: "ord-1", onDeny,
+    })).toThrow("NOT_FOUND");
+
+    expect(denials.map(d => d.reason)).toEqual(["missing_role", "tenant_mismatch", "partner_mismatch"]);
   });
 
   it("projects independent domains with exceptions first", () => {

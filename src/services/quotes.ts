@@ -6,7 +6,9 @@ import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
 import { calculateQuote, type QuoteInput, type ServiceLineInput } from "../domain/pricing.js";
+import { releaseHeldReservationsInTx } from "../domain/slot-reservation.js";
 import { activeTariff, resolveAddress } from "./catalog.js";
+import { normalizeDeclaredItems } from "../../shared/garment-taxonomy.js";
 
 export type QuoteLineInput = {
   serviceId: string;
@@ -18,12 +20,25 @@ export type CreateQuoteInput = {
   organizationId?: string;
   customerId?: string;
   buildingId: string;
+  addressId?: string;
   tariffVersionId?: string;
   lines: QuoteLineInput[];
   pickupWindowId: string;
   deliveryWindowId: string;
   offSchedulePickup?: boolean;
   offScheduleDelivery?: boolean;
+  /**
+   * What the customer says they are handing over. It is validated against the
+   * shared taxonomy, folded into the immutable quote snapshot and therefore
+   * into the quote hash: the declaration the courier reconciles against is the
+   * one the customer actually accepted.
+   */
+  declaredItems?: Array<{ subtypeId: string; quantity: number }>;
+  /**
+   * Optional prior unattached held slot reservation IDs from an earlier quote attempt
+   * that should be released atomically when the customer re-quotes after editing the form.
+   */
+  releaseReservationIds?: string[];
   key: string;
   now?: Date;
 };
@@ -33,6 +48,17 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
   const customerId = hasRole(principal, "customer") ? principal.userId : input.customerId;
   if (!customerId) throw errors.forbidden();
   const now = input.now ?? new Date();
+  // Validated before the idempotency envelope is opened: an unknown subtype or
+  // an out-of-range quantity is a client mistake, not a replay.
+  const declared = normalizeDeclaredItems(input.declaredItems);
+  if (!declared.ok) {
+    throw new AppError("VALIDATION_ERROR", declared.error, declared.detail ?? {});
+  }
+  // Эконом is a closed, weighed bag: the tariff promises no per-item inventory, so a
+  // per-item list on such a quote would contradict what the customer was sold.
+  if (declared.items.length > 0 && !input.lines.some(line => line.tier === "protected")) {
+    throw new AppError("VALIDATION_ERROR", "DECLARATION_REQUIRES_PROTECTED_TIER");
+  }
   const requestHash = hashRequest({ ...input, customerId, principalId: principal.userId });
 
   const result = await withIdempotency(db, {
@@ -43,12 +69,23 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
     requestHash,
   }, async tx => {
     await resolveAddress(tx as Db, principal, input.buildingId);
-    const [address] = await tx.select({ id: customerAddresses.id }).from(customerAddresses).where(and(
-      eq(customerAddresses.organizationId, principal.organizationId),
-      eq(customerAddresses.customerId, customerId),
-      eq(customerAddresses.buildingId, input.buildingId),
-    )).limit(1);
-    if (!address) throw new AppError("VALIDATION_ERROR", "CUSTOMER_ADDRESS_REQUIRED");
+    let address: { id: string } | undefined;
+    if (input.addressId) {
+      [address] = await tx.select({ id: customerAddresses.id }).from(customerAddresses).where(and(
+        eq(customerAddresses.id, input.addressId),
+        eq(customerAddresses.organizationId, principal.organizationId),
+        eq(customerAddresses.customerId, customerId),
+        eq(customerAddresses.buildingId, input.buildingId),
+      )).limit(1);
+      if (!address) throw errors.notFound("address");
+    } else {
+      [address] = await tx.select({ id: customerAddresses.id }).from(customerAddresses).where(and(
+        eq(customerAddresses.organizationId, principal.organizationId),
+        eq(customerAddresses.customerId, customerId),
+        eq(customerAddresses.buildingId, input.buildingId),
+      )).limit(1);
+      if (!address) throw new AppError("VALIDATION_ERROR", "CUSTOMER_ADDRESS_REQUIRED");
+    }
     const tariff = await activeTariff(tx as Db, principal, input.tariffVersionId, now);
     const [pickupWindow] = await tx.select().from(serviceWindows).where(and(
       eq(serviceWindows.id, input.pickupWindowId),
@@ -69,6 +106,8 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
     const serviceIds = input.lines.map(line => line.serviceId);
     const serviceRows = await tx.select().from(services).where(and(
       eq(services.organizationId, principal.organizationId),
+      // A service withdrawn from the catalogue must not stay purchasable.
+      eq(services.active, true),
       inArray(services.id, serviceIds),
     ));
     const ruleRows = await tx.select().from(priceRules).where(eq(priceRules.tariffVersionId, tariff.id));
@@ -76,8 +115,24 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       const service = serviceRows.find(row => row.id === line.serviceId);
       const rule = ruleRows.find(row => row.serviceId === line.serviceId && row.tier === line.tier && row.active);
       if (!service || !rule) throw new AppError("VALIDATION_ERROR", "SERVICE_NOT_AVAILABLE", { serviceId: line.serviceId });
-      if (line.unit === "gram" && service.unit !== "gram") {
-        throw new AppError("VALIDATION_ERROR", "UNIT_MISMATCH", { serviceId: line.serviceId });
+      // The unit has to match the catalogue in both directions. Checking only "gram against a
+      // piece service" let a client price three pieces of a gram-priced wash as three grams.
+      if (line.unit !== service.unit) {
+        throw new AppError("VALIDATION_ERROR", "UNIT_MISMATCH", {
+          serviceId: line.serviceId, requested: line.unit, expected: service.unit,
+        });
+      }
+      // `price_rules.rounding_rule` is free text without a database constraint. An unknown value
+      // would fall through to the per-kilogram branch and quietly price the line ten times too
+      // low, so it is rejected instead of reinterpreted.
+      if (
+        rule.roundingRule !== "exact"
+        && rule.roundingRule !== "gram_up_to_100"
+        && rule.roundingRule !== "gram_up_to_1000"
+      ) {
+        throw new AppError("VALIDATION_ERROR", "UNKNOWN_ROUNDING_RULE", {
+          serviceId: line.serviceId, roundingRule: rule.roundingRule,
+        });
       }
       return {
         serviceId: line.serviceId,
@@ -86,7 +141,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
         unit: service.unit as "piece" | "gram",
         unitPriceKopeks: rule.unitPriceKopeks,
         minQuantity: rule.minQuantity,
-        roundingRule: rule.roundingRule as "exact" | "gram_up_to_100",
+        roundingRule: rule.roundingRule,
       };
     });
 
@@ -105,6 +160,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       sharedPickupFeeKopeks: tariff.sharedPickupFeeKopeks,
       sharedDeliveryFeeKopeks: tariff.sharedDeliveryFeeKopeks,
       expiresAt: expiresAt.toISOString(),
+      declaredItems: declared.items,
     };
     const pricedQuote = calculateQuote(pricingInput);
     const [quote] = await tx.insert(quotes).values({
@@ -117,23 +173,39 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       totalKopeks: pricedQuote.totalKopeks,
       expiresAt,
     }).returning();
+    const releasedReservationIds = input.releaseReservationIds?.length
+      ? await releaseHeldReservationsInTx(tx, {
+        principal,
+        reservationIds: input.releaseReservationIds,
+        reason: "Released on re-quote",
+        ownerPrincipalId: customerId,
+      })
+      : [];
     await appendEvent(tx, {
       principal,
       aggregateType: "quote",
       aggregateId: quote.id,
       eventType: "quote.created",
-      payload: { totalKopeks: quote.totalKopeks, quoteHash: quote.quoteHash },
+      payload: {
+        totalKopeks: quote.totalKopeks,
+        quoteHash: quote.quoteHash,
+        releasedReservationIds,
+      },
     });
     return {
       id: quote.id,
       organizationId: quote.organizationId,
       customerId: quote.customerId,
+      addressId: address.id,
       tariffVersionId: tariff.id,
+      termsVersion: tariff.termsVersion,
       expiresAt: quote.expiresAt.toISOString(),
       quoteHash: quote.quoteHash,
       totalKopeks: quote.totalKopeks,
       lines: pricedQuote.lines,
+      declaredItems: declared.items,
       snapshot: pricedQuote.snapshot,
+      releasedReservationIds,
     };
   });
   return { ...result.value, replayed: result.replayed };
@@ -147,7 +219,12 @@ export async function getQuote(db: Db, principal: Principal, quoteId: string) {
   )).limit(1);
   if (!quote) throw errors.notFound("quote");
   if (hasRole(principal, "customer") && quote.customerId !== principal.userId) throw errors.notFound("quote");
-  return quote;
+  const snapshot = (quote.snapshotJson ?? {}) as { addressId?: string; termsVersion?: string };
+  return {
+    ...quote,
+    addressId: snapshot.addressId ?? null,
+    termsVersion: snapshot.termsVersion ?? null,
+  };
 }
 
 export async function assertAcceptableQuote(

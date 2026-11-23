@@ -2,7 +2,10 @@ laundry.filippmiller.com {
   encode zstd gzip
   reverse_proxy api:3000
   header {
-    X-Content-Type-Options nosniff
-    Referrer-Policy strict-origin-when-cross-origin
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Frame-Options "DENY"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Permissions-Policy "camera=(self), geolocation=()"
   }
 }

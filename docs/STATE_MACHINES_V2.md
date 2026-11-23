@@ -16,7 +16,7 @@ Each aggregate has state, state_version, updated_at. Commands require expected_v
 | inspection | propose_change | awaiting_approval | partner | quote/technology change persisted; no processing |
 | awaiting_approval | approve_change | processing | customer | signed version of change, feasible capacity |
 | inspection | start_processing | processing | partner | no unresolved critical discrepancies |
-| processing | qc_start | quality_check | partner | processing operation completed |
+| processing | qc_start | quality_check | partner | startProcessing -> completeProcessing -> recordQualityCheck (batch in quality_check with complete_processing) |
 | quality_check | pack | ready | partner | all accepted lines accounted for; QC passed |
 | ready | dispatch | out_for_delivery | dispatcher | delivery route and custody confirmed |
 | out_for_delivery | handover | delivered | courier | recipient proof; partial delivery tracked at item level |

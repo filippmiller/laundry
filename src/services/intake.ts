@@ -1,19 +1,29 @@
-import { and, eq, inArray } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import { and, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import type { Db, Tx } from "../db/client.js";
 import {
-  containerAssignments, containers, custodyEvents, evidenceAssets, garments,
-  intakeManifestLines, intakeManifests, notifications, routeStops, seals, scanEvents, orders,
+  claims, containerAssignments, containers, courierDevices, custodyEvents, evidenceAssets,
+  garmentEvidence, garments, intakeManifestLines, intakeManifests, notifications, orders, quotes,
+  scanEvents, seals, shiftReconciliationAdjustments,
 } from "../db/schema.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotency } from "../core/idempotency.js";
+import { canonicalScanHash } from "../core/scan-hash.js";
 import { nextState } from "../domain/order-state.js";
+import { findSubtype } from "../../shared/garment-taxonomy.js";
+import { assertCourierOrderIntakeEntitlement, resolveVerifiedScanShift } from "./courier-entitlement.js";
 
 export type BagInput = { containerCode: string; sealSerial: string; weightGrams: number };
 export type GarmentInput = {
   itemCode: string; category: string; description: string;
   declaredValueKopeks?: number; condition?: Record<string, unknown>; evidenceAssetIds?: string[];
+  /**
+   * Taxonomy subtype the courier picked with the icon grid. When it is present
+   * the server derives the category itself, so a hand-crafted request cannot
+   * smuggle an arbitrary category string into the analytics.
+   */
+  subtypeId?: string;
 };
 export type IntakeInput = {
   orderId: string;
@@ -22,6 +32,7 @@ export type IntakeInput = {
   items?: GarmentInput[];
   customerConfirmation: boolean;
   courierConfirmation: boolean;
+  handoffCode?: string;
   deviceId?: string;
   key: string;
 };
@@ -30,6 +41,20 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   if (!input.customerConfirmation || !input.courierConfirmation) {
     throw new AppError("EVIDENCE_REQUIRED", "DUAL_CONFIRMATION_REQUIRED");
+  }
+  if (input.mode === "mixed") {
+    if (!input.bags.length || !input.items?.length) {
+      throw new AppError("VALIDATION_ERROR", "MIXED_SEPARATION_REQUIRED");
+    }
+    const bagCodes = new Set(input.bags.map(bag => bag.containerCode.trim()));
+    const itemCodes = new Set<string>();
+    for (const item of input.items) {
+      const code = item.itemCode?.trim();
+      if (!code || itemCodes.has(code) || bagCodes.has(code)) {
+        throw new AppError("VALIDATION_ERROR", "MIXED_SEPARATION_REQUIRED");
+      }
+      itemCodes.add(code);
+    }
   }
   if (!input.bags.length) throw new AppError("VALIDATION_ERROR", "BAG_REQUIRED");
 
@@ -45,15 +70,63 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
       eq(orders.organizationId, principal.organizationId),
     )).limit(1);
     if (!order) throw errors.notFound("order");
+    // Lock order: courier_shifts (FOR SHARE) via canonical entitlement BEFORE any order/manifest/custody mutation.
+    await assertCourierOrderIntakeEntitlement(tx, principal, input.orderId);
     if (order.lifecycleState !== "pickup_assigned") {
       throw new AppError("INVALID_TRANSITION", "ORDER_NOT_READY_FOR_INTAKE", { state: order.lifecycleState });
     }
-    const [stop] = await tx.select().from(routeStops).where(and(
-      eq(routeStops.organizationId, principal.organizationId),
-      eq(routeStops.orderId, input.orderId),
-      eq(routeStops.assignedCourierId, principal.userId),
+
+    const [quote] = await tx.select({ snapshotJson: quotes.snapshotJson }).from(quotes).where(and(
+      eq(quotes.id, order.quoteId),
+      eq(quotes.organizationId, principal.organizationId),
     )).limit(1);
-    if (!stop) throw errors.forbidden("courier is not assigned to this stop");
+    if (!quote) throw errors.notFound("quote");
+    const quoteSnapshot = (quote.snapshotJson ?? {}) as {
+      lines?: Array<{ kind?: string; tier?: "economy" | "protected" }>;
+    };
+    const quotedTiers = new Set(
+      (quoteSnapshot.lines ?? [])
+        .filter(line => line.kind === "service" && line.tier)
+        .map(line => line.tier!),
+    );
+    if (!quotedTiers.has("protected") && (
+      input.mode === "protected_items"
+      || input.mode === "mixed"
+      || (input.items?.length ?? 0) > 0
+    )) {
+      throw new AppError("VALIDATION_ERROR", "INTAKE_MODE_EXCEEDS_QUOTED_TIER", {
+        mode: input.mode,
+        quotedTiers: [...quotedTiers],
+      });
+    }
+    if (quotedTiers.has("protected") && quotedTiers.has("economy")) {
+      if (input.mode !== "mixed") {
+        throw new AppError("VALIDATION_ERROR", "INTAKE_MODE_MISMATCH", {
+          mode: input.mode,
+          expectedMode: "mixed",
+          quotedTiers: [...quotedTiers],
+        });
+      }
+      if (!input.items?.length) {
+        throw new AppError("VALIDATION_ERROR", "MIXED_SEPARATION_REQUIRED");
+      }
+    } else if (quotedTiers.has("protected")) {
+      if (input.mode !== "protected_items") {
+        throw new AppError("VALIDATION_ERROR", "INTAKE_MODE_MISMATCH", {
+          mode: input.mode,
+          expectedMode: "protected_items",
+          quotedTiers: [...quotedTiers],
+        });
+      }
+      if (!input.items?.length) {
+        throw new AppError("EVIDENCE_REQUIRED", "PROTECTED_ITEMS_REQUIRED");
+      }
+    }
+    if (input.handoffCode) {
+      if (!order.handoffCode || input.handoffCode.trim() !== order.handoffCode) {
+        throw new AppError("FORBIDDEN", "HANDOFF_PIN_MISMATCH");
+      }
+    }
 
     const serials = input.bags.map(bag => bag.sealSerial);
     const sealRows = await tx.select().from(seals).where(and(
@@ -83,11 +156,38 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
     }).returning();
 
     for (const bag of input.bags) {
-      const [container] = await tx.insert(containers).values({
-        organizationId: principal.organizationId, code: bag.containerCode,
-      }).returning();
+      // `containers` is unique per `(organization_id, code)`: a physical bag outlives the order
+      // within its tenant, so an existing one in the same organization is reused.
+      let [container] = await tx.select().from(containers)
+        .where(and(
+          eq(containers.organizationId, principal.organizationId),
+          eq(containers.code, bag.containerCode),
+        )).limit(1);
+      if (!container) {
+        [container] = await tx.insert(containers).values({
+          organizationId: principal.organizationId, code: bag.containerCode,
+        }).returning();
+      }
+      // A container may have at most one active assignment. A bag that is still out with another
+      // order is a custody conflict — the database would refuse the insert with a raw unique
+      // violation, which the API reports as an unexplained 500.
+      const [activeAssignment] = await tx.select({ id: containerAssignments.id })
+        .from(containerAssignments).where(and(
+          eq(containerAssignments.containerId, container.id),
+          isNull(containerAssignments.unassignedAt),
+        )).limit(1);
+      if (activeAssignment) {
+        throw new AppError("CUSTODY_CONFLICT", "CONTAINER_ALREADY_ASSIGNED", { code: bag.containerCode });
+      }
       const seal = sealBySerial.get(bag.sealSerial)!;
-      await tx.update(seals).set({ state: "assigned" }).where(eq(seals.id, seal.id));
+      // The seal is claimed conditionally: two couriers reading the same serial must not both
+      // end up owning it.
+      const claimed = await tx.update(seals).set({ state: "assigned" })
+        .where(and(eq(seals.id, seal.id), eq(seals.state, "available")))
+        .returning({ id: seals.id });
+      if (!claimed.length) {
+        throw new AppError("CUSTODY_CONFLICT", "SEAL_NOT_AVAILABLE", { serial: bag.sealSerial });
+      }
       await tx.insert(containerAssignments).values({
         organizationId: principal.organizationId,
         containerId: container.id, orderId: input.orderId, sealId: seal.id,
@@ -102,36 +202,85 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
     }
     const createdGarments: Array<{ id: string; itemCode: string }> = [];
     for (const item of input.items ?? []) {
+      // The taxonomy is the authority on the category: a picked subtype always
+      // wins over whatever string the client sent.
+      const subtype = item.subtypeId ? findSubtype(item.subtypeId) : undefined;
+      if (item.subtypeId && !subtype) {
+        throw new AppError("VALIDATION_ERROR", "UNKNOWN_GARMENT_SUBTYPE", { subtypeId: item.subtypeId });
+      }
+      const category = subtype?.category ?? item.category;
       const [garment] = await tx.insert(garments).values({
         organizationId: principal.organizationId,
         orderId: input.orderId,
         itemCode: item.itemCode,
-        category: item.category,
+        category,
         description: item.description,
         declaredValueKopeks: item.declaredValueKopeks ?? null,
-        conditionJson: item.condition ?? {},
+        conditionJson: subtype
+          ? { ...(item.condition ?? {}), subtypeId: subtype.id, subtypeLabel: subtype.label }
+          : (item.condition ?? {}),
         status: "accepted",
       }).returning();
       for (const evidenceId of item.evidenceAssetIds ?? []) {
-        const [asset] = await tx.select({ id: evidenceAssets.id }).from(evidenceAssets).where(and(
+        const [asset] = await tx.select({
+          id: evidenceAssets.id,
+          ownerType: evidenceAssets.ownerType,
+          ownerId: evidenceAssets.ownerId,
+        }).from(evidenceAssets).where(and(
           eq(evidenceAssets.id, evidenceId),
           eq(evidenceAssets.organizationId, principal.organizationId),
           eq(evidenceAssets.status, "verified"),
+          isNull(evidenceAssets.deletedAt),
         )).limit(1);
         if (!asset) throw errors.notFound("evidence asset");
+        let belongsToOrder = (asset.ownerType === "order" || asset.ownerType === "garment")
+          && asset.ownerId === input.orderId;
+        if (!belongsToOrder && asset.ownerType === "garment") {
+          const [ownedGarment] = await tx.select({ id: garments.id }).from(garments).where(and(
+            eq(garments.id, asset.ownerId),
+            eq(garments.organizationId, principal.organizationId),
+            eq(garments.orderId, input.orderId),
+          )).limit(1);
+          belongsToOrder = Boolean(ownedGarment);
+        } else if (!belongsToOrder && asset.ownerType === "custody_event") {
+          const [ce] = await tx.select({ id: custodyEvents.id }).from(custodyEvents).where(and(
+            eq(custodyEvents.id, asset.ownerId),
+            eq(custodyEvents.organizationId, principal.organizationId),
+            eq(custodyEvents.orderId, input.orderId),
+          )).limit(1);
+          belongsToOrder = Boolean(ce);
+        } else if (!belongsToOrder && asset.ownerType === "claim") {
+          const [cl] = await tx.select({ id: claims.id }).from(claims).where(and(
+            eq(claims.id, asset.ownerId),
+            eq(claims.organizationId, principal.organizationId),
+            eq(claims.orderId, input.orderId),
+          )).limit(1);
+          belongsToOrder = Boolean(cl);
+        }
+        if (!belongsToOrder) throw errors.notFound("evidence asset");
+        await tx.insert(garmentEvidence).values({
+          organizationId: principal.organizationId,
+          garmentId: garment.id,
+          evidenceAssetId: asset.id,
+        }).onConflictDoNothing();
       }
       await tx.insert(intakeManifestLines).values({
         manifestId: manifest.id,
         garmentId: garment.id,
-        description: `${item.category}:${item.itemCode}`,
+        description: `${category}:${item.itemCode}`,
         quantity: 1,
       });
       createdGarments.push({ id: garment.id, itemCode: item.itemCode });
     }
 
     const to = nextState(order.lifecycleState as "pickup_assigned", "accept_handoff", principal);
-    await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
-      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)));
+    const [advanced] = await tx.update(orders).set({ lifecycleState: to, version: order.version + 1 })
+      .where(and(eq(orders.id, order.id), eq(orders.version, order.version)))
+      .returning({ version: orders.version });
+    // The optimistic lock only protects anything when its result is checked. Ignored, a lost
+    // update writes the custody event and the manifest while the order keeps its old state —
+    // the goods have moved but the order says they have not.
+    if (!advanced) throw errors.version(order.version);
 
     const [event] = await tx.insert(custodyEvents).values({
       organizationId: principal.organizationId,
@@ -158,7 +307,12 @@ export async function recordIntake(db: Db, principal: Principal, input: IntakeIn
       aggregateType: "order",
       aggregateId: input.orderId,
       eventType: "order.accept_handoff",
-      payload: { manifestId: manifest.id, custodyEventId: event.id, bagCount: input.bags.length },
+      payload: {
+        manifestId: manifest.id,
+        custodyEventId: event.id,
+        bagCount: input.bags.length,
+        verificationMethod: input.handoffCode ? "pin_verified" : "dual_confirmation_demo",
+      },
     });
     return {
       orderId: input.orderId,
@@ -182,48 +336,310 @@ export type ScanEventInput = {
   payloadHash: string;
 };
 
+export async function registerCourierDevice(
+  db: Db,
+  principal: Principal,
+  input: { deviceId: string; label?: string },
+) {
+  assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
+  const [existing] = await db.select().from(courierDevices).where(and(
+    eq(courierDevices.id, input.deviceId),
+    eq(courierDevices.organizationId, principal.organizationId),
+  )).limit(1);
+  if (existing) {
+    if (existing.courierId !== principal.userId) throw errors.notFound("device");
+    return { deviceId: existing.id, state: existing.state };
+  }
+  await db.insert(courierDevices).values({
+    id: input.deviceId,
+    organizationId: principal.organizationId,
+    courierId: principal.userId,
+    label: input.label ?? "courier device",
+  });
+  return { deviceId: input.deviceId, state: "active" as const };
+}
+
+export async function checkCourierDeviceOwnership(
+  db: Db,
+  principal: Principal,
+  deviceId: string,
+) {
+  assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
+  const [existing] = await db.select({
+    id: courierDevices.id,
+    courierId: courierDevices.courierId,
+    state: courierDevices.state,
+  }).from(courierDevices).where(and(
+    eq(courierDevices.id, deviceId),
+    eq(courierDevices.organizationId, principal.organizationId),
+  )).limit(1);
+  if (!existing || existing.courierId !== principal.userId || existing.state !== "active") {
+    return { owned: false as const, deviceId };
+  }
+  return { owned: true as const, deviceId: existing.id, state: existing.state };
+}
+
+type ScanEvaluation =
+  | { ok: true; shiftId: string; isLateCompletedShift: boolean }
+  | { ok: false; reason: string };
+
+async function evaluateScanEvent(
+  tx: Tx,
+  principal: Principal,
+  event: ScanEventInput,
+  receivedAt: Date = new Date(),
+): Promise<ScanEvaluation> {
+  const [device] = await tx.select({ id: courierDevices.id }).from(courierDevices).where(and(
+    eq(courierDevices.id, event.deviceId),
+    eq(courierDevices.organizationId, principal.organizationId),
+    eq(courierDevices.courierId, principal.userId),
+    eq(courierDevices.state, "active"),
+  )).limit(1);
+  if (!device) return { ok: false, reason: "DEVICE_NOT_OWNED" };
+  if (canonicalScanHash(event) !== event.payloadHash) return { ok: false, reason: "PAYLOAD_HASH_MISMATCH" };
+  const capturedAt = new Date(event.capturedAt);
+  if (Number.isNaN(capturedAt.getTime()) || capturedAt.getTime() > receivedAt.getTime() + 60_000) {
+    return { ok: false, reason: "INVALID_CAPTURED_AT" };
+  }
+
+  let orderId: string | undefined;
+  let notAssignedReason = "ORDER_NOT_ASSIGNED";
+
+  if (event.scannedType === "order") {
+    orderId = event.scannedId;
+    notAssignedReason = "ORDER_NOT_ASSIGNED";
+  } else if (event.scannedType === "container") {
+    notAssignedReason = "CONTAINER_NOT_ASSIGNED";
+    const [row] = await tx.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
+      .innerJoin(containers, eq(containers.id, containerAssignments.containerId))
+      .where(and(
+        eq(containerAssignments.organizationId, principal.organizationId),
+        eq(containers.organizationId, principal.organizationId),
+        eq(containers.code, event.scannedId),
+        lte(containerAssignments.assignedAt, capturedAt),
+        or(
+          isNull(containerAssignments.unassignedAt),
+          gt(containerAssignments.unassignedAt, capturedAt),
+        ),
+      ))
+      .orderBy(
+        desc(containerAssignments.assignedAt),
+        sql`(${containerAssignments.unassignedAt} IS NULL) DESC`,
+        desc(containerAssignments.id),
+      )
+      .limit(1);
+    orderId = row?.orderId;
+  } else {
+    notAssignedReason = "SEAL_NOT_ASSIGNED";
+    const [sealRow] = await tx.select({ orderId: containerAssignments.orderId }).from(containerAssignments)
+      .innerJoin(seals, eq(seals.id, containerAssignments.sealId))
+      .where(and(
+        eq(containerAssignments.organizationId, principal.organizationId),
+        eq(seals.organizationId, principal.organizationId),
+        eq(seals.serialNumber, event.scannedId),
+        lte(containerAssignments.assignedAt, capturedAt),
+        or(
+          isNull(containerAssignments.unassignedAt),
+          gt(containerAssignments.unassignedAt, capturedAt),
+        ),
+      ))
+      .orderBy(
+        desc(containerAssignments.assignedAt),
+        sql`(${containerAssignments.unassignedAt} IS NULL) DESC`,
+        desc(containerAssignments.id),
+      )
+      .limit(1);
+    orderId = sealRow?.orderId;
+  }
+
+  if (!orderId) return { ok: false, reason: notAssignedReason };
+
+  if (
+    event.context
+    && typeof event.context.orderId === "string"
+    && event.context.orderId !== orderId
+  ) {
+    return { ok: false, reason: "CONTEXT_ORDER_MISMATCH" };
+  }
+
+  const shiftResolution = await resolveVerifiedScanShift(tx, principal, orderId, capturedAt);
+  if (!shiftResolution.ok) {
+    return {
+      ok: false,
+      reason: shiftResolution.reason === "NO_ACTIVE_SHIFT" ? "NO_ACTIVE_SHIFT" : notAssignedReason,
+    };
+  }
+  return {
+    ok: true,
+    shiftId: shiftResolution.shiftId,
+    isLateCompletedShift: shiftResolution.isLateCompletedShift,
+  };
+}
+
+function retryMismatchReason(
+  existing: typeof scanEvents.$inferSelect,
+  principal: Principal,
+  event: ScanEventInput,
+): string | undefined {
+  if (existing.organizationId !== principal.organizationId || existing.actorId !== principal.userId) {
+    return "DEVICE_NOT_OWNED";
+  }
+  const eventCapturedMs = new Date(event.capturedAt).getTime();
+  const capturedAtMatches = !Number.isNaN(eventCapturedMs)
+    && existing.capturedAt.toISOString() === new Date(eventCapturedMs).toISOString();
+  const storedContext = existing.contextJson && typeof existing.contextJson === "object" && !Array.isArray(existing.contextJson)
+    ? (existing.contextJson as Record<string, unknown>)
+    : null;
+  if (
+    existing.payloadHash !== event.payloadHash
+    || canonicalScanHash(event) !== event.payloadHash
+    || existing.scannedType !== event.scannedType
+    || existing.scannedId !== event.scannedId
+    || !capturedAtMatches
+    || !storedContext
+    || canonicalScanHash({ ...event, context: storedContext }) !== event.payloadHash
+  ) {
+    return "HASH_MISMATCH";
+  }
+  return undefined;
+}
+
+async function recordLateShiftAdjustment(
+  tx: Tx,
+  principal: Principal,
+  input: { shiftId: string; scanEventId: string; clientEventId: string; capturedAt: string; receivedAt: Date },
+) {
+  const insertedAdj = await tx.insert(shiftReconciliationAdjustments).values({
+    organizationId: principal.organizationId,
+    shiftId: input.shiftId,
+    scanEventId: input.scanEventId,
+    deltaAccepted: 1,
+    deltaRejected: 0,
+    reason: "late_offline_scan",
+  }).onConflictDoNothing().returning({ id: shiftReconciliationAdjustments.id });
+
+  if (insertedAdj.length > 0) {
+    await appendEvent(tx, {
+      principal,
+      aggregateType: "courier_shift",
+      aggregateId: input.shiftId,
+      eventType: "shift.reconciliation_adjusted",
+      payload: {
+        adjustmentId: insertedAdj[0].id,
+        scanEventId: input.scanEventId,
+        clientEventId: input.clientEventId,
+        deltaAccepted: 1,
+        deltaRejected: 0,
+        reason: "late_offline_scan",
+        capturedAt: input.capturedAt,
+        receivedAt: input.receivedAt.toISOString(),
+      },
+    });
+  }
+}
+
 export async function syncScanEvents(db: Db, principal: Principal, events: ScanEventInput[]) {
   assertRole(principal, "courier", ...ROLE_GROUPS.dispatcher);
   const accepted: string[] = [];
   const duplicate: string[] = [];
   const rejected: Array<{ clientEventId: string; reason: string }> = [];
+
   for (const event of events) {
-    const [device] = await db.select().from(scanEvents).where(and(
-      eq(scanEvents.deviceId, event.deviceId),
-      eq(scanEvents.clientEventId, event.clientEventId),
-    )).limit(1);
-    if (device) {
-      duplicate.push(event.clientEventId);
-      continue;
-    }
-    let reason: string | undefined;
-    if (event.scannedType === "order") {
-      const [stop] = await db.select().from(routeStops).where(and(
-        eq(routeStops.organizationId, principal.organizationId),
-        eq(routeStops.orderId, event.scannedId),
-        eq(routeStops.assignedCourierId, principal.userId),
+    const outcome = await db.transaction(async tx => {
+      const [existing] = await tx.select().from(scanEvents).where(and(
+        eq(scanEvents.deviceId, event.deviceId),
+        eq(scanEvents.clientEventId, event.clientEventId),
       )).limit(1);
-      if (!stop) reason = "ORDER_NOT_ASSIGNED";
-    }
-    const inserted = await db.insert(scanEvents).values({
-      organizationId: principal.organizationId,
-      deviceId: event.deviceId,
-      clientEventId: event.clientEventId,
-      actorId: principal.userId,
-      scannedType: event.scannedType,
-      scannedId: event.scannedId,
-      contextJson: event.context,
-      capturedAt: new Date(event.capturedAt),
-      payloadHash: event.payloadHash,
-      syncStatus: reason ? "rejected" : "accepted",
-    }).onConflictDoNothing().returning({ id: scanEvents.id });
-    if (!inserted.length) {
-      duplicate.push(event.clientEventId);
-    } else if (reason) {
-      rejected.push({ clientEventId: event.clientEventId, reason });
-    } else {
-      accepted.push(event.clientEventId);
-    }
+
+      if (existing) {
+        // Always verify actor, tenant, and canonical payload/hash on retry — even for already-accepted
+        // rows — so a tampered or cross-actor/cross-tenant replay is rejected without mutating the journal.
+        const mismatch = retryMismatchReason(existing, principal, event);
+        if (mismatch) {
+          return { kind: "rejected" as const, reason: mismatch };
+        }
+        if (existing.syncStatus === "rejected") {
+          const receivedAt = new Date();
+          const evaluation = await evaluateScanEvent(tx, principal, event, receivedAt);
+          if (!evaluation.ok) {
+            return { kind: "rejected" as const, reason: evaluation.reason };
+          }
+          const updated = await tx.update(scanEvents)
+            .set({ syncStatus: "accepted", shiftId: evaluation.shiftId, receivedAt })
+            .where(and(
+              eq(scanEvents.id, existing.id),
+              eq(scanEvents.syncStatus, "rejected"),
+            ))
+            .returning({ id: scanEvents.id });
+          if (updated.length > 0) {
+            if (evaluation.isLateCompletedShift) {
+              await recordLateShiftAdjustment(tx, principal, {
+                shiftId: evaluation.shiftId,
+                scanEventId: existing.id,
+                clientEventId: event.clientEventId,
+                capturedAt: event.capturedAt,
+                receivedAt,
+              });
+            }
+            await tx.update(courierDevices).set({ lastSeenAt: receivedAt }).where(and(
+              eq(courierDevices.id, event.deviceId),
+              eq(courierDevices.organizationId, principal.organizationId),
+            ));
+            return { kind: "accepted" as const };
+          }
+          return { kind: "duplicate" as const };
+        }
+        return { kind: "duplicate" as const };
+      }
+
+      const receivedAt = new Date();
+      const evaluation = await evaluateScanEvent(tx, principal, event, receivedAt);
+      if (!evaluation.ok && evaluation.reason === "DEVICE_NOT_OWNED") {
+        // Never persist a scan_events row for an unowned/foreign device so a cross-actor or
+        // cross-tenant caller cannot poison the global (device_id, client_event_id) unique index
+        // and block the rightful owner's subsequent legitimate sync.
+        return { kind: "rejected" as const, reason: evaluation.reason };
+      }
+      const inserted = await tx.insert(scanEvents).values({
+        organizationId: principal.organizationId,
+        deviceId: event.deviceId,
+        clientEventId: event.clientEventId,
+        actorId: principal.userId,
+        scannedType: event.scannedType,
+        scannedId: event.scannedId,
+        contextJson: event.context,
+        capturedAt: new Date(event.capturedAt),
+        receivedAt,
+        payloadHash: event.payloadHash,
+        syncStatus: evaluation.ok ? "accepted" : "rejected",
+        shiftId: evaluation.ok ? evaluation.shiftId : null,
+      }).onConflictDoNothing().returning({ id: scanEvents.id });
+
+      if (!inserted.length) {
+        return { kind: "duplicate" as const };
+      }
+      if (!evaluation.ok) {
+        return { kind: "rejected" as const, reason: evaluation.reason };
+      }
+      if (evaluation.isLateCompletedShift) {
+        await recordLateShiftAdjustment(tx, principal, {
+          shiftId: evaluation.shiftId,
+          scanEventId: inserted[0].id,
+          clientEventId: event.clientEventId,
+          capturedAt: event.capturedAt,
+          receivedAt,
+        });
+      }
+      await tx.update(courierDevices).set({ lastSeenAt: receivedAt }).where(and(
+        eq(courierDevices.id, event.deviceId),
+        eq(courierDevices.organizationId, principal.organizationId),
+      ));
+      return { kind: "accepted" as const };
+    });
+
+    if (outcome.kind === "accepted") accepted.push(event.clientEventId);
+    else if (outcome.kind === "duplicate") duplicate.push(event.clientEventId);
+    else rejected.push({ clientEventId: event.clientEventId, reason: outcome.reason });
   }
   return { accepted, duplicate, rejected };
 }

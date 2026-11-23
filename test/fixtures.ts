@@ -47,14 +47,24 @@ export async function seedCatalog(db: Db, organizationId: string, termsVersion =
     snapshotJson: { organizationId, offSchedulePickupKopeks: 50_000 },
     published: true,
   }).returning();
-  await db.insert(priceRules).values({
-    tariffVersionId: version.id,
-    serviceId: service.id,
-    tier: "economy",
-    unitPriceKopeks: 10,
-    minQuantity: 1,
-    roundingRule: "gram_up_to_100",
-  });
+  await db.insert(priceRules).values([
+    {
+      tariffVersionId: version.id,
+      serviceId: service.id,
+      tier: "economy",
+      unitPriceKopeks: 10,
+      minQuantity: 1,
+      roundingRule: "gram_up_to_100",
+    },
+    {
+      tariffVersionId: version.id,
+      serviceId: service.id,
+      tier: "protected",
+      unitPriceKopeks: 15,
+      minQuantity: 1,
+      roundingRule: "gram_up_to_100",
+    },
+  ]);
   await db.insert(documentVersions).values({
     organizationId,
     kind: "offer",

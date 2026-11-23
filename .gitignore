@@ -1,12 +1,32 @@
 node_modules/
 dist/
 coverage/
+!docs/coverage/
+!docs/coverage/**
 .env
 .env.*
 !.env.example
+
+# Local PostgreSQL data directories (embedded-postgres clusters).
+# .pgdata       -> scripts/dev-db.mjs
+# .pgdata-test  -> test/global-setup.ts
+# .pgdata-drill -> scripts/upgrade-restore-drill.ts
+.pgdata*/
 .pgdata/
 .pgdata-test/
+.pgdata-drill/
+
 *.log
 *.err
 .DS_Store
 .beads.gate.lock
+
+# Local scratch space for agent probes and local run logs.
+temp/
+.evidence-storage/
+
+# Local agent runtime configuration. `.agents/skills/` is part of the repository; these three
+# are machine-local hooks and rules that point at absolute paths outside this checkout.
+.agents/hooks.json
+.agents/rules/
+.agents/laundry-idle-continuation.cjs

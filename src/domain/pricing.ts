@@ -1,5 +1,8 @@
 import { hashRequest } from "../core/idempotency.js";
 import { assertKopeks } from "./money.js";
+import type { DeclaredItem } from "../../shared/garment-taxonomy.js";
+
+export type RoundingRule = "exact" | "gram_up_to_100" | "gram_up_to_1000";
 
 export type ServiceLineInput = {
   serviceId: string;
@@ -8,7 +11,7 @@ export type ServiceLineInput = {
   unit: "piece" | "gram";
   unitPriceKopeks: number;
   minQuantity?: number;
-  roundingRule?: "exact" | "gram_up_to_100";
+  roundingRule?: RoundingRule;
 };
 
 export type QuoteInput = {
@@ -25,6 +28,12 @@ export type QuoteInput = {
   sharedPickupFeeKopeks?: number;
   sharedDeliveryFeeKopeks?: number;
   expiresAt: string;
+  /**
+   * What the customer declared they were handing over. It rides inside the
+   * immutable snapshot, so the courier's acceptance can be reconciled against
+   * it later — the declaration can never be edited behind the customer's back.
+   */
+  declaredItems?: DeclaredItem[];
 };
 
 export type QuoteLine = {
@@ -37,7 +46,40 @@ export type QuoteLine = {
   amountKopeks: number;
   source: "tariff" | "exception";
   tariffVersionId: string;
+  /**
+   * The price basis the line was priced with. It rides inside the immutable quote
+   * snapshot so that a later recalculation — a weight variance, for instance — can be
+   * priced by the very same formula instead of by today's tariff.
+   */
+  unitPriceKopeks?: number;
+  roundingRule?: RoundingRule;
+  minQuantity?: number;
 };
+
+/**
+ * The one pricing formula of the platform: a piece is priced per piece; a gram-priced
+ * line is priced either proportionally per kilogram (`exact`), rounded up to 100 g steps
+ * (`gram_up_to_100`), or rounded up to whole kilograms (`gram_up_to_1000`).
+ * Every amount that ever reaches a customer is produced here, so a recalculation of an
+ * existing quote is guaranteed to agree with the original one.
+ */
+export function priceServiceAmount(input: {
+  quantity: number;
+  unit: "piece" | "gram";
+  unitPriceKopeks: number;
+  minQuantity?: number;
+  roundingRule?: RoundingRule;
+}): number {
+  const quantity = Math.max(input.quantity, input.minQuantity ?? 1);
+  if (input.unit === "gram") {
+    if (input.roundingRule === "exact") {
+      return assertKopeks(Math.round((quantity * input.unitPriceKopeks) / 1000));
+    }
+    const step = input.roundingRule === "gram_up_to_100" ? 100 : 1000;
+    return assertKopeks(Math.ceil(quantity / step) * input.unitPriceKopeks);
+  }
+  return assertKopeks(Math.ceil(quantity * input.unitPriceKopeks));
+}
 
 export type QuoteResult = {
   lines: QuoteLine[];
@@ -52,23 +94,19 @@ export function calculateQuote(input: QuoteInput): QuoteResult {
   const lines: QuoteLine[] = input.lines.map(line => {
     if (!Number.isFinite(line.quantity) || line.quantity <= 0) throw new Error("INVALID_QUANTITY");
     assertKopeks(line.unitPriceKopeks, "unit_price");
-    const quantity = Math.max(line.quantity, line.minQuantity ?? 1);
-    let units = quantity;
-    if (line.unit === "gram") {
-      units = line.roundingRule === "gram_up_to_100"
-        ? Math.ceil(quantity / 100)
-        : Math.ceil(quantity / 1000);
-    }
     return {
       kind: "service",
       serviceId: line.serviceId,
       tier: line.tier,
       description: `${line.tier}:${line.serviceId}`,
-      quantity,
+      quantity: Math.max(line.quantity, line.minQuantity ?? 1),
       unit: line.unit,
-      amountKopeks: assertKopeks(Math.ceil(units * line.unitPriceKopeks)),
+      amountKopeks: priceServiceAmount(line),
       source: "tariff",
       tariffVersionId: input.tariffVersionId,
+      unitPriceKopeks: line.unitPriceKopeks,
+      roundingRule: line.roundingRule,
+      minQuantity: line.minQuantity,
     };
   });
 
@@ -100,6 +138,7 @@ export function calculateQuote(input: QuoteInput): QuoteResult {
     lines,
     totalKopeks,
     currency: "RUB",
+    declaredItems: input.declaredItems ?? [],
   };
   return { lines, totalKopeks, quoteHash: hashRequest(snapshot), snapshot };
 }

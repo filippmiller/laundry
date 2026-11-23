@@ -11,3 +11,5 @@ export * from "./schema/09-routes.js";
 export * from "./schema/10-customer-finance.js";
 export * from "./schema/11-partner-finance.js";
 export * from "./schema/12-support.js";
+export * from "./schema/13-social.js";
+export * from "./schema/14-custody-devices.js";

@@ -29,6 +29,8 @@ export const orders = pgTable("orders", {
   termsVersion: text("terms_version").notNull(),
   acceptedQuoteHash: text("accepted_quote_hash").notNull(),
   assignedPartnerId: uuid("assigned_partner_id").references(() => partners.id),
+  handoffCode: text("handoff_code"),
+  returnReason: text("return_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [
   uniqueIndex("orders_org_public_unique").on(t.organizationId, t.publicNumber),
@@ -57,6 +59,12 @@ export const orderAdjustments = pgTable("order_adjustments", {
   proposedBy: uuid("proposed_by").notNull().references(() => users.id),
   reason: text("reason").notNull(),
   deltaKopeks: bigint("delta_kopeks", { mode: "number" }).notNull(),
+  /**
+   * How the proposal was calculated: the kind of the change and the numbers it rests on.
+   * A weight proposal keeps the grams and the price of every affected order line, so the
+   * amount can be traced back to the weighing that caused it.
+   */
+  detailsJson: jsonb("details_json").notNull().default({}),
   state: adjustmentState("state").notNull().default("proposed"),
   version: integer("version").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -1,6 +1,6 @@
-import { and, eq, gt, gte, isNull, lte, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
-import { buildings, serviceWindows, slotReservations } from "../db/schema.js";
+import { and, asc, eq, gt, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+import type { Db, Tx } from "../db/client.js";
+import { buildings, orders, quotes, serviceWindows, slotReservations } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
@@ -10,7 +10,17 @@ export type HoldRequest = {
   principal: Principal;
   windowId: string;
   key: string;
-  expiresAt: Date;
+  /**
+   * Absolute expiry, for a caller that names a fixed instant — the demo book uses the window's
+   * own end, which is the same on every re-run.
+   */
+  expiresAt?: Date;
+  /**
+   * Lifetime in minutes, for a caller that asks for "the next ten minutes". The HTTP surface
+   * uses this: an absolute instant computed from the wall clock differs on every retry of the
+   * same request, which turned the replay of a hold into a payload conflict.
+   */
+  ttlMinutes?: number;
   orderId?: string | null;
   quoteId?: string | null;
   capacityUnits?: number;
@@ -26,12 +36,19 @@ export type HoldResult = {
 };
 
 function fingerprint(input: HoldRequest) {
+  // The fingerprint has to cover a value the caller controls. A lifetime in minutes is stable
+  // for a client that asks for ten minutes; an absolute instant is stable for a caller that
+  // names a fixed moment. Hashing a wall-clock derived quantity made every retry of the same
+  // request look like a changed body.
+  const lifetime = input.ttlMinutes !== undefined
+    ? { ttlMinutes: input.ttlMinutes }
+    : { expiresAt: input.expiresAt!.toISOString() };
   return hashRequest({
     organizationId: input.principal.organizationId,
     principalId: input.principal.userId,
     windowId: input.windowId,
     key: input.key,
-    expiresAt: input.expiresAt.toISOString(),
+    ...lifetime,
     orderId: input.orderId ?? null,
     quoteId: input.quoteId ?? null,
     capacityUnits: input.capacityUnits ?? 1,
@@ -46,10 +63,13 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
   const now = input.now ?? new Date();
   const units = input.capacityUnits ?? 1;
   if (!Number.isInteger(units) || units < 1) throw new AppError("VALIDATION_ERROR", "INVALID_CAPACITY_UNITS");
-  if (!(input.expiresAt instanceof Date) || !Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= now) {
+  const expiresAt = input.ttlMinutes !== undefined
+    ? new Date(now.getTime() + input.ttlMinutes * 60_000)
+    : input.expiresAt;
+  if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime()) || expiresAt <= now) {
     throw new AppError("INVALID_EXPIRY");
   }
-  const requestHash = fingerprint({ ...input, capacityUnits: units });
+  const requestHash = fingerprint({ ...input, expiresAt, capacityUnits: units });
 
   const result = await withIdempotency(db, {
     organizationId: input.principal.organizationId,
@@ -76,7 +96,7 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
       quoteId: input.quoteId ?? null,
       principalId: input.principal.userId,
       capacityUnits: units,
-      expiresAt: input.expiresAt,
+      expiresAt,
       idempotencyKey: input.key,
       requestHash,
       state: "held",
@@ -88,7 +108,7 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
       version: sql`${serviceWindows.version} + 1`,
     }).where(and(
       eq(serviceWindows.id, input.windowId),
-      sql`${serviceWindows.capacityOrders} - ${serviceWindows.reservedOrders} >= ${units}`,
+      sql`${serviceWindows.capacityOrders} - ${serviceWindows.safetyBufferOrders} - ${serviceWindows.reservedOrders} >= ${units}`,
     )).returning({ id: serviceWindows.id });
     if (!changed.length) throw new AppError("CAPACITY_UNAVAILABLE");
 
@@ -97,15 +117,271 @@ export async function holdSlot(db: Db, input: HoldRequest): Promise<HoldResult> 
       aggregateType: "slot_reservation",
       aggregateId: inserted[0].id,
       eventType: "slot.held",
-      payload: { windowId: input.windowId, capacityUnits: units, expiresAt: input.expiresAt.toISOString(), feeKopeks: window.feeKopeks },
+      payload: { windowId: input.windowId, capacityUnits: units, expiresAt: expiresAt.toISOString(), feeKopeks: window.feeKopeks },
     });
     return {
       reservationId: inserted[0].id,
       windowId: input.windowId,
       state: "held" as const,
-      expiresAt: input.expiresAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
     };
   });
+  return { ...result.value, replayed: result.replayed };
+}
+
+export type HoldPairRequest = {
+  principal: Principal;
+  pickupWindowId: string;
+  deliveryWindowId: string;
+  key: string;
+  expiresAt?: Date;
+  ttlMinutes?: number;
+  orderId?: string | null;
+  quoteId?: string | null;
+  capacityUnits?: number;
+  releaseReservationIds?: string[];
+  now?: Date;
+};
+
+export type HoldPairResult = {
+  pickup: HoldResult;
+  delivery: HoldResult;
+  releasedReservationIds: string[];
+  replayed?: boolean;
+};
+
+/**
+ * Releases specific unattached `held` reservations inside an existing transaction.
+ * Strictly scoped to the caller's tenant and (for customers) their own principalId.
+ * Already-released/expired reservations are treated as idempotent no-ops; confirmed
+ * reservations are never silently released here.
+ */
+export async function releaseHeldReservationsInTx(
+  tx: Tx,
+  input: {
+    principal: Principal;
+    reservationIds: string[];
+    reason: string;
+    ownerPrincipalId?: string;
+  },
+): Promise<string[]> {
+  const uniqueIds = [...new Set(input.reservationIds.filter(Boolean))];
+  if (uniqueIds.length === 0) return [];
+  const isStaff = hasRole(input.principal, ...ROLE_GROUPS.dispatcher);
+  const expectedPrincipalId = isStaff
+    ? (input.ownerPrincipalId ?? null)
+    : input.principal.userId;
+
+  const rows = await tx.select().from(slotReservations).where(and(
+    inArray(slotReservations.id, uniqueIds),
+    eq(slotReservations.organizationId, input.principal.organizationId),
+  )).for("update");
+
+  // Reject if any requested reservation belongs to another tenant or does not exist
+  // when explicitly targeted, or belongs to another principal for a customer caller.
+  if (rows.length !== uniqueIds.length) {
+    throw errors.notFound("reservation");
+  }
+  for (const row of rows) {
+    if (expectedPrincipalId && row.principalId !== expectedPrincipalId) {
+      throw errors.notFound("reservation");
+    }
+  }
+
+  const releasedIds: string[] = [];
+  // Lock/update windows in deterministic order to avoid deadlocks.
+  const toRelease = rows
+    .filter(row => row.state === "held" && row.orderId === null)
+    .sort((a, b) => a.windowId.localeCompare(b.windowId) || a.id.localeCompare(b.id));
+
+  for (const reservation of toRelease) {
+    const changed = await tx.update(slotReservations).set({ state: "released" }).where(and(
+      eq(slotReservations.id, reservation.id),
+      eq(slotReservations.state, "held"),
+      isNull(slotReservations.orderId),
+    )).returning({ windowId: slotReservations.windowId, capacityUnits: slotReservations.capacityUnits });
+    if (!changed.length) continue;
+
+    const counter = await tx.update(serviceWindows).set({
+      reservedOrders: sql`GREATEST(${serviceWindows.reservedOrders} - ${changed[0].capacityUnits}, 0)`,
+      version: sql`${serviceWindows.version} + 1`,
+    }).where(and(
+      eq(serviceWindows.id, changed[0].windowId),
+      gte(serviceWindows.reservedOrders, changed[0].capacityUnits),
+    )).returning({ id: serviceWindows.id });
+    if (!counter.length) throw new AppError("INVALID_TRANSITION", "CAPACITY_COUNTER_INCONSISTENT");
+
+    await appendEvent(tx, {
+      principal: input.principal,
+      aggregateType: "slot_reservation",
+      aggregateId: reservation.id,
+      eventType: "slot.released",
+      payload: { windowId: reservation.windowId, capacityUnits: changed[0].capacityUnits },
+      reason: input.reason,
+    });
+    releasedIds.push(reservation.id);
+  }
+  return releasedIds;
+}
+
+/**
+ * Atomically reserves both pickup and delivery windows in a single DB transaction.
+ * If either leg fails (unavailable window, insufficient capacity, etc.) in either order,
+ * the entire transaction rolls back so no orphan hold is ever left behind.
+ * Replaying with the same idempotency key after a timeout returns the committed pair.
+ */
+export async function holdSlotPair(db: Db, input: HoldPairRequest): Promise<HoldPairResult> {
+  assertRole(input.principal, ...ROLE_GROUPS.customer, ...ROLE_GROUPS.dispatcher, "system_worker");
+  if (!input.principal.organizationId) throw errors.forbidden();
+  if (!input.key?.trim() || input.key.length > 200) throw new AppError("VALIDATION_ERROR", "INVALID_IDEMPOTENCY_KEY");
+  if (input.pickupWindowId === input.deliveryWindowId) {
+    throw new AppError("VALIDATION_ERROR", "SAME_PICKUP_AND_DELIVERY_WINDOW");
+  }
+  const now = input.now ?? new Date();
+  const units = input.capacityUnits ?? 1;
+  if (!Number.isInteger(units) || units < 1) throw new AppError("VALIDATION_ERROR", "INVALID_CAPACITY_UNITS");
+  const expiresAt = input.ttlMinutes !== undefined
+    ? new Date(now.getTime() + input.ttlMinutes * 60_000)
+    : input.expiresAt;
+  if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime()) || expiresAt <= now) {
+    throw new AppError("INVALID_EXPIRY");
+  }
+  const lifetime = input.ttlMinutes !== undefined
+    ? { ttlMinutes: input.ttlMinutes }
+    : { expiresAt: expiresAt.toISOString() };
+  const releaseIds = [...new Set(input.releaseReservationIds ?? [])].sort();
+  const requestHash = hashRequest({
+    organizationId: input.principal.organizationId,
+    principalId: input.principal.userId,
+    pickupWindowId: input.pickupWindowId,
+    deliveryWindowId: input.deliveryWindowId,
+    key: input.key,
+    ...lifetime,
+    orderId: input.orderId ?? null,
+    quoteId: input.quoteId ?? null,
+    capacityUnits: units,
+    releaseReservationIds: releaseIds,
+  });
+
+  const result = await withIdempotency(db, {
+    organizationId: input.principal.organizationId,
+    scope: "slot:hold:pair",
+    key: input.key,
+    actorId: input.principal.userId,
+    requestHash,
+  }, async tx => {
+    if (input.quoteId) {
+      const [quote] = await tx.select({ id: quotes.id, customerId: quotes.customerId })
+        .from(quotes)
+        .where(and(
+          eq(quotes.id, input.quoteId),
+          eq(quotes.organizationId, input.principal.organizationId),
+        ))
+        .limit(1);
+      if (!quote) throw errors.notFound("quote");
+      const isStaff = hasRole(input.principal, ...ROLE_GROUPS.dispatcher, "system_worker");
+      if (!isStaff && quote.customerId !== input.principal.userId) {
+        throw errors.notFound("quote");
+      }
+    }
+
+    // Lock ALL involved service_windows (prior holds being released + new pickup & delivery
+    // windows) in a single sorted ORDER BY id FOR UPDATE query before mutating any window
+    // counters, preventing AB-BA lock inversion between concurrent paired holds.
+    const releaseWindowIds = releaseIds.length > 0
+      ? (await tx.select({ windowId: slotReservations.windowId })
+        .from(slotReservations)
+        .where(and(
+          inArray(slotReservations.id, releaseIds),
+          eq(slotReservations.organizationId, input.principal.organizationId),
+        ))).map(row => row.windowId)
+      : [];
+    const allWindowIds = [...new Set([...releaseWindowIds, input.pickupWindowId, input.deliveryWindowId])].sort();
+    await tx.select({ id: serviceWindows.id })
+      .from(serviceWindows)
+      .where(inArray(serviceWindows.id, allWindowIds))
+      .orderBy(asc(serviceWindows.id))
+      .for("update");
+
+    const releasedReservationIds = releaseIds.length > 0
+      ? await releaseHeldReservationsInTx(tx, {
+        principal: input.principal,
+        reservationIds: releaseIds,
+        reason: "Replaced by paired slot hold",
+      })
+      : [];
+
+    // Reserve in deterministic windowId order to prevent deadlocks under concurrent paired holds.
+    const legs: Array<{ role: "pickup" | "delivery"; windowId: string }> = [
+      { role: "pickup", windowId: input.pickupWindowId },
+      { role: "delivery", windowId: input.deliveryWindowId },
+    ];
+    const orderedLegs = [...legs].sort((a, b) => a.windowId.localeCompare(b.windowId));
+
+    const heldByRole: Partial<Record<"pickup" | "delivery", HoldResult>> = {};
+    for (const leg of orderedLegs) {
+      const [window] = await tx.select({
+        id: serviceWindows.id,
+        kind: serviceWindows.kind,
+        feeKopeks: serviceWindows.feeKopeks,
+      })
+        .from(serviceWindows)
+        .innerJoin(buildings, eq(serviceWindows.buildingId, buildings.id))
+        .where(and(
+          eq(serviceWindows.id, leg.windowId),
+          eq(buildings.organizationId, input.principal.organizationId),
+          eq(serviceWindows.kind, leg.role),
+          eq(serviceWindows.status, "open"),
+          gt(serviceWindows.endsAt, now),
+        )).limit(1);
+      if (!window) throw new AppError("WINDOW_NOT_FOUND");
+
+      const inserted = await tx.insert(slotReservations).values({
+        organizationId: input.principal.organizationId,
+        windowId: leg.windowId,
+        orderId: input.orderId ?? null,
+        quoteId: input.quoteId ?? null,
+        principalId: input.principal.userId,
+        capacityUnits: units,
+        expiresAt,
+        idempotencyKey: `${input.key}:${leg.role}`,
+        requestHash,
+        state: "held",
+      }).returning({ id: slotReservations.id });
+      if (!inserted.length) throw new AppError("CAPACITY_UNAVAILABLE");
+
+      const changed = await tx.update(serviceWindows).set({
+        reservedOrders: sql`${serviceWindows.reservedOrders} + ${units}`,
+        version: sql`${serviceWindows.version} + 1`,
+      }).where(and(
+        eq(serviceWindows.id, leg.windowId),
+        sql`${serviceWindows.capacityOrders} - ${serviceWindows.safetyBufferOrders} - ${serviceWindows.reservedOrders} >= ${units}`,
+      )).returning({ id: serviceWindows.id });
+      if (!changed.length) throw new AppError("CAPACITY_UNAVAILABLE");
+
+      await appendEvent(tx, {
+        principal: input.principal,
+        aggregateType: "slot_reservation",
+        aggregateId: inserted[0].id,
+        eventType: "slot.held",
+        payload: { windowId: leg.windowId, capacityUnits: units, expiresAt: expiresAt.toISOString(), feeKopeks: window.feeKopeks },
+      });
+
+      heldByRole[leg.role] = {
+        reservationId: inserted[0].id,
+        windowId: leg.windowId,
+        state: "held" as const,
+        expiresAt: expiresAt.toISOString(),
+      };
+    }
+
+    return {
+      pickup: heldByRole.pickup!,
+      delivery: heldByRole.delivery!,
+      releasedReservationIds,
+    };
+  });
+
   return { ...result.value, replayed: result.replayed };
 }
 
@@ -155,33 +431,50 @@ export async function confirmSlot(
 
 async function terminate(
   db: Db,
-  input: { principal: Principal; reservationId: string; reason: string; key?: string; now?: Date },
+  input: { principal: Principal; reservationId: string; reason: string; key?: string; now?: Date; heldOnly?: boolean },
   target: "released" | "expired",
 ) {
   const now = input.now ?? new Date();
   assertRole(input.principal, ...(target === "expired"
     ? ROLE_GROUPS.worker
-    : [...ROLE_GROUPS.dispatcher, "customer" as const]));
+    : [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.partner, "customer" as const]));
   if (target === "released" && !input.reason?.trim()) throw new AppError("VALIDATION_ERROR", "REASON_REQUIRED");
   const result = await withIdempotency(db, {
     organizationId: input.principal.organizationId,
     scope: `slot:${target}`,
     key: input.key ?? input.reservationId,
     actorId: input.principal.userId,
-    requestHash: hashRequest({ reservationId: input.reservationId, target, reason: input.reason }),
+    requestHash: hashRequest({ reservationId: input.reservationId, target, reason: input.reason, heldOnly: Boolean(input.heldOnly) }),
   }, async tx => {
     const [reservation] = await tx.select().from(slotReservations).where(and(
       eq(slotReservations.id, input.reservationId),
       eq(slotReservations.organizationId, input.principal.organizationId),
     )).limit(1);
     if (!reservation) throw errors.notFound("reservation");
-    if (target === "released" && hasRole(input.principal, "customer") && reservation.principalId !== input.principal.userId) {
-      throw errors.notFound("reservation");
+    if (target === "released" && !hasRole(input.principal, ...ROLE_GROUPS.dispatcher)) {
+      if (hasRole(input.principal, "customer") && reservation.principalId !== input.principal.userId) {
+        throw errors.notFound("reservation");
+      }
+      if (hasRole(input.principal, ...ROLE_GROUPS.partner) && !hasRole(input.principal, "customer")) {
+        if (!input.principal.partnerId || !reservation.orderId) throw errors.notFound("reservation");
+        const [order] = await tx.select({ assignedPartnerId: orders.assignedPartnerId }).from(orders).where(and(
+          eq(orders.id, reservation.orderId),
+          eq(orders.organizationId, input.principal.organizationId),
+        )).limit(1);
+        if (!order || order.assignedPartnerId !== input.principal.partnerId) {
+          throw errors.notFound("reservation");
+        }
+      }
     }
     if (reservation.state === target) return { reservationId: reservation.id, state: target, changed: false };
+    if (target === "released" && input.heldOnly && (reservation.state !== "held" || reservation.orderId !== null)) {
+      throw new AppError("INVALID_TRANSITION", "RESERVATION_NOT_TERMINABLE", { state: reservation.state });
+    }
     const condition = target === "expired"
       ? and(eq(slotReservations.id, reservation.id), eq(slotReservations.state, "held"), lte(slotReservations.expiresAt, now))
-      : and(eq(slotReservations.id, reservation.id), sql`${slotReservations.state} IN ('held','confirmed')`);
+      : input.heldOnly
+        ? and(eq(slotReservations.id, reservation.id), eq(slotReservations.state, "held"), isNull(slotReservations.orderId))
+        : and(eq(slotReservations.id, reservation.id), sql`${slotReservations.state} IN ('held','confirmed')`);
     const changed = await tx.update(slotReservations).set({ state: target }).where(condition)
       .returning({ windowId: slotReservations.windowId, capacityUnits: slotReservations.capacityUnits });
     if (!changed.length) {
@@ -210,7 +503,7 @@ async function terminate(
   return { ...result.value, replayed: result.replayed };
 }
 
-export function releaseSlot(db: Db, input: { principal: Principal; reservationId: string; reason: string; key?: string }) {
+export function releaseSlot(db: Db, input: { principal: Principal; reservationId: string; reason: string; key?: string; heldOnly?: boolean }) {
   return terminate(db, input, "released");
 }
 export function expireSlot(db: Db, input: { principal: Principal; reservationId: string; reason?: string; key?: string; now?: Date }) {
@@ -249,8 +542,9 @@ export async function reconcileCapacity(db: Db, organizationId: string): Promise
     FROM service_windows w
     LEFT JOIN slot_reservations r ON r.window_id = w.id
     WHERE w.organization_id = ${organizationId}
-    GROUP BY w.id, w.reserved_orders
+    GROUP BY w.id, w.reserved_orders, w.capacity_orders, w.safety_buffer_orders
     HAVING w.reserved_orders <> COALESCE(SUM(CASE WHEN r.state IN ('held','confirmed') THEN r.capacity_units ELSE 0 END), 0)
+        OR w.reserved_orders > GREATEST(w.capacity_orders - w.safety_buffer_orders, 0)
   `);
   return (rows.rows as unknown as Array<{ windowId: string; stored: number; actual: number | string }>)
     .map(row => ({ windowId: row.windowId, stored: Number(row.stored), actual: Number(row.actual) }));
