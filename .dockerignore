@@ -1,0 +1,30 @@
+# Build context hygiene.
+#
+# Without this the Docker build copies the whole checkout into the image: the git history,
+# the local node_modules tree and the embedded PostgreSQL data directories. The image ends up
+# several times larger than the application needs and the build carries state that has no
+# business inside a deployed artefact.
+
+node_modules
+dist
+coverage
+
+.git
+.github
+
+# Secrets never belong in an image layer.
+.env
+.env.*
+!.env.example
+
+# Embedded PostgreSQL clusters and stray runtime output.
+.pgdata*
+*.log
+*.err
+
+# Local agent runtime configuration.
+.agents
+
+# Audit bundles and reports are documentation, not runtime.
+docs/audits
+docs/coverage

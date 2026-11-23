@@ -1,0 +1,151 @@
+{
+  "repository": "filippmiller/laundry",
+  "audited_head": "b4e240f08f214ef5967f9c3c35514636e932430c",
+  "assessment": "NO-GO for production or external pilot; source review, no independently executed exploit tests",
+  "findings": [
+    {
+      "id": "LAU-R2-001",
+      "severity": "P0",
+      "title": "Current HEAD CI is red; smoke skipped (CONFIRMED)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Repair actual usage/implementation rather than suppressing lint; run lint → typecheck → test → web build → dependency audit → migration drift → 6-role browser CI on final HEAD. STOP if any job is failed/cancelled/skipped."
+    },
+    {
+      "id": "LAU-R2-002",
+      "severity": "P0",
+      "title": "Raw PostgreSQL files committed to a public Git branch (CONFIRMED tracking; exposure contents UNKNOWN)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "First inspect only in a secured environment; classify whether personal data, secrets, real accounts or test-only fixtures were exposed. Stop new pushes of PG data. Add `.pgdata-drill/` to `.gitignore`, remove tracked paths via a normal cleanup commit, verify `git ls-files '.pgdata-drill/**'` returns zero. Since the bytes exist in Git history, **a normal deletion commit does not erase prior public visibility**: if any real sensitive data is found, escalate to credential rotation, provider notification and controlled history cleanup with explicit owner approval. Do not force-push automatically."
+    },
+    {
+      "id": "LAU-R2-003",
+      "severity": "P0",
+      "title": "New 6–8 role UI is NOT mounted; a dangerous placeholder customer portal was added (CONFIRMED)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Set one canonical authenticated app shell/router and role navigation; first implement the real CustomerWorkspace (or keep legacy flow until functional), then mount and prove all actual role views. **Never ship/mock a success confirmation or a price of `0 ₽` as real.** Add Playwright navigation + action assertions for each role/viewport, ensure role boundaries at API (not just UI)."
+    },
+    {
+      "id": "LAU-R2-004",
+      "severity": "P0",
+      "title": "Frontend/backend contract split: new pages call 404 endpoints (CONFIRMED)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Generate a typed route-to-UI contract map; implement server adapters with Zod, role + object authorization, stable DTOs, customer-scoped projections, proper errors; add `api.inject` contract tests and E2E clicks. Include an automated gate that detects frontend referenced endpoints missing from OpenAPI before merge."
+    },
+    {
+      "id": "LAU-R2-005",
+      "severity": "P0",
+      "title": "Production runtime cannot become healthy on the provided Compose topology (CONFIRMED)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Implement `/api/v1/health/ready` with a real safe DB ping / migration readiness and differentiate live vs ready; use a disposable Compose test to prove API+worker+Caddy reach healthy with no dev shortcuts. Do not deploy production until providers/legal gates complete."
+    },
+    {
+      "id": "LAU-R2-006",
+      "severity": "P0",
+      "title": "Evidence object authorization is incomplete (SOURCE-CONFIRMED, exploit needs integration repro)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Introduce one permission function `authorizeEvidenceOwner(actor,ownerType,ownerId,purpose,action)` used by register/list/upload/preview/delete/export and legal-hold operations; verify tenant + customer/partner assignment + case scope; return safe 404; never return storage keys in public DTO; use short-lived server-authorized URLs. Add negative tests for customer A/B same tenant, partner A/B, claim ID, custody event ID, revoked access and audit trail."
+    },
+    {
+      "id": "LAU-R2-007",
+      "severity": "P0",
+      "title": "Auth for actual production users is not integrated (CONFIRMED wiring gap)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Define an approved OTP provider / dev-only fake, real phone verification and invitation/role provisioning, preview gate with dedicated isolation and no role self-selection; wire endpoints and auth UI, add rate limits, session rotation/revocation and seeded non-prod tests. Production without approved OTP/provider must remain closed."
+    },
+    {
+      "id": "LAU-R2-008",
+      "severity": "P1",
+      "title": "Route optimization yields fabricated geography if invoked (CONFIRMED algorithmic input bug)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Use real validated/geocoded building coordinates with provenance + routing/travel-time matrix, isolate deterministic fixtures for unit tests, require capacity/time feasibility, dispatcher override, failure fallback, no claimed real distances from hashed values. Add 3+ benchmark datasets with actual test coordinates and route replay. Feature gate until verified."
+    },
+    {
+      "id": "LAU-R2-009",
+      "severity": "P1",
+      "title": "Cookie origin defense covers POST, not DELETE (CONFIRMED gap; attack exploitability not verified)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Protect *all* unsafe methods (POST/PUT/PATCH/DELETE), require strong server-generated CSRF/token or strict validated Origin/Referer policy as appropriate, test same-site hostile subdomain, Origin missing, mutated cookie + CORS and disabled user; avoid breaking authenticated nonbrowser clients."
+    },
+    {
+      "id": "LAU-R2-010",
+      "severity": "P1",
+      "title": "Notification 'delivery' is not actual SMS/push/mail (CONFIRMED gap)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Separate domain outbox processing, notification scheduling, provider send/delivery receipt, attempts, backoff and dead letter. Provide fake sink and deterministic fault-injection tests; require live provider later with explicit approval."
+    },
+    {
+      "id": "LAU-R2-011",
+      "severity": "P1",
+      "title": "Payment inbox uses single transaction with per-row caught exceptions; failure atomics unclear (SOURCE-CONFIRMED risk)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Apply each inbox event in an isolated transaction or savepoint, add idempotent source postings; model partial failures between state/ledger/event updates, amount and customer reference mismatches, concurrent events, repeated webhooks, chargeback vs refund. Collect fixtures of correct and corrupted provider events."
+    },
+    {
+      "id": "LAU-R2-012",
+      "severity": "P1",
+      "title": "Evidence/media and legal retention are metadata only (CONFIRMED gap)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Implement private upload with content hash from actual bytes, bounded content type/size, scoped access, audit-preserving tombstones, versioned retention policy and hold-aware deletion; test adversarial cross-claim and forged hash."
+    },
+    {
+      "id": "LAU-R2-013",
+      "severity": "P1",
+      "title": "Comprehensive role scenarios remain untested (EVIDENCE GAP)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Use an explicit graded status: `SPEC_ONLY / SERVICE_TESTED / API_TESTED / BROWSER_TESTED / MULTI_ROLE_E2E / HARDWARE_VERIFIED / PROD_APPROVED`. No 'E2E PASS' without executing the entire flow across roles, DB, and side effects."
+    },
+    {
+      "id": "LAU-R2-014",
+      "severity": "P1",
+      "title": "Critical commercial/legal flows incomplete (CONFIRMED gaps)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Close demo workflows with explicit simulated states and audit, publish legal decision register; leave production KKT, fiscalization, personal-data localization and actual pricing as external approval gates."
+    },
+    {
+      "id": "LAU-R2-015",
+      "severity": "P1",
+      "title": "Backup proof is not disaster recovery (CONFIRMED evidence limit)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "Add a separate isolated Postgres 16 backup → delete DB → restore on clean instance drill, verify checksums and ownership/permissions, handle media/retention and WAL where needed; add to non-production CI release gate."
+    },
+    {
+      "id": "LAU-R2-016",
+      "severity": "P2",
+      "title": "Documentation and claimed session handoff drift (CONFIRMED)",
+      "confidence": "SOURCE-CONFIRMED or EVIDENCE GAP as specified in audit",
+      "status": "OPEN / NEEDS INDEPENDENT REGRESSION",
+      "source_audit": "01_ADVERSARIAL_AUDIT.md",
+      "recommended_remediation": "One machine-generated status dashboard with current HEAD, CI jobs and exact test counts, separate historical documents labeled AS-OF, and an honest handoff file. Never retroactively claim passes for current HEAD."
+    }
+  ]
+}

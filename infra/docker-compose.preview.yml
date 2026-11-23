@@ -1,0 +1,149 @@
+# Isolated preview instance for a shared production host.
+#
+# This file stands alone — it is NOT an overlay of infra/docker-compose.yml. It exists because
+# the target host is shared by ~20 other services and the base file cannot be used there as is:
+#
+#   * the base file's caddy service publishes 80/443, but the host's Traefik (coolify-proxy)
+#     already owns both ports. Starting caddy there would fail to bind and, in the worst case,
+#     fight the existing proxy for traffic. So there is no caddy here: TLS is terminated by
+#     the host's Traefik, which routes the domain to the api container.
+#   * the base file builds the image three times (migrate, api, worker). Here all three
+#     services share one image tag, so the stack ships a single build artefact.
+#   * the host is under real load and shares its RAM with other stacks, so every service
+#     gets an explicit memory/CPU ceiling and a bounded log, and the database never
+#     publishes a port to the host.
+#
+# This is a DEMO instance, not a production pilot: PREVIEW_MODE=enabled signs a visitor in as
+# one of the seeded demo personas, PAYMENT_PROVIDER=fake and FISCAL_PROVIDER=stub mean no
+# money moves and no fiscal receipt is issued. See docs/DEPLOYMENT_PREVIEW_2026-11-18.md.
+#
+# Usage:
+#   cd /opt/laundry/src
+#   docker compose -f infra/docker-compose.preview.yml build
+#   docker compose -f infra/docker-compose.preview.yml up -d
+
+name: laundry-preview
+
+x-app: &app
+  image: laundry:preview
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# The anchor deliberately carries no depends_on. migrate runs before the api and the
+# worker, so putting that dependency in the shared block would make migrate depend on
+# itself.
+x-app-depends: &app-depends
+  db:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-laundry}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-laundry}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # The database is reachable only from this stack's network. It must never take a port
+    # on the host: the host already runs many services and the ports are not ours to take.
+    expose:
+      - "5432"
+    mem_limit: 768m
+    cpus: "0.50"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-laundry} -d ${POSTGRES_DB:-laundry}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: npm run db:migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    # The image's healthcheck probes an HTTP endpoint. This container runs migrations and
+    # exits, so it can never pass one; leaving it on marks a completed job unhealthy.
+    healthcheck:
+      disable: true
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
+    mem_limit: 512m
+    cpus: "0.50"
+
+  api:
+    <<: *app
+    command: npm run start:api
+    depends_on: *app-depends
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
+      SESSION_SECRET: ${SESSION_SECRET:?set in .env}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?set in .env}
+      WEB_ORIGIN: ${WEB_ORIGIN:-https://laundry.filippmiller.com}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-fake}
+      FISCAL_PROVIDER: ${FISCAL_PROVIDER:-stub}
+      PREVIEW_MODE: ${PREVIEW_MODE:-enabled}
+      PREVIEW_ACCESS_KEY: ${PREVIEW_ACCESS_KEY:-}
+      VROOM_URL: ${VROOM_URL:-}
+      LOG_LEVEL: warn
+      # The host's reverse proxy is the only hop in front of the API: without this the rate
+      # limiter sees the proxy's address and every client shares one budget.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
+    # The host's Traefik reaches the api through the shared `coolify` network by the
+    # alias below. The api keeps the stack's own network to reach the database.
+    # Every entry uses the long form: compose v5 rejects a list that mixes the short
+    # (string) and long (map) syntaxes.
+    networks:
+      default: {}
+      coolify:
+        aliases:
+          - laundry-api
+    mem_limit: 768m
+    cpus: "1.00"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  worker:
+    <<: *app
+    command: npm run worker
+    depends_on: *app-depends
+    # The worker is a poller and serves no HTTP endpoint, so the image's HTTP healthcheck
+    # can never pass. Disable it rather than leave a permanently unhealthy container.
+    healthcheck:
+      disable: true
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
+      WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-30000}
+    mem_limit: 512m
+    cpus: "0.50"
+
+networks:
+  coolify:
+    external: true
+
+volumes:
+  pgdata:

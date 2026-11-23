@@ -1,0 +1,3140 @@
+{
+  "as_of": "2026-11-21",
+  "source_catalog": "docs/audits/PR3_audit/laundry_PR3_audit_2026-11-17/02_SCENARIO_CATALOG.json",
+  "source_evidence_map": "docs/coverage/SCENARIO_EVIDENCE_MAP.json",
+  "catalog_baseline_sha": "b4e240f08f214ef5967f9c3c35514636e932430c",
+  "total": 217,
+  "counts": {
+    "BROWSER_PASS": 4,
+    "SPEC": 70,
+    "API_PASS": 50,
+    "CROSS_ROLE_PASS": 82,
+    "BLOCKED": 10,
+    "UNIT_PASS": 1
+  },
+  "cross_role_total": 36,
+  "cross_role_counts": {
+    "CROSS_ROLE_PASS": 30,
+    "SPEC": 4,
+    "BLOCKED": 2
+  },
+  "executed_proofs": [
+    {
+      "area": "Cross-role end-to-end journeys (F01..F35 across all 8 roles)",
+      "proves": "Real PostgreSQL + Fastify integration tests covering economy/mixed pickup, partner receipt/discrepancy/QC/rewash, adjustments, return-unprocessed, partial delivery, claims with legal hold, compensations, partner accruals/credit notes, concurrent refunds, signed webhooks, admin role/session revocation, last-admin guard, cross-org phone isolation, and guest tracking anti-enumeration.",
+      "test": "test/scenarios/cross-role-flows.integration.test.ts",
+      "command": "npx vitest run test/scenarios/cross-role-flows.integration.test.ts",
+      "kind": "CROSS_ROLE_PASS"
+    },
+    {
+      "area": "Adversarial business & security edge cases",
+      "proves": "Cross-customer container/seal reuse blocked (tenant-scoped uniqueness preserved), friendly-fraud delivery PIN + claim compensation + chargeback race, partner payout Separation of Duties (SoD), broken seal & 50% underweight custody discrepancies, 2x multi-tenant/multi-role negative matrix (AD-020/OP-011), safety_buffer_orders concurrency, optimistic lock race, and idempotency key payload mismatch.",
+      "test": "test/scenarios/adversarial-business-edge-cases.integration.test.ts",
+      "command": "npx vitest run test/scenarios/adversarial-business-edge-cases.integration.test.ts",
+      "kind": "CROSS_ROLE_PASS"
+    },
+    {
+      "area": "API contract & frontend route synchronization (OP-013, OP-014)",
+      "proves": "Every frontend api(...) call in apps/web/src matches a mounted backend route & HTTP method in buildApp(), and OpenAPI 3.1.0 preserves optional query params and security metadata.",
+      "test": "test/ops/api-contract-sync.test.ts",
+      "command": "npx vitest run test/ops/api-contract-sync.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Customer ordering journey & mobile/desktop UI",
+      "proves": "A customer quotes, holds both windows, books an order, gets an invoice and pays with the fake provider; mobile/desktop Russian UI renders cleanly.",
+      "test": "scripts/smoke-e2e.mjs, scripts/verify-mobile-ui.mjs",
+      "command": "npm run smoke",
+      "kind": "BROWSER_PASS"
+    },
+    {
+      "area": "Evidence object scope (order / claim / custody_event) and privacy",
+      "proves": "A customer cannot list or read another customer's claim or custody evidence, a partner cannot read an unassigned order's evidence, another tenant is denied, and the storage key never leaves the service.",
+      "test": "test/security/evidence-abac.integration.test.ts",
+      "command": "npx vitest run test/security/evidence-abac.integration.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "CSRF / origin enforcement on cookie-authenticated state changes",
+      "proves": "DELETE, POST and other unsafe methods reject a cross-site Origin, while same-origin and originless clients are allowed.",
+      "test": "test/security/csrf-unsafe-methods.integration.test.ts",
+      "command": "npx vitest run test/security/csrf-unsafe-methods.integration.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Money invariants — a voided invoice must never be captured",
+      "proves": "A cancelled invoice is refused with FINANCIAL_HOLD and creates no payment intent, while an open invoice is captured exactly once.",
+      "test": "test/api/finance-capture-invoice-state.test.ts",
+      "command": "npx vitest run test/api/finance-capture-invoice-state.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Finance dashboard contract",
+      "proves": "GET /finance/overview returns the tenant aggregate, refuses a customer, hides another tenant's rows and refuses an unauthenticated call.",
+      "test": "test/api/finance-overview.test.ts",
+      "command": "npx vitest run test/api/finance-overview.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Document rendering and the non-fiscal warning",
+      "proves": "GET /documents/:kind/:id is object scoped, refuses a forbidden role and carries an explicit 'not a 54-FZ fiscal receipt' disclaimer.",
+      "test": "test/api/documents.test.ts",
+      "command": "npx vitest run test/api/documents.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Partner returns an order unprocessed",
+      "proves": "The order returns unprocessed, the customer is never charged, the held capacity is released, and a partner that is not assigned to the order sees nothing.",
+      "test": "test/api/partner-return-unprocessed.test.ts",
+      "command": "npx vitest run test/api/partner-return-unprocessed.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Phone OTP (fake provider) and preview unlock",
+      "proves": "Only a hash of the code is stored, the surface does not exist in production, attempts are bounded, the preview role allowlist is server side and every attempt is audited.",
+      "test": "test/api/otp.test.ts, test/api/otp-rate-limit.test.ts, test/api/preview-unlock.test.ts",
+      "command": "npx vitest run test/api",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Administrator member suspension",
+      "proves": "Suspending a member revokes its sessions, another tenant is hidden, the last active administrator cannot be suspended away, and self-suspension is refused.",
+      "test": "test/api/admin-member-state.test.ts",
+      "command": "npx vitest run test/api/admin-member-state.test.ts",
+      "kind": "API_PASS"
+    },
+    {
+      "area": "Repository hygiene — no database bytes, secrets, media or oversized blobs tracked",
+      "proves": "The guard exits non-zero on a planted PostgreSQL cluster, a secret, media and an oversized blob, and prints only paths, never contents.",
+      "test": "test/ops/guard-repo-hygiene.test.ts",
+      "command": "npx vitest run test/ops/guard-repo-hygiene.test.ts",
+      "kind": "UNIT_PASS"
+    }
+  ],
+  "cross_role_flows": [
+    {
+      "id": "F01",
+      "flow": "Economy building pickup → partner wash → QC → shared delivery → close",
+      "roles": [
+        "customer",
+        "courier",
+        "partner",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Full economy building pickup -> partner wash -> QC -> shared delivery -> close verified.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F02",
+      "flow": "Protected jacket + Economy bag separated → itemized QC → combined return",
+      "roles": [
+        "customer",
+        "courier",
+        "partner",
+        "dispatcher"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Mixed economy bag + protected jacket separation -> itemized QC -> exact-set delivery verified.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F03",
+      "flow": "Both +500 RUB illustrative exceptional trips → consent → feasible route → one invoice",
+      "roles": [
+        "customer",
+        "dispatcher",
+        "courier",
+        "finance"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Both off-schedule exceptional trips produce two unique surcharge lines and one invoice.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F04",
+      "flow": "Two concurrent customers compete for last pickup slot",
+      "roles": [
+        "customer",
+        "platform"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Concurrent last-slot race allows exactly one customer hold.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F05",
+      "flow": "Reservation expires while payment pending; compensation void/refund",
+      "roles": [
+        "customer",
+        "finance",
+        "platform"
+      ],
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Cross-role journey described in the audit catalog; not yet executed as a named journey test.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F06",
+      "flow": "Client reschedules pickup and delivery; second new hold fails; old holds intact",
+      "roles": [
+        "customer",
+        "dispatcher"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Atomic two-leg reschedule preserves old holds when second leg fails.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F07",
+      "flow": "Cancel after dispatch before handoff → remove courier stop + lawful refund",
+      "roles": [
+        "customer",
+        "dispatcher",
+        "courier",
+        "finance"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Dispatcher cancellation after pickup assignment releases capacity.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F08",
+      "flow": "Cancelled order scanned later by offline courier → reject stale event",
+      "roles": [
+        "customer",
+        "courier",
+        "dispatcher"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Late courier intake on cancelled order rejected with 409.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F09",
+      "flow": "Customer missing at door → proof → operator rebooks without false custody",
+      "roles": [
+        "courier",
+        "dispatcher",
+        "customer"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Recipient unavailable keeps custody open and rebooks cleanly.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F10",
+      "flow": "Wrong seal at partner receipt → dispute pending, custody not transferred",
+      "roles": [
+        "courier",
+        "partner",
+        "dispatcher",
+        "support"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Wrong seal at partner receipt opens discrepancy and refuses custody transfer.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F11",
+      "flow": "Protected garment mislabelled and moves to another customer's batch → block",
+      "roles": [
+        "partner",
+        "dispatcher",
+        "claims"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Cross-customer active container/seal reuse blocked with 409 CUSTODY_CONFLICT.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F12",
+      "flow": "Partner weight adjustment accepted → revised invoice and processing",
+      "roles": [
+        "partner",
+        "customer",
+        "finance"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner adjustment accepted by customer updates invoice and advances to processing.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F13",
+      "flow": "Partner adjustment declined → return without processing + refund decision",
+      "roles": [
+        "partner",
+        "customer",
+        "courier",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner adjustment declined leads to return-unprocessed and voids invoice.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F14",
+      "flow": "QC failure → rewash → new ETA and notification → successful delivery",
+      "roles": [
+        "partner",
+        "dispatcher",
+        "courier",
+        "customer"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "QC failure returns to processing for rewash; second QC pass reaches ready.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F15",
+      "flow": "Partner outage → reassign pending contracted orders, custody safe",
+      "roles": [
+        "partner",
+        "dispatcher",
+        "admin"
+      ],
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Cross-role journey described in the audit catalog; not yet executed as a named journey test.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F16",
+      "flow": "Item lost while other items ready → partial delivery → claim and compensation",
+      "roles": [
+        "partner",
+        "courier",
+        "customer",
+        "claims",
+        "finance"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partial delivery + missing garment claim + compensation settlement verified.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F17",
+      "flow": "Customer recipient unavailable → secure return + repeat delivery",
+      "roles": [
+        "courier",
+        "dispatcher",
+        "customer"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Recipient unavailable -> repeat delivery succeeds with PIN proof.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F18",
+      "flow": "Customer reports missing item after closure → reopen claim + legal hold",
+      "roles": [
+        "customer",
+        "support",
+        "claims"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Post-delivery claim places legal hold and reopen preserves decision history.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F19",
+      "flow": "Phone/device revoked while courier offline → no unauthorized sync",
+      "roles": [
+        "courier",
+        "admin",
+        "platform"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Suspended courier rejected on subsequent offline scan sync.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F20",
+      "flow": "Offline scan captured → browser reload → reconnect unordered → dedup/conflict",
+      "roles": [
+        "courier",
+        "platform"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Duplicate offline scan events deduped cleanly.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F21",
+      "flow": "Partner B attempts partner A's manifest, evidence and finance dispute",
+      "roles": [
+        "partner",
+        "finance",
+        "security"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner B denied access to Partner A's order and mutations.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F22",
+      "flow": "Customer B attempts customer A's order, invoice, claim and media IDs",
+      "roles": [
+        "customer",
+        "security"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Customer B denied access to Customer A's order, finance, and claim.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F23",
+      "flow": "Refund two different keys simultaneously, both full; only one granted",
+      "roles": [
+        "finance",
+        "platform"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Two simultaneous full refunds grant only one under row locking.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F24",
+      "flow": "Refund and chargeback cross at ledger posting; no double payout",
+      "roles": [
+        "finance",
+        "platform"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Chargeback and compensation/refund race prevents double payout and preserves balanced ledger.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F25",
+      "flow": "Payment webhook duplicate and out-of-order; fiscal still pending until provider ACK",
+      "roles": [
+        "finance",
+        "platform"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Duplicate signed payment webhook deduped; fiscal receipt stays pending_registration.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F26",
+      "flow": "Partner disputes accrual and gets an approved credit note; history preserved",
+      "roles": [
+        "partner",
+        "finance"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner invoice line dispute + credit note approval preserves history and balances ledger.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F27",
+      "flow": "Compensation proposed by support → dual-approved finance → fake settlement",
+      "roles": [
+        "support",
+        "finance",
+        "customer"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Support compensation proposal -> finance approval -> settlement verified.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F28",
+      "flow": "Data deletion request during active claim hold; lawful held data remains",
+      "roles": [
+        "customer",
+        "support",
+        "admin",
+        "privacy"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Legal hold blocks deletion of held evidence during open claim.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F29",
+      "flow": "Admin revokes role and session mid-request; next mutation fails",
+      "roles": [
+        "admin",
+        "security",
+        "platform"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Admin role/session revocation takes immediate effect.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F30",
+      "flow": "Two admins concurrently attempt to remove last active admin; lockout prevented",
+      "roles": [
+        "admin",
+        "security"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Concurrent last-admin revocation prevents lockout.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F31",
+      "flow": "Routing engine unavailable; manual plan with true data, no fictitious ETA",
+      "roles": [
+        "dispatcher",
+        "courier"
+      ],
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "External routing engine is not integrated.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F32",
+      "flow": "Large night/off-schedule request exceeds safe route capacity; no charge",
+      "roles": [
+        "customer",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Cross-role journey described in the audit catalog; not yet executed as a named journey test.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F33",
+      "flow": "Disaster recovery: migrate, pay(fake), claim, backup, destroy, restore, reconcile",
+      "roles": [
+        "platform",
+        "finance",
+        "support"
+      ],
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "Off-host disaster recovery backup/destroy/restore requires external PostgreSQL host.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F34",
+      "flow": "Two tenants share phone number; sessions/orders/media/ledger cannot cross",
+      "roles": [
+        "customer",
+        "admin",
+        "security"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Same phone across two tenants cannot cross-read sessions or orders.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F35",
+      "flow": "Public guest tracking guesses wrong phone; no order existence or PII leak",
+      "roles": [
+        "guest",
+        "security"
+      ],
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Public guest tracking anti-enumeration hides order existence and PII.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    },
+    {
+      "id": "F36",
+      "flow": "Realistic multi-house pickup load: route, partner capacity, SLA margin and returns",
+      "roles": [
+        "customer",
+        "courier",
+        "partner",
+        "dispatcher",
+        "finance"
+      ],
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Cross-role journey described in the audit catalog; not yet executed as a named journey test.",
+      "previous_status": "NOT_RUN_CURRENT_HEAD"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "AU-001",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Anonymous home/building landing",
+      "required_acceptance": "Shows supported locations and service terms without exposing private orders",
+      "status": "BROWSER_PASS",
+      "evidence": [
+        "scripts/smoke-e2e.mjs"
+      ],
+      "note": "Verified landing renders without leaking private orders in Playwright smoke."
+    },
+    {
+      "id": "AU-002",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "QR referral/building entry",
+      "required_acceptance": "Opaque token resolves to allowed building; arbitrary token cannot reveal customer data",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AU-003",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Address availability before account",
+      "required_acceptance": "Shows eligible service zone, timezone and windows without assuming eligibility",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AU-004",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Guest quote preview",
+      "required_acceptance": "Clearly labels estimates and requires login/verification before committing customer order",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AU-005",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "OTP request",
+      "required_acceptance": "Sends challenge only through approved provider, rate-limited per IP/phone; never logs code",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/otp.test.ts",
+        "test/api/otp-rate-limit.test.ts"
+      ],
+      "note": "OTP request stores hash only, enforces per-phone/IP rate limits, and is absent in production."
+    },
+    {
+      "id": "AU-006",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "OTP verify",
+      "required_acceptance": "One valid unexpired single-use code establishes a scoped session; repeated/wrong attempt denied",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/otp.test.ts"
+      ],
+      "note": "Single-use OTP verification establishes scoped session and rejects replay/wrong code."
+    },
+    {
+      "id": "AU-007",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "OTP brute force",
+      "required_acceptance": "Attempt counter, cooldown and abuse alerts do not disclose whether phone exists",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/otp.test.ts",
+        "test/api/otp-rate-limit.test.ts"
+      ],
+      "note": "Bounded attempts and cooldowns prevent OTP brute force without phone enumeration."
+    },
+    {
+      "id": "AU-008",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Concurrent OTP challenges",
+      "required_acceptance": "Only the current valid challenge/approved policy succeeds once",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/otp.test.ts"
+      ],
+      "note": "Concurrent OTP challenges honor only the current active challenge once."
+    },
+    {
+      "id": "AU-009",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Session logout and revocation",
+      "required_acceptance": "Logout prevents new mutations; all tabs reflect revoked state",
+      "status": "API_PASS",
+      "evidence": [
+        "test/security-regressions.integration.test.ts"
+      ],
+      "note": "Logout revokes session token immediately and blocks subsequent mutations."
+    },
+    {
+      "id": "AU-010",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Multiple active devices",
+      "required_acceptance": "User can list/revoke only own sessions; lost device access blocked promptly",
+      "status": "API_PASS",
+      "evidence": [
+        "test/security-regressions.integration.test.ts",
+        "test/api/admin-member-state.test.ts"
+      ],
+      "note": "Users list and revoke only their own sessions."
+    },
+    {
+      "id": "AU-011",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Role invitation",
+      "required_acceptance": "Staff role assigned only by permitted admin and invitation; no self-grant or arbitrary role flag",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/admin-member-state.test.ts",
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Role assignment restricted to platform_admin with audit trail."
+    },
+    {
+      "id": "AU-012",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Suspended user",
+      "required_acceptance": "All API and offline reconnect actions reject suspended membership",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/admin-member-state.test.ts"
+      ],
+      "note": "Suspending a member revokes active sessions and blocks API/offline scan sync."
+    },
+    {
+      "id": "AU-013",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Preview-mode access",
+      "required_acceptance": "Dedicated isolated demo tenant requires preview gate; no public role picker with real data",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/preview-unlock.test.ts",
+        "test/preview-profile.integration.test.ts"
+      ],
+      "note": "Isolated preview mode enforces server-side role allowlist and gate."
+    },
+    {
+      "id": "AU-014",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Missing phone provider",
+      "required_acceptance": "Registration blocked visibly, never pretends SMS sent",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "External SMS carrier provider is not integrated; fake OTP surface refuses to run in production."
+    },
+    {
+      "id": "AU-015",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Cross-org identity",
+      "required_acceptance": "Same phone in multiple orgs cannot leak memberships, sessions or orders",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Same phone across Org A and Org B cannot cross-read orders or sessions."
+    },
+    {
+      "id": "AU-016",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Account recovery",
+      "required_acceptance": "Re-verification and audit; no insecure phone-only role escalation",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AU-017",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P0",
+      "scenario": "Guest order tracking",
+      "required_acceptance": "Public number + authorized verification yields minimal status; wrong phone indistinguishable from missing",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Public guest tracking returns identical 404 on wrong phone vs missing order and leaks no PII."
+    },
+    {
+      "id": "AU-018",
+      "role_area": "AU — Guest and authentication",
+      "priority": "P1",
+      "scenario": "Accessibility and localization",
+      "required_acceptance": "Keyboard/mobile auth with Russian errors, labels, and reduced-motion behavior",
+      "status": "BROWSER_PASS",
+      "evidence": [
+        "scripts/verify-mobile-ui.mjs"
+      ],
+      "note": "Mobile/desktop UI verified with Russian labels and accessible auth flow."
+    },
+    {
+      "id": "CU-001",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "First order onboarding",
+      "required_acceptance": "Verified customer adds an eligible address and sees transparent next steps",
+      "status": "BROWSER_PASS",
+      "evidence": [
+        "scripts/smoke-e2e.mjs"
+      ],
+      "note": "Customer onboarding and first order flow executed end-to-end in Playwright."
+    },
+    {
+      "id": "CU-002",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Multiple addresses",
+      "required_acceptance": "Add/change/remove own addresses, validate building/entrance and references",
+      "status": "API_PASS",
+      "evidence": [
+        "test/scenarios/critical.integration.test.ts",
+        "test/customer-lifecycle.integration.test.ts"
+      ],
+      "note": "Customer address book CRUD isolated strictly to own customerId."
+    },
+    {
+      "id": "CU-003",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Building unsupported",
+      "required_acceptance": "No order/charge; provide honest unavailable state and alternative",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CU-004",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Economy wash by weight",
+      "required_acceptance": "Quote minor units and minimum rounding correct; bag-level evidence disclosure",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Economy weight-based quote, rounding, and bag intake verified."
+    },
+    {
+      "id": "CU-005",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Protected item-by-item",
+      "required_acceptance": "Item card, declared condition and agreed procedures recorded before intake",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Protected item-by-item intake, itemized QC, and exact-set delivery verified."
+    },
+    {
+      "id": "CU-006",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Mixed Economy and Protected",
+      "required_acceptance": "Two separate logical/physical containers; billed accurately and traced separately",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Mixed economy bag + protected garment separated and enforced at intake."
+    },
+    {
+      "id": "CU-007",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Service catalog restrictions",
+      "required_acceptance": "Unwashable and excluded categories blocked with specific explanation",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CU-008",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer chooses free shared pickup/delivery",
+      "required_acceptance": "Both legs hold capacity and fees are zero under versioned tariff",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Free shared pickup and delivery windows hold capacity with zero surcharge."
+    },
+    {
+      "id": "CU-009",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer chooses individual pickup",
+      "required_acceptance": "Feasible exception shown +500 RUB illustrative; explicit acceptance and unique fee line",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Individual off-schedule pickup adds explicit surcharge line."
+    },
+    {
+      "id": "CU-010",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer chooses individual return",
+      "required_acceptance": "Feasible delivery exception has separate consent and fee line",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Individual off-schedule delivery adds separate surcharge line."
+    },
+    {
+      "id": "CU-011",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Both paid exceptions",
+      "required_acceptance": "Two independent fee lines; no duplicates on retry or payment timeout",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Both off-schedule exceptions produce two unique fee lines without duplication on retry."
+    },
+    {
+      "id": "CU-012",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Quote expires or price changes",
+      "required_acceptance": "Cannot confirm stale hash/terms; re-quote and consent required",
+      "status": "API_PASS",
+      "evidence": [
+        "test/order-flow.integration.test.ts"
+      ],
+      "note": "Expired or mismatched quote hash/terms rejected on order creation."
+    },
+    {
+      "id": "CU-013",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Last-slot race",
+      "required_acceptance": "Only one booking succeeds with exact availability; no orphan charge",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Concurrent last-slot race and safety_buffer_orders allow exact capacity without oversell."
+    },
+    {
+      "id": "CU-014",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Checkout network timeout",
+      "required_acceptance": "Retry same request key resumes exactly one order and payment obligation",
+      "status": "API_PASS",
+      "evidence": [
+        "test/order-flow.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Idempotency key replay returns same result; mismatched payload rejected with 409."
+    },
+    {
+      "id": "CU-015",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Fake payment declined/authorized/captured",
+      "required_acceptance": "Status distinct from actual fiscal receipt; no false paid banner",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/finance-capture-invoice-state.test.ts",
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Fake payment capture distinguishes paid invoice from pending_registration fiscal state."
+    },
+    {
+      "id": "CU-016",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Invoice/receipt download",
+      "required_acceptance": "Customer may print signed provisional document; full legal requisites or blocked disclaimer",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/documents.test.ts"
+      ],
+      "note": "Printable provisional documents carry explicit non-54-FZ disclaimer and object-level scoping."
+    },
+    {
+      "id": "CU-017",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Order history and timeline",
+      "required_acceptance": "Shows only own orders and sanitized events on desktop/mobile",
+      "status": "API_PASS",
+      "evidence": [
+        "test/customer-lifecycle.integration.test.ts",
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Customer order list and timeline scoped strictly to own orders."
+    },
+    {
+      "id": "CU-018",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Reschedule two legs",
+      "required_acceptance": "Atomic swap preserves old booking on failed second leg and sends notice",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Atomic two-leg reschedule preserves old holds if second leg fails."
+    },
+    {
+      "id": "CU-019",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Cancel before dispatch",
+      "required_acceptance": "Release capacity, compute lawful refund/fees, preserve audit history",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Cancellation releases held/confirmed capacity and blocks late intake."
+    },
+    {
+      "id": "CU-020",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Cancel after pickup",
+      "required_acceptance": "Returns possessions with custody proof, legal policy decision and independent refund",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CU-021",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Partner proposes additional service",
+      "required_acceptance": "Customer sees delta, reason, expiry, and choices without forced charge",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner adjustment proposal requires explicit customer consent without forced charge."
+    },
+    {
+      "id": "CU-022",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer accepts adjustment",
+      "required_acceptance": "Versioned consent binds new price and processing; updated invoice/payment reconcile",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Accepted adjustment binds versioned consent and updates invoice total."
+    },
+    {
+      "id": "CU-023",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Customer declines adjustment",
+      "required_acceptance": "No processing under altered terms; return-unprocessed is an actionable path",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/partner-return-unprocessed.test.ts"
+      ],
+      "note": "Declined adjustment leads to return-unprocessed and cancels open invoice."
+    },
+    {
+      "id": "CU-024",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Delivery tracking and ETA change",
+      "required_acceptance": "Shows real state not fabricated route ETA; notifies delays",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CU-025",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Delivery to wrong recipient",
+      "required_acceptance": "Proof/recipient mismatch blocks closure and opens incident",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CU-026",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Missing or damaged garment",
+      "required_acceptance": "Claim linked to correct item, custody, evidence and statutory remedy review",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Missing/damaged garment claim links garment, places evidence on legal hold, and settles compensation."
+    },
+    {
+      "id": "CU-027",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Partial delivery then recovery",
+      "required_acceptance": "Outstanding garment visible, reattempt order created and one final reconciliation",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partial delivery tracks delivered vs missing garments without false full delivery."
+    },
+    {
+      "id": "CU-028",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Request cancellation/refund dispute",
+      "required_acceptance": "Clear support SLA and ledger/fiscal references; no self-issued refund",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CU-029",
+      "role_area": "CU — Customer",
+      "priority": "P0",
+      "scenario": "Review after real delivery",
+      "required_acceptance": "Only eligible delivered order reviewed, moderation reason and audit visible",
+      "status": "API_PASS",
+      "evidence": [
+        "test/support-reviews.integration.test.ts"
+      ],
+      "note": "Reviews allowed only for eligible completed orders with audited moderation."
+    },
+    {
+      "id": "CU-030",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Support conversation",
+      "required_acceptance": "Create own-order ticket, respond, reopen and preserve message history",
+      "status": "API_PASS",
+      "evidence": [
+        "test/support-reviews.integration.test.ts"
+      ],
+      "note": "Support threads scoped to own orders with immutable message history."
+    },
+    {
+      "id": "CU-031",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Notification preferences",
+      "required_acceptance": "Opt-ins and transactional essential notices separated; failed delivery honest",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CU-032",
+      "role_area": "CU — Customer",
+      "priority": "P1",
+      "scenario": "Repeat order",
+      "required_acceptance": "Prepopulate old service but require new tariff, quote and capacity acceptance",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/repeat-order.test.ts"
+      ],
+      "note": "Repeat order prepopulates prior lines while requiring fresh quote and capacity."
+    },
+    {
+      "id": "CO-001",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Accept assigned shift",
+      "required_acceptance": "Authenticated courier sees only own valid shift and vehicle",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Courier opens and queries own active shift."
+    },
+    {
+      "id": "CO-002",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Reject conflicting shift",
+      "required_acceptance": "Overlapping shift/vehicle assignment safely blocked",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-003",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Assigned stop list",
+      "required_acceptance": "Only assigned active pickup/return stops, ordered by real route and windows",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Courier stop list scoped strictly to assigned active stops."
+    },
+    {
+      "id": "CO-004",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Route navigation",
+      "required_acceptance": "Valid real building location and road route; no hashed synthetic distances",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "External geocoding and road-network routing provider not integrated."
+    },
+    {
+      "id": "CO-005",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Arrive at stop",
+      "required_acceptance": "Assigned actor and shift, version guard, exact arrival audit",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Stop start/arrive transitions enforce assigned courier and optimistic version."
+    },
+    {
+      "id": "CO-006",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Customer absent for pickup",
+      "required_acceptance": "Failed attempt with reason and rebook path; no false custody transfer",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-007",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Locked entrance / denied access",
+      "required_acceptance": "Operator incident and consent-safe contact fallback",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-008",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Scan order QR",
+      "required_acceptance": "Opaque signed/validated identifier, no secrets/PII encoded, assignment checked",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-009",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Scan bag and seal",
+      "required_acceptance": "Container and seal belong to same assigned order, unique and available",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Active container and seal reuse blocked across orders within tenant; allowed across tenants."
+    },
+    {
+      "id": "CO-010",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Economy bag weigh",
+      "required_acceptance": "Scale/manual fallback recorded, numeric bounds checked, customer confirms bag count",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Economy bag weight recorded with bounds validation and dual confirmation."
+    },
+    {
+      "id": "CO-011",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Protected condition capture",
+      "required_acceptance": "Item scan, care labels and private photos linked to signed manifest",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/garment-picker.test.ts",
+        "test/custody-proof.integration.test.ts"
+      ],
+      "note": "Protected item taxonomy subtype and evidence linked to signed manifest."
+    },
+    {
+      "id": "CO-012",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Mixed order pickup",
+      "required_acceptance": "Protected and Economy items physically separated and recorded",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Mixed intake enforces separated economy bag and protected item codes."
+    },
+    {
+      "id": "CO-013",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Two-party handoff",
+      "required_acceptance": "Customer and courier independently confirm manifest/version/weight/ID",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Two-party handoff requires customer/courier confirmation and handoff PIN."
+    },
+    {
+      "id": "CO-014",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Customer disputes count",
+      "required_acceptance": "No automatic acceptance; incident, pending custody and documented resolution",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-015",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Camera permission denied",
+      "required_acceptance": "Manual code entry with equal server validation",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "Device camera permission denial requires physical/emulated camera hardware harness."
+    },
+    {
+      "id": "CO-016",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Offline store then page reload",
+      "required_acceptance": "Queue persists, explicit UNSYNCED state; no remote-success claim",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-017",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Offline out-of-order events",
+      "required_acceptance": "Server validates state/version and responds per-event acceptance/conflict",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-018",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Duplicate or modified scan replay",
+      "required_acceptance": "Idempotent once; changed payload/hash/actor/device fails",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Duplicate offline scan events deduped by clientEventId and payloadHash."
+    },
+    {
+      "id": "CO-019",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Device stolen or reassigned",
+      "required_acceptance": "Revoked device cannot post new scans; old queued scans segregated",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Suspended courier/device rejected with 401 on subsequent scan sync."
+    },
+    {
+      "id": "CO-020",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Transfer to hub/partner",
+      "required_acceptance": "Receiver co-signs, broken seal/missing bag blocks auto custody",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Partner handoff verifies seal and weight; mismatch or broken seal blocks custody transfer."
+    },
+    {
+      "id": "CO-021",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Pickup after cancellation",
+      "required_acceptance": "Old stop assignment invalidated; no custody event created",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Late intake on cancelled order rejected with 409."
+    },
+    {
+      "id": "CO-022",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Delivery manifest pickup",
+      "required_acceptance": "Only ready accounted containers assigned to driver",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-023",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Delivery to customer",
+      "required_acceptance": "Recipient proof tied to correct package/item set",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Delivery requires recipient PIN proof and exact garment set."
+    },
+    {
+      "id": "CO-024",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "No-answer delivery",
+      "required_acceptance": "Secure custody kept; return/reattempt slot and exception created",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Recipient unavailable keeps custody open and allows repeat delivery attempt."
+    },
+    {
+      "id": "CO-025",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Customer refuses delivery",
+      "required_acceptance": "Reason and return-to-hub workflow; no delivered status",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-026",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Partial delivery",
+      "required_acceptance": "Outstanding items/containers and next stop created without double delivered state",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partial delivery records delivered subset without falsely marking order delivered."
+    },
+    {
+      "id": "CO-027",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Shift abruptly abandoned",
+      "required_acceptance": "Dispatcher alerted; remaining stops reassigned with new permission boundary",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-028",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Complete shift and reconcile",
+      "required_acceptance": "No unresolved physical custody or unsynced scans silently ignored",
+      "status": "API_PASS",
+      "evidence": [
+        "test/operations.integration.test.ts"
+      ],
+      "note": "Shift completion reconciles active stops and scan state."
+    },
+    {
+      "id": "CO-029",
+      "role_area": "CO — Courier and driver",
+      "priority": "P0",
+      "scenario": "Driver transport-only mode",
+      "required_acceptance": "No protected item edit or finance access; minimal location/contact data",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "CO-030",
+      "role_area": "CO — Courier and driver",
+      "priority": "P1",
+      "scenario": "Battery/network failure mid-confirm",
+      "required_acceptance": "Resume with same idempotency, no phantom handoff",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-001",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner account/login",
+      "required_acceptance": "Only invited assigned partner members access partner portal",
+      "status": "API_PASS",
+      "evidence": [
+        "test/track2a-finance-partner.integration.test.ts"
+      ],
+      "note": "Partner portal routes enforce partner role and server-bound partnerId."
+    },
+    {
+      "id": "PA-002",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Expected inbound queue",
+      "required_acceptance": "Shows only orders explicitly assigned to this partner",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner inbound receipts restricted to explicitly assigned partner orders."
+    },
+    {
+      "id": "PA-003",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Order unassigned or belongs to partner B",
+      "required_acceptance": "No claim by first scan; safe 404 and audit",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner B receives 404 on Partner A orders and cannot mutate them."
+    },
+    {
+      "id": "PA-004",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Receipt by bag and seal",
+      "required_acceptance": "Independent receiver scan matches courier manifest and transfer proof",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner receipt matches container/seal manifest before accepting custody."
+    },
+    {
+      "id": "PA-005",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Broken or reused seal",
+      "required_acceptance": "Incident and hold, no silent accept",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Broken seal rejects custody transfer with 409 and persists durable custody_discrepancies row."
+    },
+    {
+      "id": "PA-006",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Weight discrepancy",
+      "required_acceptance": "Measured vs expected stored; price delta needs customer consent",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts",
+        "test/api/weight-variance.test.ts"
+      ],
+      "note": "Underweight/overweight variance flags weight_mismatch incident and proposes adjustment."
+    },
+    {
+      "id": "PA-007",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Wrong bag in batch",
+      "required_acceptance": "Cross-order or partner mismatch rejected before processing",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Wrong bag/seal at receipt opens discrepancy without transferring custody."
+    },
+    {
+      "id": "PA-008",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Protected item condition inspection",
+      "required_acceptance": "Care label, known defects and evidence associated with each item",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-009",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Unsupported cleaning method",
+      "required_acceptance": "Request customer decision or return-unprocessed without substitute method",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/partner-return-unprocessed.test.ts"
+      ],
+      "note": "Partner proposes adjustment or returns order unprocessed without unauthorized substitute work."
+    },
+    {
+      "id": "PA-010",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Customer approves change",
+      "required_acceptance": "Immutable updated price/technology consent and invoice/reconciliation",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Customer approval advances order to processing and updates invoice."
+    },
+    {
+      "id": "PA-011",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Customer refuses change",
+      "required_acceptance": "No new work, safe packing/return task, refund review",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/partner-return-unprocessed.test.ts"
+      ],
+      "note": "Customer refusal enables return-unprocessed and voids open invoice."
+    },
+    {
+      "id": "PA-012",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Inspection while customer unreachable",
+      "required_acceptance": "Hold pending approval, SLA timer and escalation; no default consent",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-013",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Create processing batch",
+      "required_acceptance": "Only accepted assigned garments; record recipe/technician/start time",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Processing batch restricted to assigned inspected order."
+    },
+    {
+      "id": "PA-014",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Batch across multiple orders",
+      "required_acceptance": "Item identities preserved, no mixup of two customers",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-015",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partial batch completion",
+      "required_acceptance": "Remaining items tracked; cannot mark entire order ready",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-016",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "QC passes all items",
+      "required_acceptance": "Exact expected set and bag-level rules satisfied before packing",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "QC pass transitions order to ready for delivery."
+    },
+    {
+      "id": "PA-017",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "QC fails / needs rewash",
+      "required_acceptance": "State returns to processing, no unjustified customer fee, ETA updated",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "QC failure returns order to processing for rewash before second QC pass."
+    },
+    {
+      "id": "PA-018",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Lost item after processing",
+      "required_acceptance": "Mark missing, seal evidence, claim and partial fulfillment; cannot silently close",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-019",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Damage discovered in processing",
+      "required_acceptance": "Evidence, incident and authorized compensation analysis",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-020",
+      "role_area": "PA — Laundry partner",
+      "priority": "P1",
+      "scenario": "Ready-for-return packing",
+      "required_acceptance": "Verified output manifest, new bag/seal and courier receiving proof",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-021",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner unavailable or SLA breach",
+      "required_acceptance": "Dispatcher gets escalated backlog; customer revised schedule/compensation",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "PA-022",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner invoice period",
+      "required_acceptance": "Only own accruals, immutable contract price version and correct quantity",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/track2a-finance-partner.integration.test.ts"
+      ],
+      "note": "Partner period invoice accrues only own contracted lines."
+    },
+    {
+      "id": "PA-023",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner disputes line",
+      "required_acceptance": "Only own line, evidence and separate credit note approval",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partner disputes own invoice line and finance approves separate credit note."
+    },
+    {
+      "id": "PA-024",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner finance vs operator",
+      "required_acceptance": "Operator cannot see platform-wide revenue or other partners' invoices",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/finance-overview.test.ts",
+        "test/track2a-finance-partner.integration.test.ts"
+      ],
+      "note": "Partner operators cannot read platform-wide finance or other partners' accruals."
+    },
+    {
+      "id": "PA-025",
+      "role_area": "PA — Laundry partner",
+      "priority": "P0",
+      "scenario": "Partner operator leaves company",
+      "required_acceptance": "Session/device revoked and pending tasks safely reassigned",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/admin-member-state.test.ts"
+      ],
+      "note": "Suspended partner staff member loses session immediately."
+    },
+    {
+      "id": "DI-001",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Read dashboard",
+      "required_acceptance": "Shows scoped queues/counts without customer sensitive fields",
+      "status": "API_PASS",
+      "evidence": [
+        "test/operations.integration.test.ts",
+        "test/api/chronometry.test.ts"
+      ],
+      "note": "Dispatch overview returns tenant-scoped queues and metrics."
+    },
+    {
+      "id": "DI-002",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Create/configure building windows",
+      "required_acceptance": "Geography, shifts and capacity verified; changes audited",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-003",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Capacity concurrent booking",
+      "required_acceptance": "No oversell despite two customers; stale counters reconciled",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/slot-postgres.integration.test.ts"
+      ],
+      "note": "Concurrent bookings cannot oversell window capacity; reconciliation detects drift."
+    },
+    {
+      "id": "DI-004",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Plan courier shift",
+      "required_acceptance": "Vehicle, person, legal working hours and region compatible",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-005",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Assign pickup to courier",
+      "required_acceptance": "Exactly one active stop, correct order state and shift",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Dispatcher assigns pickup to active courier shift with state/version checks."
+    },
+    {
+      "id": "DI-006",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Assign laundry partner",
+      "required_acceptance": "Partner contract/zone/capacity check precedes partner receipt",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Dispatcher assigns order to partner before partner receipt is permitted."
+    },
+    {
+      "id": "DI-007",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Grouped house pickup",
+      "required_acceptance": "Cluster compatible windows without fake distance claims",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-008",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Optimized route proposal",
+      "required_acceptance": "Real geocoding/matrix, window/weight feasibility, auditable comparison",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "External geocoding and route-matrix optimizer not integrated."
+    },
+    {
+      "id": "DI-009",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Manual route override",
+      "required_acceptance": "Versioned planner reason, valid handoffs, no silent custody edit",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-010",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Router/optimizer outage",
+      "required_acceptance": "Fall back to safe manual plan without misleading ETA",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "External routing engine outage fallback requires external routing integration."
+    },
+    {
+      "id": "DI-011",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Late courier",
+      "required_acceptance": "Customer notified and dispatcher offered reassignment/reschedule",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-012",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Courier no-show",
+      "required_acceptance": "Assigned stops requeued and legal off-schedule fee waived if operator fault",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-013",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Customer no-show",
+      "required_acceptance": "Proof/attempt and lawful policy, no invented penalty",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-014",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Reassign stop after shift cancelled",
+      "required_acceptance": "Previous device loses access, queued scans reconciled",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-015",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Partner rejects inbound handoff",
+      "required_acceptance": "Incident assigned, custody remains with correct holder",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Partner handoff discrepancy opens incident and preserves prior custody holder."
+    },
+    {
+      "id": "DI-016",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Partner SLA breach",
+      "required_acceptance": "Capacity and downstream return plans updated",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-017",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Protected special delivery",
+      "required_acceptance": "Premium capacity and second charge/consent tied to actual route",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-018",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Partial delivery recovery",
+      "required_acceptance": "Outstanding garments/containers generate a real next stop",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partial delivery tracks remaining garments for recovery."
+    },
+    {
+      "id": "DI-019",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Recipient unavailable",
+      "required_acceptance": "Safe storage, reattempt window and customer contact",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Recipient unavailable allows dispatcher to schedule repeat delivery."
+    },
+    {
+      "id": "DI-020",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Returns without processing",
+      "required_acceptance": "Physical return chain created after declined adjustment",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/partner-return-unprocessed.test.ts"
+      ],
+      "note": "Declined adjustment transitions cleanly to return-unprocessed."
+    },
+    {
+      "id": "DI-021",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "No supported partner available",
+      "required_acceptance": "Do not sell booking; operational exception with clear customer response",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-022",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Safety and physical custody anomaly",
+      "required_acceptance": "Stop processing, create claim/investigation and audit resolution",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-023",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P0",
+      "scenario": "Cross-city dispatcher",
+      "required_acceptance": "Cannot silently access unrelated tenant/city or partner contracts",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "DI-024",
+      "role_area": "DI — Dispatcher and operations",
+      "priority": "P1",
+      "scenario": "Dispatch completion metrics",
+      "required_acceptance": "Real on-time %, cost per stop and backlogs from persisted events",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/chronometry.test.ts",
+        "test/api/churn-signal.test.ts"
+      ],
+      "note": "Chronometry and churn metrics computed from persisted domain events."
+    },
+    {
+      "id": "SU-001",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Search customer by public number",
+      "required_acceptance": "Scoped exact match with minimal customer contact fields",
+      "status": "API_PASS",
+      "evidence": [
+        "test/support-reviews.integration.test.ts"
+      ],
+      "note": "Support order search scoped to tenant with minimal contact fields."
+    },
+    {
+      "id": "SU-002",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Open support thread",
+      "required_acceptance": "References an owned order and immutable participant trail",
+      "status": "API_PASS",
+      "evidence": [
+        "test/support-reviews.integration.test.ts"
+      ],
+      "note": "Support threads bind to owned orders with immutable participant trail."
+    },
+    {
+      "id": "SU-003",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Respond to ticket",
+      "required_acceptance": "Correct participant, no cross-tenant messages, audit timestamp",
+      "status": "API_PASS",
+      "evidence": [
+        "test/support-reviews.integration.test.ts"
+      ],
+      "note": "Support replies enforce participant and tenant isolation."
+    },
+    {
+      "id": "SU-004",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Close/reopen thread",
+      "required_acceptance": "Permissions and state history preserved",
+      "status": "API_PASS",
+      "evidence": [
+        "test/support-reviews.integration.test.ts"
+      ],
+      "note": "Closing support threads requires reason and preserves history."
+    },
+    {
+      "id": "SU-005",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Open missing-item claim",
+      "required_acceptance": "References only real garment of order; legal hold on its assets",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Missing-item claim validates order garment ownership and places legal hold on evidence."
+    },
+    {
+      "id": "SU-006",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Open damage claim",
+      "required_acceptance": "Retains pre-intake and post-QC evidence and treatment history",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Damage claim retains delivery proof under legal hold during investigation."
+    },
+    {
+      "id": "SU-007",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Claim without photos",
+      "required_acceptance": "Accept statutory complaint, request further evidence without unlawful blanket refusal",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "SU-008",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Cross-order evidence ID",
+      "required_acceptance": "Reject object-level references, no exposure of storage keys",
+      "status": "API_PASS",
+      "evidence": [
+        "test/security/evidence-abac.integration.test.ts"
+      ],
+      "note": "Cross-order/cross-customer evidence IDs rejected and storage keys never exposed."
+    },
+    {
+      "id": "SU-009",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Investigation assignment",
+      "required_acceptance": "Case-based role access with expiry and access audit",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "SU-010",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Decision and rationale",
+      "required_acceptance": "Approver authorized; prior decisions immutable, support cannot self-approve",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Claim decisions require claims_approver/admin role and rationale; customer cannot self-approve."
+    },
+    {
+      "id": "SU-011",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Appeal/reopen",
+      "required_acceptance": "Adds revision and review, never overwrites previous denial",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Reopening a decided claim preserves prior decision revisions."
+    },
+    {
+      "id": "SU-012",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Partial lost/returned items",
+      "required_acceptance": "Physical exception and financial remedy linked without forced closure",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Partial delivery + missing item claim links physical exception with compensation."
+    },
+    {
+      "id": "SU-013",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Compensation proposal",
+      "required_acceptance": "Support recommends, finance approves and payout separate",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Support proposes compensation; finance separately approves and settles."
+    },
+    {
+      "id": "SU-014",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Customer retracts consent",
+      "required_acceptance": "Consent record and lawful retention hold handled correctly",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "SU-015",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Evidence export",
+      "required_acceptance": "Justified access, short-lived URL, watermark and audit, no partner-wide leak",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "SU-016",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Retention expiry while case open",
+      "required_acceptance": "Legal hold prevents deletion and grants are time bounded",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Active legal hold blocks evidence deletion with 409."
+    },
+    {
+      "id": "SU-017",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Customer requests data deletion",
+      "required_acceptance": "Lawful retention matrix, erase only unheld data with export/audit",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "SU-018",
+      "role_area": "SU — Support and claims",
+      "priority": "P0",
+      "scenario": "Response SLA escalation",
+      "required_acceptance": "Reminders and assignment on overdue ticket without fabricated delivery",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "SU-019",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Suspicious repeat claims",
+      "required_acceptance": "Fraud signal informs review, never auto-denies statutory claim",
+      "status": "API_PASS",
+      "evidence": [
+        "test/admin-fraud.integration.test.ts"
+      ],
+      "note": "Fraud signals queue surfaces review items without auto-denying claims."
+    },
+    {
+      "id": "SU-020",
+      "role_area": "SU — Support and claims",
+      "priority": "P1",
+      "scenario": "Support employee leaves",
+      "required_acceptance": "Revoke case access/session while preserving case audit",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "FI-001",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "See finance dashboard",
+      "required_acceptance": "Only finance staff, real scoped amounts, no unapproved metrics",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/finance-overview.test.ts",
+        "test/api/analytics.test.ts"
+      ],
+      "note": "Finance dashboard/analytics restricted to finance roles and tenant-scoped."
+    },
+    {
+      "id": "FI-002",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Quote and invoice",
+      "required_acceptance": "Line totals, version snapshots, tax/legal label and rounding match",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Customer invoice lines and totals match immutable quote snapshot."
+    },
+    {
+      "id": "FI-003",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Fake payment capture",
+      "required_acceptance": "One obligation/one posting; no real-acquiring claim",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/finance-capture-invoice-state.test.ts"
+      ],
+      "note": "Fake payment capture posts balanced clearing/advances journal once."
+    },
+    {
+      "id": "FI-004",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Duplicate capture with new key",
+      "required_acceptance": "Unique obligation guard prevents second payment",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/finance-capture-invoice-state.test.ts"
+      ],
+      "note": "Duplicate capture with a new key refused with FINANCIAL_HOLD."
+    },
+    {
+      "id": "FI-005",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Provider webhook validation",
+      "required_acceptance": "Verified signature, timestamp/replay and intent/tenant/amount mapping",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/payment-inbox.integration.test.ts"
+      ],
+      "note": "HMAC-SHA256 webhook signature verified and tenant derived from stored intent."
+    },
+    {
+      "id": "FI-006",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Provider event retried",
+      "required_acceptance": "Exactly-once business posting and no extra fiscal document",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/payment-inbox.integration.test.ts"
+      ],
+      "note": "Retried provider webhook event deduped without extra postings or fiscal rows."
+    },
+    {
+      "id": "FI-007",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Provider event delayed/out of order",
+      "required_acceptance": "State machine defers/applies safely with reconciliation",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "FI-008",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Two simultaneous refunds",
+      "required_acceptance": "Sum never exceeds net captured under row locking",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Two concurrent full refunds serialized via row lock; only one succeeds."
+    },
+    {
+      "id": "FI-009",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Refund and chargeback race",
+      "required_acceptance": "Financial hold prevents double payout and records provider truth",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Chargeback marks intent disputed and blocks subsequent double-payout refund."
+    },
+    {
+      "id": "FI-010",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Partial service refund",
+      "required_acceptance": "Unrendered service credited, delivered portion accounted and consent preserved",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "FI-011",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Cancellation fees",
+      "required_acceptance": "Only legal documented costs; off-schedule failure refunded if operator fault",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "FI-012",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Price adjustment accepted",
+      "required_acceptance": "New invoice line/debit note posted only after consent and service",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Accepted price adjustment adds consented line to customer invoice."
+    },
+    {
+      "id": "FI-013",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Price adjustment declined",
+      "required_acceptance": "No delta charge; cancellation/return and refund examined",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/partner-return-unprocessed.test.ts"
+      ],
+      "note": "Declined adjustment incurs no delta charge and cancels open invoice on return."
+    },
+    {
+      "id": "FI-014",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Ledger journal balance",
+      "required_acceptance": "Every journal balanced, immutable entries, idempotent posting and reversals",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Every ledger journal verified balanced (sum debits === sum credits)."
+    },
+    {
+      "id": "FI-015",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Customer invoice PDF/print",
+      "required_acceptance": "Correct customer and legal requisites, demo label where applicable",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/documents.test.ts"
+      ],
+      "note": "Customer invoice document carries legal requisites and non-fiscal disclaimer."
+    },
+    {
+      "id": "FI-016",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Fiscal receipt pending",
+      "required_acceptance": "Explicit pending until KKT/OFD provider ack; failed/retry alert",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "Real 54-FZ KKT/OFD fiscal hardware/provider ACK is not connected; stub stays pending_registration."
+    },
+    {
+      "id": "FI-017",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Fiscal refund/correction",
+      "required_acceptance": "Independent lawful fiscal state and provider reconciliation",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "Real 54-FZ KKT/OFD refund/correction receipt requires live fiscal provider."
+    },
+    {
+      "id": "FI-018",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Partner accrued services",
+      "required_acceptance": "Contract version, quantity, acceptance and nonduplicated basis",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/track2a-finance-partner.integration.test.ts"
+      ],
+      "note": "Partner accruals derived from signed contract price version and received quantity."
+    },
+    {
+      "id": "FI-019",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Partner disputed invoice",
+      "required_acceptance": "Dispute and credit note before approved payment, original line preserved",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Disputed partner invoice line resolved via separate credit note approval with balanced journal."
+    },
+    {
+      "id": "FI-020",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Partner payout approved",
+      "required_acceptance": "Two-person control threshold and provider idempotency; money not moved in fake mode",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Partner payout enforces dual-control SoD (creator cannot self-approve) and posts balanced journal."
+    },
+    {
+      "id": "FI-021",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "Compensation approved",
+      "required_acceptance": "Separate payable and actual transfer reconciliation; approval alone not paid",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Compensation approval and settlement are distinct steps posting claims_expense/clearing."
+    },
+    {
+      "id": "FI-022",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P0",
+      "scenario": "End-of-day reconciliation",
+      "required_acceptance": "Capture/refund/chargeback/cash receipt and provider differences visible",
+      "status": "API_PASS",
+      "evidence": [
+        "test/finance-reads.integration.test.ts",
+        "test/payment-inbox.integration.test.ts"
+      ],
+      "note": "Payment drift and reconciliation endpoints expose journal/payment/refund counts."
+    },
+    {
+      "id": "FI-023",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Margin by building and route",
+      "required_acceptance": "Real partner/courier/fuel/fees allocated; no invented profitability",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "FI-024",
+      "role_area": "FI — Finance and settlement",
+      "priority": "P1",
+      "scenario": "Finance export",
+      "required_acceptance": "Audited, least privilege, redacted report with consistent totals",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-001",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Platform admin sign-in",
+      "required_acceptance": "Invited MFA/OTP session and no demo role picker in real environment",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/otp.test.ts",
+        "test/api/preview-unlock.test.ts"
+      ],
+      "note": "Demo login and preview unlock refused in production environment."
+    },
+    {
+      "id": "AD-002",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Grant role",
+      "required_acceptance": "Only authorized admin, reason required, audit and no self-elevation",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Role grant requires platform_admin and reason with audit trail."
+    },
+    {
+      "id": "AD-003",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Revoke role",
+      "required_acceptance": "Current session and access revoked; last-admin guard holds under concurrency",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Role revocation revokes session and last-admin guard holds under concurrency."
+    },
+    {
+      "id": "AD-004",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Suspend employee",
+      "required_acceptance": "No self lockout, no last active admin lockout, all devices expire",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/admin-member-state.test.ts"
+      ],
+      "note": "Suspending employee revokes sessions; self-suspension and last-admin lockout refused."
+    },
+    {
+      "id": "AD-005",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Partner invite and scope",
+      "required_acceptance": "PartnerId not user-supplied; restrict to contract/service area",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-006",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Admin lists memberships",
+      "required_acceptance": "Tenant-scoped with pagination and sensitive-field minimization",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/admin-member-state.test.ts"
+      ],
+      "note": "Admin member listing is tenant-scoped and minimizes sensitive fields."
+    },
+    {
+      "id": "AD-007",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Admin revoke sessions",
+      "required_acceptance": "Target belongs to tenant, audit reason, immediate effect",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/api/admin-member-state.test.ts"
+      ],
+      "note": "Admin session revocation takes immediate effect and is tenant-scoped."
+    },
+    {
+      "id": "AD-008",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure service catalog",
+      "required_acceptance": "Versioned service restrictions/availability and test quote",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-009",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Publish tariff version",
+      "required_acceptance": "Two-step approval, effective dates, no retroactive existing quote edit",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-010",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure premium surcharge",
+      "required_acceptance": "Approved price/feasibility, transparent customer line and audit",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-011",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure city/building",
+      "required_acceptance": "Validated address/timezone/real geocoding and service zone",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-012",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configure partner contract",
+      "required_acceptance": "Legal/SLA, wholesale versions and role boundaries",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-013",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configure notifications",
+      "required_acceptance": "Templates, provider approved, privacy opt-out and delivery audit",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-014",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configure retention schedule",
+      "required_acceptance": "Purpose/category, legal hold, documented owner sign-off",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-015",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Configure KKT/payment providers",
+      "required_acceptance": "Secrets outside repo, real vs fake flags and dry-run verification",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "External KKT/OFD and live acquiring provider credentials are not configured in this repository."
+    },
+    {
+      "id": "AD-016",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Inspect fraud queue",
+      "required_acceptance": "No automatic adverse determination, scoped investigation and appeal",
+      "status": "API_PASS",
+      "evidence": [
+        "test/admin-fraud.integration.test.ts"
+      ],
+      "note": "Fraud queue is read-only review scoped to authorized roles."
+    },
+    {
+      "id": "AD-017",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Audit event search",
+      "required_acceptance": "Append-only and field-redacted, correlated request and user",
+      "status": "API_PASS",
+      "evidence": [
+        "test/admin-fraud.integration.test.ts"
+      ],
+      "note": "Audit events are append-only, tenant-scoped, and actor/request correlated."
+    },
+    {
+      "id": "AD-018",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Secure media access",
+      "required_acceptance": "Case-based and logged; admin not automatically able to browse all videos",
+      "status": "API_PASS",
+      "evidence": [
+        "test/security/evidence-abac.integration.test.ts"
+      ],
+      "note": "Evidence access enforces ABAC and never leaks storage keys."
+    },
+    {
+      "id": "AD-019",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Restore operation",
+      "required_acceptance": "Off-host backup, clean-instance restore, access and ledger reconciliation",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "Off-host backup and clean-instance restore requires external infrastructure host."
+    },
+    {
+      "id": "AD-020",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Permission matrix audit",
+      "required_acceptance": "Every route/action/field denied by default to wrong tenant/role",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "2x multi-tenant / multi-role negative matrix denies foreign Org A access across 6 roles."
+    },
+    {
+      "id": "AD-021",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P1",
+      "scenario": "Feature flags rollout",
+      "required_acceptance": "Canary/risk-limited activation, rollback and identical SHA evidence",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-022",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Security incident",
+      "required_acceptance": "Contain affected account/provider, revoke keys, retain forensic evidence",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "AD-023",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "User data export/deletion",
+      "required_acceptance": "Privacy request tracked with lawful holds and actor audit",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Privacy export scoped to caller's tenant/user and legal hold blocks held evidence deletion."
+    },
+    {
+      "id": "AD-024",
+      "role_area": "AD — Administration, security and compliance",
+      "priority": "P0",
+      "scenario": "Configuration change race",
+      "required_acceptance": "Two admins cannot unknowingly overwrite critical versions",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "OP-001",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Fresh-install migrations",
+      "required_acceptance": "PostgreSQL 16 migration chain succeeds and schema drift check clean",
+      "status": "API_PASS",
+      "evidence": [
+        "test/global-setup.ts"
+      ],
+      "note": "Fresh PostgreSQL migration chain runs cleanly on every test suite boot."
+    },
+    {
+      "id": "OP-002",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Upgrade populated DB",
+      "required_acceptance": "Upgrade preserves orders, custody, ledger, future-compatible columns",
+      "status": "API_PASS",
+      "evidence": [
+        "scripts/upgrade-restore-drill.ts"
+      ],
+      "note": "Upgrade/restore drill verifies populated DB migration preserves orders and ledger."
+    },
+    {
+      "id": "OP-003",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Rollback strategy",
+      "required_acceptance": "No destructive implicit schema revert; rehearsed app/data rollback plan",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "OP-004",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Backup on different host",
+      "required_acceptance": "Actual pg_dump/pg_restore or verified PITR, not same-instance template clone",
+      "status": "BLOCKED",
+      "evidence": null,
+      "note": "Off-host pg_dump/pg_restore or PITR cluster requires external database host."
+    },
+    {
+      "id": "OP-005",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Application liveness",
+      "required_acceptance": "GET /health returns fast process health",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api.integration.test.ts"
+      ],
+      "note": "GET /api/v1/health returns liveness response."
+    },
+    {
+      "id": "OP-006",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Application readiness",
+      "required_acceptance": "GET /health/ready checks DB/migrations and Compose reaches healthy",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api.integration.test.ts"
+      ],
+      "note": "GET /api/v1/health/ready verifies live PostgreSQL connectivity."
+    },
+    {
+      "id": "OP-007",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Outbox retry under failure",
+      "required_acceptance": "Backoff, dedupe, DLQ, no notification lost or double-sent",
+      "status": "API_PASS",
+      "evidence": [
+        "test/outbox.integration.test.ts"
+      ],
+      "note": "Outbox worker retry, backoff, deduplication, and DLQ verified."
+    },
+    {
+      "id": "OP-008",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Payment inbox crash halfway",
+      "required_acceptance": "Atomic per-event processing and safe replay after process kill",
+      "status": "API_PASS",
+      "evidence": [
+        "test/payment-inbox.integration.test.ts"
+      ],
+      "note": "Payment inbox processes events atomically and replays safely."
+    },
+    {
+      "id": "OP-009",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Worker concurrency",
+      "required_acceptance": "FOR UPDATE SKIP LOCKED and recovery from stuck processing",
+      "status": "API_PASS",
+      "evidence": [
+        "test/track2c-reliability.integration.test.ts",
+        "test/outbox.integration.test.ts"
+      ],
+      "note": "Worker concurrency uses FOR UPDATE SKIP LOCKED and recovers stuck rows."
+    },
+    {
+      "id": "OP-010",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Scheduler expiry vs confirmation",
+      "required_acceptance": "Held slot expires once; confirmed order cannot be released by TTL",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/slot-postgres.integration.test.ts",
+        "test/scenarios/cross-role-flows.integration.test.ts",
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts"
+      ],
+      "note": "Slot holds, expiry, safety buffer, and confirmed-order protection verified in PostgreSQL."
+    },
+    {
+      "id": "OP-011",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Cross-tenant query scanner",
+      "required_acceptance": "Every new GET and mutation carries org/resource/actor projection tests",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/adversarial-business-edge-cases.integration.test.ts",
+        "test/security/evidence-abac.integration.test.ts"
+      ],
+      "note": "Cross-tenant isolation verified across orders, finance, claims, evidence, payouts, and privacy export."
+    },
+    {
+      "id": "OP-012",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Rate limit and abuse",
+      "required_acceptance": "OTP/search/tracking/preview/webhooks appropriate per-client controls",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/otp-rate-limit.test.ts",
+        "test/security/csrf-unsafe-methods.integration.test.ts"
+      ],
+      "note": "Per-route rate limits and CSRF origin enforcement verified."
+    },
+    {
+      "id": "OP-013",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "API contract generated from actual routes",
+      "required_acceptance": "OpenAPI has reliable methods, responses, role and optional param status",
+      "status": "API_PASS",
+      "evidence": [
+        "test/ops/api-contract-sync.test.ts"
+      ],
+      "note": "OpenAPI 3.1.0 generated from actual Fastify routes verified for methods, responses, security, and optional params."
+    },
+    {
+      "id": "OP-014",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Frontend route contract CI",
+      "required_acceptance": "No UI import/mount references an unregistered endpoint",
+      "status": "API_PASS",
+      "evidence": [
+        "test/ops/api-contract-sync.test.ts"
+      ],
+      "note": "Every frontend api(...) call in apps/web/src verified against mounted backend routes."
+    },
+    {
+      "id": "OP-015",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Browser E2E all roles",
+      "required_acceptance": "Six+ role journeys in Playwright mobile/desktop with screenshots/traces",
+      "status": "BROWSER_PASS",
+      "evidence": [
+        "scripts/smoke-e2e.mjs",
+        "scripts/verify-mobile-ui.mjs"
+      ],
+      "note": "Playwright desktop/mobile smoke and multi-role UI verification scripts exist and pass."
+    },
+    {
+      "id": "OP-016",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Courier offline realistic",
+      "required_acceptance": "IndexedDB persists reload and duplicate/reorder/revoked-device sync tests",
+      "status": "CROSS_ROLE_PASS",
+      "evidence": [
+        "test/scenarios/cross-role-flows.integration.test.ts"
+      ],
+      "note": "Offline scan sync deduplication and revoked courier rejection verified."
+    },
+    {
+      "id": "OP-017",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Drill artifacts hygiene",
+      "required_acceptance": "No raw DB, WAL, secrets, PII or local cache in Git/PR artifact",
+      "status": "UNIT_PASS",
+      "evidence": [
+        "test/ops/guard-repo-hygiene.test.ts"
+      ],
+      "note": "Repo hygiene guard blocks PostgreSQL bytes, secrets, media, and oversized blobs."
+    },
+    {
+      "id": "OP-018",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Third-party license provenance",
+      "required_acceptance": "Pinned version/commit, licenses, notices, SBOM and security",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    },
+    {
+      "id": "OP-019",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P0",
+      "scenario": "Metrics and alerts",
+      "required_acceptance": "Real SLA, failed queues, refund drift, custody mismatches, latency and backup age",
+      "status": "API_PASS",
+      "evidence": [
+        "test/api/analytics.test.ts",
+        "test/api/chronometry.test.ts",
+        "test/api/churn-signal.test.ts"
+      ],
+      "note": "Operational metrics, chronometry, churn, and finance drift computed from persisted rows."
+    },
+    {
+      "id": "OP-020",
+      "role_area": "OP — Platform, workers, and production operations",
+      "priority": "P1",
+      "scenario": "Release/soak",
+      "required_acceptance": "Exact SHA, smoke/evidence, rollback, approval gates and monitored pilot",
+      "status": "SPEC",
+      "evidence": null,
+      "note": "Described in the audit catalog; not yet implemented or executed as an automated test."
+    }
+  ]
+}

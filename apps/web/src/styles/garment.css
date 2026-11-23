@@ -1,0 +1,260 @@
+/* ==========================================================================
+   Garment handover picker — icons in, numbers out, no typing
+   ========================================================================== */
+
+@layer components {
+  .garment-picker {
+    display: grid;
+    gap: var(--space-3);
+  }
+
+  .garment-picker-head {
+    display: grid;
+    gap: 2px;
+  }
+
+  .garment-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .garment-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    min-block-size: 96px;
+    padding: var(--space-3) var(--space-2);
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    color: var(--ink-primary);
+    transition:
+      background-color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      box-shadow var(--dur-fast) var(--ease-out),
+      transform var(--dur-fast) var(--ease-out);
+  }
+
+  .garment-tile:hover:not(:disabled) {
+    background: var(--bg-subtle);
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-sm);
+    transform: translateY(-2px);
+  }
+
+  .garment-tile:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  .garment-tile-icon {
+    display: grid;
+    place-items: center;
+    inline-size: 52px;
+    block-size: 52px;
+    border-radius: var(--radius-md);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    transition:
+      background-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
+  }
+
+  .garment-tile:hover:not(:disabled) .garment-tile-icon {
+    background: var(--accent-soft-strong);
+  }
+
+  .garment-tile-label {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    line-height: 1.25;
+    text-align: center;
+  }
+
+  .garment-total {
+    margin: 4px 0 0;
+  }
+
+  .garment-picked {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 6px;
+  }
+
+  .garment-picked li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 6px var(--space-2) 6px var(--space-3);
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    color: var(--ink-primary);
+  }
+
+  .garment-picked-label {
+    flex: 1 1 auto;
+    min-inline-size: 0;
+    font-weight: 600;
+  }
+
+  .garment-picked-qty {
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+    color: var(--ink-secondary);
+  }
+
+  /* Its own line: the row above is icon, name, count and the two actions. */
+  .garment-row-fields {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1 0 100%;
+    order: 10;
+    min-inline-size: 0;
+  }
+
+  .garment-row-fields input {
+    min-block-size: var(--tap-target);
+    padding: 6px 10px;
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    color: var(--ink-primary);
+    font: inherit;
+  }
+
+  .garment-row-fields input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+  }
+
+  .garment-row-fields input[type="number"] {
+    inline-size: 96px;
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+  }
+
+  .garment-row-fields input[type="text"] {
+    flex: 1;
+    min-inline-size: 0;
+  }
+
+  .garment-subtypes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .garment-subtype {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-block-size: var(--tap-target);
+    padding: 10px var(--space-3);
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    color: var(--ink-primary);
+    font-weight: 600;
+    text-align: left;
+    transition:
+      background-color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
+  }
+
+  .garment-subtype:hover:not(:disabled) {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  .garment-qty {
+    display: grid;
+    gap: var(--space-3);
+    justify-items: center;
+  }
+
+  .garment-qty-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--ink-primary);
+  }
+
+  .garment-qty-value {
+    display: grid;
+    place-items: center;
+    inline-size: 100%;
+    min-block-size: 72px;
+    border-radius: var(--radius-md);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    font-size: 3rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+    cursor: ns-resize;
+    touch-action: none;
+    user-select: none;
+    transition: background-color var(--dur-fast) var(--ease-out);
+  }
+
+  .garment-qty-value:hover {
+    background: var(--accent-soft-strong);
+  }
+
+  .garment-qty-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    inline-size: 100%;
+  }
+
+  .garment-qty-controls input[type="range"] {
+    flex: 1;
+    min-block-size: var(--tap-target);
+    accent-color: var(--accent);
+  }
+
+  .garment-qty-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    justify-content: center;
+  }
+
+  .garment-qty-chips .chip {
+    min-inline-size: 48px;
+    min-block-size: var(--tap-target);
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border-hairline);
+    background: var(--bg-surface);
+    color: var(--ink-primary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    transition:
+      background-color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out),
+      transform var(--dur-fast) var(--ease-out);
+  }
+
+  .garment-qty-chips .chip:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  .garment-qty-chips .chip.active {
+    background: var(--accent);
+    border-color: transparent;
+    color: #ffffff;
+  }
+}

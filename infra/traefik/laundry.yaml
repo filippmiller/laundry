@@ -1,0 +1,39 @@
+# Traefik route for the isolated laundry preview instance.
+#
+# Copy this file to /data/coolify/proxy/dynamic/laundry.yaml on the host. The host's Traefik
+# runs with --providers.file.directory=/traefik/dynamic/ and --providers.file.watch=true, so the
+# route is picked up as soon as the file lands — no proxy restart, so the ~20 other services
+# behind the same proxy are not interrupted.
+#
+# The api container publishes the network alias `laundry-api` on the shared `coolify` network,
+# which is how this URL resolves.
+#
+# The host's catch-all router (default_redirect_503.yaml) has priority -1000; a Host rule
+# outranks it, so this route wins for laundry.filippmiller.com and nothing else is affected.
+
+http:
+  routers:
+    laundry-https:
+      rule: "Host(`laundry.filippmiller.com`)"
+      entryPoints:
+        - https
+      service: laundry-api
+      tls:
+        certResolver: letsencrypt
+    laundry-http:
+      rule: "Host(`laundry.filippmiller.com`)"
+      entryPoints:
+        - http
+      middlewares:
+        - laundry-redirect
+      service: laundry-api
+  middlewares:
+    laundry-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
+  services:
+    laundry-api:
+      loadBalancer:
+        servers:
+          - url: "http://laundry-api:3000"
