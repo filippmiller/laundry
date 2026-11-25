@@ -610,6 +610,9 @@ function NewOrderTab({
   );
   const quoteStale = Boolean(quote && quoteFingerprint !== formFingerprint);
   const quoteExpired = quote ? new Date(quote.expiresAt).getTime() <= now : false;
+  // The quote needs a building, a service and both windows. The windows arrive after the first
+  // render, so until they are here the calculation cannot be requested at all.
+  const quoteReady = Boolean(buildingId && serviceId && pickupWindowId && deliveryWindowId) && !windowsLoading;
   const holdExpired = [pickupHold, deliveryHold].some((hold) => hold && new Date(hold.expiresAt).getTime() <= now);
   const invoice = finance?.invoice ?? null;
   const hasPayableInvoice = Boolean(invoice && invoice.state === "open" && invoice.totalKopeks > 0);
@@ -1322,9 +1325,15 @@ function NewOrderTab({
         )}
 
         <div className="button-row">
+          {/* The quote needs a building, a service and both windows. The windows arrive after
+              the first render, so the button used to be clickable while the form was still
+              incomplete: the click produced "Выберите дом, окна забора и доставки и услугу"
+              instead of a price. The button now waits for the form and the hint says what is
+              missing. */}
           <Button
             variant="primary"
-            disabled={isBusy}
+            disabled={isBusy || !quoteReady}
+            aria-describedby={`${uid}-order-step-hint`}
             leadingIcon={<Banknote size={16} aria-hidden="true" />}
             onClick={() => void handleQuote()}
           >
@@ -1352,13 +1361,17 @@ function NewOrderTab({
         {/* A disabled button that explains nothing is a dead end: the customer has to be told
             which step is missing (MA-28). The hint is linked to the two disabled controls. */}
         <p className="muted u-mt-8px" id={`${uid}-order-step-hint`}>
-          {!quote
-            ? "Сначала рассчитайте стоимость — без расчёта забронировать слоты нельзя."
-            : quoteStale
-              ? "Расчёт устарел: параметры заказа изменились — рассчитайте стоимость заново."
-              : !pickupHold || !deliveryHold
-                ? "Забронируйте слоты забора и доставки — после этого заказ можно подтвердить."
-                : "Всё готово: заказ можно подтвердить."}
+          {!quoteReady
+            ? windowsLoading
+              ? "Загружаем окна забора и доставки — расчёт станет доступен, когда они появятся."
+              : "Выберите дом, услугу и окна забора с доставкой — после этого появится расчёт."
+            : !quote
+              ? "Сначала рассчитайте стоимость — без расчёта забронировать слоты нельзя."
+              : quoteStale
+                ? "Расчёт устарел: параметры заказа изменились — рассчитайте стоимость заново."
+                : !pickupHold || !deliveryHold
+                  ? "Забронируйте слоты забора и доставки — после этого заказ можно подтвердить."
+                  : "Всё готово: заказ можно подтвердить."}
         </p>
       </section>
 

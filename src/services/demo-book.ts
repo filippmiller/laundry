@@ -323,6 +323,10 @@ async function ensureWindows(
   }> = [];
 
   for (const building of buildings) {
+    // The candidates are ordered: PostgreSQL hands out the rows of a table in no particular
+    // order, and the scenario keys contain the window id. An unordered pick would give the
+    // book a different window from one run to the next — a different key, a second book and
+    // a stand that grows on every visit.
     const open = await db.select({
       id: serviceWindows.id,
       kind: serviceWindows.kind,
@@ -333,7 +337,7 @@ async function ensureWindows(
       eq(serviceWindows.buildingId, building.id),
       eq(serviceWindows.status, "open"),
       gt(serviceWindows.endsAt, now),
-    ));
+    )).orderBy(asc(serviceWindows.startsAt), asc(serviceWindows.id));
 
     const pickup = open.find(window => window.kind === "pickup");
     const delivery = open.find(window => window.kind === "delivery");
@@ -581,10 +585,17 @@ async function seedPartnerMoney(
     periodEnd,
     key: `demo-book-${tag}-pinv`,
   });
+  // The lines are picked in a fixed order. The book decides that the first line keeps an open
+  // dispute and the second one is settled, and the dispute keys name the line they belong to:
+  // an unordered SELECT would let PostgreSQL hand out the two roles in a different order from
+  // one run to the next, and the second run would then settle the other dispute under the key
+  // of the first one — a payload conflict, and a stand whose open dispute silently disappears.
   const lines = await db.select({
     id: partnerInvoiceLines.id,
     amountKopeks: partnerInvoiceLines.amountKopeks,
-  }).from(partnerInvoiceLines).where(eq(partnerInvoiceLines.invoiceId, invoice.invoiceId));
+  }).from(partnerInvoiceLines)
+    .where(eq(partnerInvoiceLines.invoiceId, invoice.invoiceId))
+    .orderBy(asc(partnerInvoiceLines.id));
   result.partnerInvoices = 1;
   if (lines.length < 2) return result;
 
@@ -592,7 +603,7 @@ async function seedPartnerMoney(
   await ensureDemoDispute(
     db, context, lines[0].id,
     "Фактический вес по описи не совпал с начисленным.",
-    `demo-book-${tag}-dispute-open`,
+    `demo-book-${tag}-dispute-open-${lines[0].id}`,
   );
   result.partnerDisputes += 1;
 
@@ -600,7 +611,7 @@ async function seedPartnerMoney(
   const settledDispute = await ensureDemoDispute(
     db, context, lines[1].id,
     "Часть вещей обработана не по тарифу.",
-    `demo-book-${tag}-dispute-settled`,
+    `demo-book-${tag}-dispute-settled-${lines[1].id}`,
   );
   result.partnerDisputes += 1;
   if (!["resolved", "rejected"].includes(settledDispute.state)) {
@@ -608,7 +619,9 @@ async function seedPartnerMoney(
       disputeId: settledDispute.id,
       outcome: "upheld",
       reason: "Расхождение подтверждено приёмкой у прачечной, начисление уменьшено.",
-      key: `demo-book-${tag}-resolve`,
+      // The key names the dispute it settles: the request hash covers the dispute id, so one
+      // key for both disputes would turn the second settlement into a payload conflict.
+      key: `demo-book-${tag}-resolve-${settledDispute.id}`,
     });
   }
   const [note] = await db.select({ id: partnerCreditNotes.id, state: partnerCreditNotes.state })
@@ -622,7 +635,8 @@ async function seedPartnerMoney(
   if (note && note.state === "draft") {
     await approvePartnerCreditNote(db, context.principals.finance, {
       creditNoteId: note.id,
-      key: `demo-book-${tag}-credit-note-approve`,
+      // The key names the note it approves, for the same reason as the settlement above.
+      key: `demo-book-${tag}-credit-note-approve-${note.id}`,
     });
     result.partnerCreditNotes += 1;
   }
@@ -642,11 +656,23 @@ async function seedPartnerMoney(
       inArray(partnerPayouts.state, ["scheduled", "pending"]),
     ));
   const availableKopeks = (totals?.grossPayableKopeks ?? 0) - Number(paidRow?.total ?? 0) - Number(reservedRow?.total ?? 0);
-  if (availableKopeks > 0) {
+  // The demo pays out once: the reference is looked up before the payout is created, because the
+  // available amount is a moving figure. Scheduling a second payout under the same key with a
+  // different amount would be a payload conflict, and the stand would pay the partner twice.
+  const payoutReference = `DEMO-PAYOUT-${tag}`;
+  const [existingPayout] = await db.select({ id: partnerPayouts.id })
+    .from(partnerPayouts)
+    .where(and(
+      eq(partnerPayouts.organizationId, context.organizationId),
+      eq(partnerPayouts.partnerId, context.partnerId),
+      eq(partnerPayouts.reference, payoutReference),
+    ))
+    .limit(1);
+  if (!existingPayout && availableKopeks > 0) {
     await createPartnerPayout(db, context.principals.finance, {
       partnerId: context.partnerId,
       amountKopeks: availableKopeks,
-      reference: `DEMO-PAYOUT-${tag}`,
+      reference: payoutReference,
       key: `demo-book-${tag}-payout`,
     });
     result.partnerPayouts += 1;
@@ -985,9 +1011,12 @@ export async function buildDemoBookContext(
 
   let shiftId = input.shiftId;
   if (!shiftId) {
+    // The shift is picked in a fixed order for the same reason the windows are: the assignment
+    // keys name the shift, so an unstable pick would replay the book under a different key.
     const [shift] = (await db.execute(sql`
       SELECT id FROM courier_shifts
       WHERE organization_id = ${input.organizationId} AND state = 'active'
+      ORDER BY starts_at, id
       LIMIT 1
     `)).rows as unknown as Array<{ id: string }>;
     shiftId = shift?.id;

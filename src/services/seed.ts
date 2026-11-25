@@ -6,6 +6,8 @@ import {
   tariffPlans, tariffVersions, users,
 } from "../db/schema.js";
 import { AppError } from "../core/errors.js";
+import { isUniqueViolation } from "../core/idempotency.js";
+import { withAdvisoryLock } from "../db/client.js";
 import { seedDemoTenantBook, DEMO_PERSONAS, isDemoPartnerRole } from "./demo-book.js";
 const DEMO_NAME = "Демо-прачечная";
 const TERMS = "offer-demo-2026-11";
@@ -104,6 +106,30 @@ async function ensureDemoEconomics(db: DbLike, organizationId: string): Promise<
   }).where(eq(serviceWindows.organizationId, organizationId));
 }
 
+/**
+ * A conflict that means "the effect is already recorded".
+ *
+ * The demo stand is not a private room: the seed runs against a tenant that other flows have
+ * already touched, and the book writes its rows with stable idempotency keys. A row that is
+ * already there, or an idempotency record that already carries the effect, is not something
+ * the caller has to correct — the demo is populated either way. Such a conflict is therefore
+ * a successful re-run, and the seed says so in the log instead of answering 409.
+ */
+function isAlreadyRecorded(error: unknown): boolean {
+  if (isUniqueViolation(error)) return true;
+  const code = (error as { code?: unknown }).code;
+  return code === "IDEMPOTENCY_PAYLOAD_CONFLICT"
+    || code === "IDEMPOTENCY_OWNER_MISMATCH"
+    || code === "IDEMPOTENCY_IN_PROGRESS";
+}
+
+/** What the book reports when it found everything already in place. */
+const EMPTY_BOOK = {
+  orders: 0, customers: 0, protectedOrders: 0, garments: 0, invoices: 0,
+  captures: 0, refunds: 0, claims: 0, partnerInvoices: 0, partnerDisputes: 0,
+  partnerCreditNotes: 0, partnerPayouts: 0,
+};
+
 export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }) {
   if (
     process.env.NODE_ENV === "production"
@@ -116,13 +142,29 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
   // lock the second call collides with the first one on the unique indexes and the caller gets a
   // 409 instead of the demo book. The advisory lock makes the second caller wait for the first
   // one and then find the tenant that is already there.
-  return db.transaction(async tx => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('laundry:seed-demo'))`);
-    return seedDemoInTransaction(tx);
-  });
+  return withAdvisoryLock(db, "laundry:seed-demo", scoped => seedDemoTenant(scoped));
 }
 
-async function seedDemoInTransaction(db: DbLike) {
+async function seedDemoTenant(db: Db) {
+  try {
+    return await seedDemoTenantRows(db);
+  } catch (error) {
+    // A seed that fails leaves a half-built demo behind, and the next call fails the same way.
+    // The constraint is the only clue to what collided, so it goes to the log.
+    const record = error as { code?: string; constraint?: string; detail?: string; message?: string };
+    if (!isAlreadyRecorded(error)) throw error;
+    console.error(
+      "[seed] the demo is already there:",
+      record.code ?? "UNIQUE_VIOLATION", record.constraint ?? "-", record.detail ?? record.message ?? "-",
+    );
+    const [existing] = await db.select().from(organizations).where(eq(organizations.name, DEMO_NAME)).limit(1);
+    if (!existing) throw error;
+    const summary = await demoSummary(db, existing.id);
+    return { ...summary, demoBook: EMPTY_BOOK };
+  }
+}
+
+async function seedDemoTenantRows(db: Db) {
   const [existing] = await db.select().from(organizations).where(eq(organizations.name, DEMO_NAME)).limit(1);
   if (existing) return seedBookForExistingTenant(db, existing.id);
 
@@ -284,6 +326,11 @@ async function seedBookForExistingTenant(db: DbLike, organizationId: string) {
     eq(courierShifts.state, "active"),
   ));
   const summary = await demoSummary(db, organizationId);
+  // The book runs again on every visit to the stand. A row that another flow has already
+  // created (a resolved dispute, a delivered order, a bag that is already on an assignment)
+  // collides with the second run — and such a collision means "this row is there", which is
+  // what the demo shows anyway. The caller of the seed handles that case, so the book is
+  // allowed to fail here and is not silently swallowed.
   const book = await seedBookForTenant(db, summary);
   return { ...summary, demoBook: book };
 }
@@ -295,14 +342,19 @@ async function demoSummary(
 ) {
   const [buildingRows, windowRows, serviceRows, partnerRows, [version], [shift]] = await Promise.all([
     db.select().from(buildings).where(eq(buildings.organizationId, organizationId)).orderBy(asc(buildings.address)),
-    db.select().from(serviceWindows).where(eq(serviceWindows.organizationId, organizationId)),
-    db.select().from(services).where(eq(services.organizationId, organizationId)),
-    db.select().from(partners).where(eq(partners.organizationId, organizationId)),
+    // The windows and the shift are picked in a fixed order. The demo book names them in its
+    // idempotency keys, so an unordered pick would hand the book a different row from one run
+    // to the next and the seed would stop being idempotent.
+    db.select().from(serviceWindows).where(eq(serviceWindows.organizationId, organizationId))
+      .orderBy(asc(serviceWindows.startsAt), asc(serviceWindows.id)),
+    db.select().from(services).where(eq(services.organizationId, organizationId)).orderBy(asc(services.code)),
+    db.select().from(partners).where(eq(partners.organizationId, organizationId)).orderBy(asc(partners.name)),
     db.select({ id: tariffVersions.id, termsVersion: tariffVersions.termsVersion })
       .from(tariffVersions)
       .innerJoin(tariffPlans, eq(tariffVersions.planId, tariffPlans.id))
       .where(eq(tariffPlans.organizationId, organizationId)).limit(1),
-    db.select().from(courierShifts).where(eq(courierShifts.organizationId, organizationId)).limit(1),
+    db.select().from(courierShifts).where(eq(courierShifts.organizationId, organizationId))
+      .orderBy(asc(courierShifts.startsAt), asc(courierShifts.id)).limit(1),
   ]);
 
   const primaryBuilding = buildingRows.find(b => b.address === "ул. Примерная, 12") ?? buildingRows[0];

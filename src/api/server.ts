@@ -221,6 +221,9 @@ export function buildApp(db: Db) {
     // A unique violation is a conflict with a row that already exists, not an unavailable
     // dependency: the client can correct it. Reporting it as a 500 hides the cause.
     if (isUniqueViolation(error)) {
+      // The conflict itself is the interesting part: without the constraint name the log says
+      // only "CONFLICT", which is not enough to find the row that collides.
+      app.log.warn({ err: error, constraint: (error as { constraint?: string }).constraint }, "unique violation");
       reply.status(409).send({
         error: { code: "CONFLICT", message: "CONFLICT", request_id: _request.id },
       });
