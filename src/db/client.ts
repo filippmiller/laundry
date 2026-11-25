@@ -4,6 +4,12 @@ import * as schema from "./schema.js";
 
 export type Db = NodePgDatabase<typeof schema>;
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/**
+ * A connection that can be either the pool or an open transaction. The seed
+ * helpers run inside a transaction (to take an advisory lock) and are called
+ * from the API with a plain pool connection.
+ */
+export type DbLike = Db | Tx;
 
 export function createPool(connectionString: string, options: { max?: number } = {}) {
   return new Pool({

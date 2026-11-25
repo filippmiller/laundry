@@ -21,6 +21,9 @@
     "web:build": "vite build --config apps/web/vite.config.ts",
     "smoke": "node scripts/smoke-e2e.mjs",
     "smoke:live": "node scripts/verify-preview-live.mjs",
+    "verify:routes": "node scripts/route-parity.mjs",
+    "verify:wave6": "node scripts/verify-wave6.mjs",
+    "verify:mobile": "node scripts/verify-mobile-layout.mjs",
     "db:seed": "tsx src/scripts/seed-demo.ts",
     "db:drill": "tsx scripts/upgrade-restore-drill.ts",
     "guard:hygiene": "node scripts/guard-repo-hygiene.mjs"

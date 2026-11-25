@@ -2,15 +2,30 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#141920" />
     <meta name="description" content="Чисто — сервис стирки, глажки и химчистки от двери до двери с поштучной описью, пломбами и контролем качества." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      The webfonts are loaded without blocking the first paint: `media="print"` keeps the
+      stylesheet out of the render-blocking path, and the switch to `media="all"` happens as soon
+      as it arrives. The design tokens already name a system fallback stack, so a Russian network
+      that cannot reach Google Fonts still shows the interface immediately, in the system font
+      (MA-21).
+    -->
     <link
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Onest:wght@400;500;600;700&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'; this.onload=null;"
     />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Onest:wght@400;500;600;700&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
     <title>Чисто — дворовая прачечная и химчистка</title>
   </head>
   <body>

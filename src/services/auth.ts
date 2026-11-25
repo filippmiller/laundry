@@ -16,6 +16,17 @@ export function isPreviewEnabled(): boolean {
   return process.env.NODE_ENV !== "production" || process.env.PREVIEW_MODE === "enabled";
 }
 
+/**
+ * Does this deployment actually enforce a preview access key?
+ *
+ * The landing page used to guess this from the presence of demo data, which made the key field
+ * appear on a deployment that accepts any key. The server states the truth instead: the field is
+ * shown exactly when a key is configured and checked.
+ */
+export function previewKeyRequired(): boolean {
+  return Boolean(process.env.PREVIEW_ACCESS_KEY);
+}
+
 export function verifyPreviewKey(givenKey: string | undefined): boolean {
   const expected = process.env.PREVIEW_ACCESS_KEY;
   if (!expected) return process.env.NODE_ENV !== "production";

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { AlertTriangle, FileCheck2, RefreshCw, Trash2, Upload, X } from "lucide-react";
+import { AlertTriangle, Camera, FileCheck2, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { ApiError, api, dt, sha256FileHex } from "../api";
 import { EVIDENCE_PURPOSE_LABELS, formatError, stateLabel } from "../labels";
 import { Badge, type BadgeTone, Button, Card, CardBody, CardHeader } from "./ui";
@@ -13,6 +13,14 @@ import {
   startEvidenceUploadBatch,
   subscribeEvidenceUploads,
 } from "./evidence-upload-store";
+import {
+  enqueueEvidence,
+  evidenceQueueAvailable,
+  markEvidenceAttempt,
+  queuedEvidence,
+  removeQueuedEvidence,
+  type QueuedEvidence,
+} from "./evidence-offline-queue";
 
 export type EvidenceOwnerType = "order" | "claim" | "custody_event";
 export type EvidencePurpose = "intake_condition" | "delivery_proof" | "claim_evidence" | "qc";
@@ -91,6 +99,18 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+/**
+ * Did the request fail because the network is gone (rather than because the server said no)?
+ * Only this kind of failure may send the file to the local queue; a rejected file has to be
+ * reported as an error.
+ */
+function isNetworkFailure(err: unknown): boolean {
+  if (err instanceof TypeError) return true; // fetch() rejects with TypeError on a network error.
+  if (err instanceof DOMException && err.name === "NetworkError") return true;
+  const message = err instanceof Error ? err.message.toLowerCase() : "";
+  return message.includes("network") || message.includes("failed to fetch") || message.includes("offline");
+}
+
 function normalizeEvidenceList(raw: unknown): EvidenceAssetItem[] {
   const rows = Array.isArray(raw)
     ? raw
@@ -133,6 +153,7 @@ export function EvidenceUploader({
 }: EvidenceUploaderProps) {
   const inputId = useId();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const onUploadedIdsChangeRef = useRef(onUploadedIdsChange);
   const onUploadStateChangeRef = useRef(onUploadStateChange);
 
@@ -161,6 +182,8 @@ export function EvidenceUploader({
     ownerKey: currentOwnerKey,
     loadError: null,
   });
+  // Photos that waited for the network on this device.
+  const [queuedCount, setQueuedCount] = useState(0);
 
   useEffect(() => {
     const initial = getOwnerUploadSnapshot(currentOwnerKey);
@@ -276,6 +299,145 @@ export function EvidenceUploader({
     }
   };
 
+  /**
+   * Registers the file on the server and uploads its bytes. The SHA-256 is computed from the
+   * bytes themselves, so a queued photo is hashed the same way when it is finally sent.
+   */
+  const uploadEvidenceFile = async (
+    file: Blob,
+    fileName: string,
+    mimeType: string,
+    sizeBytes: number,
+    targetOwnerType: EvidenceOwnerType,
+    targetOwnerId: string,
+    signal?: AbortSignal,
+  ) => {
+    const sha256 = await sha256FileHex(file as File);
+    const objectKey = buildObjectKey(targetOwnerType, targetOwnerId, fileName);
+    const regRes = await api<{ evidenceId?: string; id?: string; status?: string }>("/evidence", {
+      method: "POST",
+      signal,
+      body: {
+        ownerType: targetOwnerType,
+        ownerId: targetOwnerId,
+        objectKey,
+        sha256,
+        purpose,
+        mimeType,
+        sizeBytes,
+      },
+    });
+    const evidenceId = regRes.evidenceId ?? regRes.id;
+    if (!evidenceId) {
+      throw new Error("Сервер не вернул идентификатор зарегистрированного файла.");
+    }
+    const buffer = await file.arrayBuffer();
+    const contentBase64 = arrayBufferToBase64(buffer);
+    await api(`/evidence/${evidenceId}/upload`, {
+      method: "POST",
+      signal,
+      body: { contentBase64, mimeType },
+    });
+    return evidenceId;
+  };
+
+  /** Puts files into the on-device queue; returns how many were accepted. */
+  const queueFiles = async (
+    files: File[],
+    targetOwnerType: EvidenceOwnerType,
+    targetOwnerId: string,
+  ): Promise<number> => {
+    if (!evidenceQueueAvailable()) return 0;
+    let queued = 0;
+    for (const file of files) {
+      if (!ALLOWED_MIME_SET.has(file.type)) continue;
+      if (file.size <= 0 || file.size > MAX_EVIDENCE_BYTES) continue;
+      try {
+        await enqueueEvidence({
+          ownerType: targetOwnerType,
+          ownerId: targetOwnerId,
+          purpose,
+          fileName: file.name,
+          mimeType: file.type,
+          sizeBytes: file.size,
+          blob: file,
+        });
+        queued += 1;
+      } catch {
+        // A browser that refuses IndexedDB cannot queue: the file is simply lost, and the
+        // upload error below tells the truth about it.
+      }
+    }
+    return queued;
+  };
+
+  const refreshQueuedCount = useCallback(async () => {
+    if (!evidenceQueueAvailable() || !ownerType || !ownerId) {
+      setQueuedCount(0);
+      return;
+    }
+    try {
+      const rows = await queuedEvidence(ownerType, ownerId);
+      setQueuedCount(rows.length);
+    } catch {
+      setQueuedCount(0);
+    }
+  }, [ownerType, ownerId]);
+
+  /** Sends everything that waited in the queue as soon as the network is back. */
+  const flushQueuedEvidence = useCallback(async () => {
+    if (!evidenceQueueAvailable() || !ownerType || !ownerId) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    let rows: QueuedEvidence[] = [];
+    try {
+      rows = await queuedEvidence(ownerType, ownerId);
+    } catch {
+      return;
+    }
+    if (!rows.length) {
+      setQueuedCount(0);
+      return;
+    }
+    const uploaded: string[] = [];
+    for (const row of rows) {
+      try {
+        await uploadEvidenceFile(
+          row.blob,
+          row.fileName,
+          row.mimeType,
+          row.sizeBytes,
+          row.ownerType as EvidenceOwnerType,
+          row.ownerId,
+        );
+        uploaded.push(row.id);
+      } catch (err) {
+        await markEvidenceAttempt(row.id, formatError(err)).catch(() => undefined);
+        // The connection is still broken: the rest of the queue waits for the next attempt.
+        break;
+      }
+    }
+    if (uploaded.length) {
+      await removeQueuedEvidence(uploaded).catch(() => undefined);
+      await refreshQueuedCount();
+      await loadAssets({ reportErrorToast: true }).catch(() => undefined);
+      notify({
+        kind: "ok",
+        text: `Отправлено файлов из очереди: ${uploaded.length}.`,
+      });
+    }
+  }, [ownerType, ownerId, refreshQueuedCount, loadAssets, notify]);
+
+  useEffect(() => {
+    void refreshQueuedCount();
+  }, [refreshQueuedCount]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleOnline = () => void flushQueuedEvidence();
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, [flushQueuedEvidence]);
+
   const handleFilesSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
@@ -299,6 +461,20 @@ export function EvidenceUploader({
     const targetOwnerId = ownerId;
     const targetOwnerKey = evidenceOwnerKey(targetOwnerType, targetOwnerId);
     const isSameOwner = () => activeOwnerRef.current.ownerKey === targetOwnerKey;
+
+    // No network in the stairwell: the photo is kept on the device and uploaded when the
+    // connection returns, instead of being lost with the page.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      const queued = await queueFiles(files, targetOwnerType, targetOwnerId);
+      if (queued > 0) {
+        notify({
+          kind: "ok",
+          text: `Сети нет: файлов сохранено в очереди — ${queued}. Они уйдут автоматически, когда связь появится.`,
+        });
+        await refreshQueuedCount();
+      }
+      return;
+    }
 
     const { generation, abortController } = startEvidenceUploadBatch(targetOwnerKey, files.length);
     const isCancelled = () => abortController.signal.aborted;
@@ -326,41 +502,34 @@ export function EvidenceUploader({
           continue;
         }
 
-        const sha256 = await sha256FileHex(file);
-        if (isCancelled()) return;
-        const objectKey = buildObjectKey(targetOwnerType, targetOwnerId, file.name);
-        const regRes = await api<{ evidenceId?: string; id?: string; status?: string }>("/evidence", {
-          method: "POST",
-          signal: abortController.signal,
-          body: {
-            ownerType: targetOwnerType,
-            ownerId: targetOwnerId,
-            objectKey,
-            sha256,
-            purpose,
-            mimeType: file.type,
-            sizeBytes: file.size,
-          },
-        });
-        if (isCancelled()) return;
-
-        const evidenceId = regRes.evidenceId ?? regRes.id;
-        if (!evidenceId) {
-          throw new Error("Сервер не вернул идентификатор зарегистрированного файла.");
+        try {
+          await uploadEvidenceFile(
+            file,
+            file.name,
+            file.type,
+            file.size,
+            targetOwnerType,
+            targetOwnerId,
+            abortController.signal,
+          );
+        } catch (err) {
+          if (isCancelled() || (err instanceof DOMException && err.name === "AbortError")) return;
+          // A network failure must not throw the photo away: it goes to the local queue.
+          if (isNetworkFailure(err)) {
+            const queued = await queueFiles([file], targetOwnerType, targetOwnerId);
+            if (queued > 0) {
+              await refreshQueuedCount();
+              if (isSameOwner()) {
+                notify({
+                  kind: "ok",
+                  text: "Связь пропала: файл сохранён на устройстве и уйдёт автоматически.",
+                });
+              }
+              continue;
+            }
+          }
+          throw err;
         }
-
-        const buffer = await file.arrayBuffer();
-        if (isCancelled()) return;
-        const contentBase64 = arrayBufferToBase64(buffer);
-
-        await api(`/evidence/${evidenceId}/upload`, {
-          method: "POST",
-          signal: abortController.signal,
-          body: {
-            contentBase64,
-            mimeType: file.type,
-          },
-        });
         if (isCancelled()) return;
 
         uploadedCount += 1;
@@ -431,7 +600,9 @@ export function EvidenceUploader({
             <span>{title}</span>
           </span>
         }
-        subtitle={`Допустимы JPEG, PNG, WebP, PDF до 15 МБ · Проверено: ${verifiedCount}`}
+        subtitle={`Допустимы JPEG, PNG, WebP, PDF до 15 МБ · Проверено: ${verifiedCount}${
+          queuedCount > 0 ? ` · в очереди без сети: ${queuedCount}` : ""
+        }`}
         actions={
           <div className="button-row">
             <input
@@ -444,6 +615,26 @@ export function EvidenceUploader({
               onChange={e => void handleFilesSelected(e)}
               style={{ display: "none" }}
             />
+            <input
+              ref={cameraInputRef}
+              id={`${inputId}-camera`}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              capture="environment"
+              disabled={uploading || !ownerId}
+              onChange={e => void handleFilesSelected(e)}
+              style={{ display: "none" }}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              leadingIcon={<Camera size={15} aria-hidden="true" />}
+              disabled={!ownerId}
+              onClick={() => cameraInputRef.current?.click()}
+            >
+              Снять фото
+            </Button>
             <Button
               type="button"
               variant="secondary"
@@ -454,6 +645,17 @@ export function EvidenceUploader({
             >
               {uploading ? `Загрузка (${uploadingCount})...` : "Загрузить фото / PDF"}
             </Button>
+            {queuedCount > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                leadingIcon={<RefreshCw size={15} aria-hidden="true" />}
+                onClick={() => void flushQueuedEvidence()}
+              >
+                Отправить очередь ({queuedCount})
+              </Button>
+            )}
             {uploading && (
               <Button
                 type="button"

@@ -9,6 +9,7 @@ import {
   CreditCard,
   Download,
   FileText,
+  History,
   Info,
   ListOrdered,
   MapPin,
@@ -25,6 +26,8 @@ import {
 import { ApiError, api, dt, money, newKey } from "../api";
 import { DocumentPrintModal, type DocumentKind } from "../components/DocumentPrintModal";
 import { EvidenceUploader } from "../components/EvidenceUploader";
+import { useUrlState } from "../hooks/useUrlState";
+import { revealRegion } from "../hooks/useScrollIntoView";
 import {
   evidenceOwnerKey,
   getOwnerUploadSnapshot,
@@ -281,15 +284,59 @@ function errorText(err: unknown): string {
   return formatError(err);
 }
 
+/**
+ * A short option label: the native `<select>` clips a long option without an ellipsis, so the
+ * option carries only the day and the time range, and the rest of the window is explained in the
+ * hint under the field (MA-14).
+ */
 function windowLabel(window: WindowDto): string {
-  return `${dt(window.startsAt)} — ${dt(window.endsAt)} · ${
-    window.isShared ? "общий слот" : "внеплановый слот"
-  } · свободно ${Math.max(window.capacityOrders - window.reservedOrders, 0)} из ${window.capacityOrders}`;
+  const starts = new Date(window.startsAt);
+  const ends = new Date(window.endsAt);
+  const day = starts.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  const time = (value: Date) => value.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  return `${day} · ${time(starts)}–${time(ends)}`;
+}
+
+/** What the shortened option label cannot carry: the slot kind and how much room is left. */
+function windowHint(window: WindowDto): string {
+  const kind = window.isShared ? "общий слот" : "внеплановый слот";
+  const free = Math.max(window.capacityOrders - window.reservedOrders, 0);
+  return `${kind} · свободно ${free} из ${window.capacityOrders}`;
 }
 
 /** A window whose end time has passed can no longer hold capacity — the server rejects such a hold. */
 function isWindowClosed(window: WindowDto, now: number): boolean {
   return new Date(window.endsAt).getTime() <= now;
+}
+
+/**
+ * The last quote is remembered by id only. The quote itself is an immutable server-side snapshot,
+ * so the customer can come back to the very same calculation and support can open it by id.
+ */
+const LAST_QUOTE_KEY = "laundry.lastQuoteId";
+
+function readLastQuoteId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_QUOTE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberQuoteId(id: string): void {
+  try {
+    window.localStorage.setItem(LAST_QUOTE_KEY, id);
+  } catch {
+    // A browser that refuses local storage still works — the quote is simply not offered again.
+  }
+}
+
+function forgetQuoteId(): void {
+  try {
+    window.localStorage.removeItem(LAST_QUOTE_KEY);
+  } catch {
+    // Same as above: nothing to clean up.
+  }
 }
 
 const NOTIFICATIONS_PAGE_SIZE = 100;
@@ -324,7 +371,9 @@ async function fetchNotificationsPage(
 
 export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; notify: NotifyFn }) {
   const tabsId = useId();
-  const [activeTab, setActiveTab] = useState("new");
+  // The open section is part of the URL: a reload keeps it, a colleague can open the same view,
+  // and the Back button returns to the previous section instead of leaving the application.
+  const [activeTab, setActiveTab] = useUrlState<string>("tab", "new");
   const [repeat, setRepeat] = useState<RepeatDto | null>(null);
   const [notifications, setNotifications] = useState<NotificationDto[] | null>(null);
   const [totalUnread, setTotalUnread] = useState<number | null>(null);
@@ -407,6 +456,10 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
 
   return (
     <div className="workspace-grid">
+      {/* Every other workspace starts with a visible H1; the customer workspace began with a tab
+          strip, so its heading hierarchy started at H2. The title is for the screen reader and
+          for the page outline — the topbar already shows the same name to everybody else. */}
+      <h1 className="visually-hidden">Личный кабинет</h1>
       <Tabs
         idPrefix={tabsId}
         items={tabs.map(tab => ({
@@ -475,6 +528,10 @@ function NewOrderTab({
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [addresses, setAddresses] = useState<AddressDto[]>([]);
 
+  // The last quote is kept by id only. A quote is an immutable server-side snapshot, so the
+  // customer can come back to it — and a support agent can open the very same snapshot by id.
+  const [lastQuote, setLastQuote] = useState<QuoteDto | null>(null);
+
   const buildings = useMemo(() => {
     if (demo?.buildings && demo.buildings.length > 0) return demo.buildings;
     const seen = new Set<string>();
@@ -488,6 +545,8 @@ function NewOrderTab({
   }, [demo?.buildings, addresses]);
   const [buildingId, setBuildingId] = useState<string>(demo?.buildings?.[0]?.id ?? "");
   const [addressId, setAddressId] = useState<string>("");
+  // The service area of the chosen building: address, city and the timezone the windows use.
+  const [resolvedZone, setResolvedZone] = useState<{ address: string; city: string; timezone: string } | null>(null);
 
   const [pickupWindows, setPickupWindows] = useState<WindowDto[]>([]);
   const [deliveryWindows, setDeliveryWindows] = useState<WindowDto[]>([]);
@@ -502,6 +561,11 @@ function NewOrderTab({
   const [tier, setTier] = useState<"economy" | "protected">("economy");
   const [quantity, setQuantity] = useState("1000");
   const [declared, setDeclared] = useState<PickedGarment[]>([]);
+  // The landing page offers an individual visit outside the house schedule for an extra fee.
+  // The API has always priced it; without this switch the customer could not buy what was
+  // advertised, so the offer and the product have to meet.
+  const [offSchedulePickup, setOffSchedulePickup] = useState(false);
+  const [offScheduleDelivery, setOffScheduleDelivery] = useState(false);
 
   const [quote, setQuote] = useState<QuoteDto | null>(null);
   const [quoteFingerprint, setQuoteFingerprint] = useState<string | null>(null);
@@ -538,9 +602,11 @@ function NewOrderTab({
       serviceId,
       tier,
       quantity,
+      offSchedulePickup,
+      offScheduleDelivery,
       declared: tier === "protected" ? declared.map((d) => [d.subtypeId, d.quantity]) : [],
     }),
-    [buildingId, addressId, pickupWindowId, deliveryWindowId, serviceId, tier, quantity, declared],
+    [buildingId, addressId, pickupWindowId, deliveryWindowId, serviceId, tier, quantity, offSchedulePickup, offScheduleDelivery, declared],
   );
   const quoteStale = Boolean(quote && quoteFingerprint !== formFingerprint);
   const quoteExpired = quote ? new Date(quote.expiresAt).getTime() <= now : false;
@@ -552,6 +618,27 @@ function NewOrderTab({
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Offer the previous calculation back to the customer instead of making them start over.
+  useEffect(() => {
+    let cancelled = false;
+    const storedId = readLastQuoteId();
+    if (!storedId) return;
+    api<QuoteDto>(`/quotes/${encodeURIComponent(storedId)}`)
+      .then(stored => {
+        if (!cancelled) setLastQuote(stored);
+      })
+      .catch(() => {
+        // The quote expired or was never created on this account: forget it quietly.
+        if (!cancelled) {
+          setLastQuote(null);
+          forgetQuoteId();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const loadCatalog = useCallback(async () => {
@@ -658,6 +745,28 @@ function NewOrderTab({
     void loadWindows(buildingId);
   }, [buildingId, loadWindows]);
 
+  // The zone of service is resolved by the server: the customer sees the address, the city and
+  // the timezone of the windows before choosing a slot.
+  useEffect(() => {
+    if (!buildingId) {
+      setResolvedZone(null);
+      return;
+    }
+    let cancelled = false;
+    void api<{ address: string; city: string; timezone: string }>(
+      `/service-areas/resolve?buildingId=${encodeURIComponent(buildingId)}`,
+    )
+      .then(zone => {
+        if (!cancelled) setResolvedZone(zone);
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedZone(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [buildingId]);
+
   // The server still lists windows whose time has passed; such a slot can no longer be held.
   const openPickupWindows = useMemo(
     () => pickupWindows.filter((window) => !isWindowClosed(window, now)),
@@ -719,6 +828,9 @@ function NewOrderTab({
           ...(demo?.tariffVersionId ? { tariffVersionId: demo.tariffVersionId } : {}),
           pickupWindowId,
           deliveryWindowId,
+          // An individual visit outside the house schedule is priced as such by the tariff.
+          ...(offSchedulePickup ? { offSchedulePickup: true } : {}),
+          ...(offScheduleDelivery ? { offScheduleDelivery: true } : {}),
           lines: [{ serviceId, tier, quantity: parsedQuantity, unit }],
           // The declaration travels inside the immutable quote, so the courier's
           // acceptance can be reconciled against exactly what the customer saw.
@@ -731,6 +843,9 @@ function NewOrderTab({
       if (quoteReqRef.current !== reqId) return;
       setQuote(created);
       setQuoteFingerprint(requestFingerprint);
+      // Remember the id so the customer can come back to this exact calculation.
+      rememberQuoteId(created.id);
+      setLastQuote(created);
       setPickupHold(null);
       setDeliveryHold(null);
       holdAttemptKeyRef.current = null;
@@ -994,6 +1109,15 @@ function NewOrderTab({
                 <option key={item.id} value={item.id}>{item.address}</option>
               ))}
             </select>
+            {/* The zone of service is resolved on the server: the customer sees the address, the
+                city and the timezone their windows are given in, instead of guessing. */}
+            <p className="field__hint">
+              {resolvedZone
+                ? `${resolvedZone.address} · ${resolvedZone.city} · часовой пояс ${resolvedZone.timezone}`
+                : buildingId
+                  ? "Уточняем адрес и часовой пояс…"
+                  : "Выберите дом — покажем адрес, город и часовой пояс окна."}
+            </p>
           </div>
 
           {buildingAddresses.length > 0 && (
@@ -1053,6 +1177,11 @@ function NewOrderTab({
                 <option key={window.id} value={window.id}>{windowLabel(window)}</option>
               ))}
             </select>
+            <p className="field__hint">
+              {openPickupWindows.find((window) => window.id === pickupWindowId)
+                ? windowHint(openPickupWindows.find((window) => window.id === pickupWindowId) as WindowDto)
+                : "Выберите окно забора"}
+            </p>
           </div>
 
           <div className="field">
@@ -1070,6 +1199,11 @@ function NewOrderTab({
                 <option key={window.id} value={window.id}>{windowLabel(window)}</option>
               ))}
             </select>
+            <p className="field__hint">
+              {openDeliveryWindows.find((window) => window.id === deliveryWindowId)
+                ? windowHint(openDeliveryWindows.find((window) => window.id === deliveryWindowId) as WindowDto)
+                : "Выберите окно доставки"}
+            </p>
           </div>
 
           <div className="field">
@@ -1081,15 +1215,45 @@ function NewOrderTab({
             </select>
           </div>
 
+          <fieldset className="fieldset">
+            <legend>Индивидуальный визит вне графика дома</legend>
+            <p className="muted">
+              Общий рейс по дому бесплатный. Индивидуальный забор или доставка в удобное время
+              оплачиваются отдельно — стоимость появится в расчёте до подтверждения.
+            </p>
+            <div className="stack">
+              <label className="check-row" htmlFor={`${uid}-off-pickup`}>
+                <input
+                  id={`${uid}-off-pickup`}
+                  type="checkbox"
+                  checked={offSchedulePickup}
+                  onChange={(event) => setOffSchedulePickup(event.target.checked)}
+                />
+                <span>Забрать в индивидуальное время</span>
+              </label>
+              <label className="check-row" htmlFor={`${uid}-off-delivery`}>
+                <input
+                  id={`${uid}-off-delivery`}
+                  type="checkbox"
+                  checked={offScheduleDelivery}
+                  onChange={(event) => setOffScheduleDelivery(event.target.checked)}
+                />
+                <span>Доставить в индивидуальное время</span>
+              </label>
+            </div>
+          </fieldset>
+
           <div className="field">
             <label htmlFor={`${uid}-quantity`}>
               Количество ({selectedService ? stateLabel(UNIT_LABELS, selectedService.unit) : "—"})
             </label>
             <input
               id={`${uid}-quantity`}
+              className="input"
               type="number"
               min={1}
               step={1}
+              inputMode="numeric"
               value={quantity}
               onChange={(event) => setQuantity(event.target.value)}
             />
@@ -1169,6 +1333,7 @@ function NewOrderTab({
           <Button
             variant="secondary"
             disabled={isBusy || !quote || quoteStale}
+            aria-describedby={`${uid}-order-step-hint`}
             leadingIcon={<Calendar size={16} aria-hidden="true" />}
             onClick={() => void handleHold()}
           >
@@ -1177,12 +1342,24 @@ function NewOrderTab({
           <Button
             variant="primary"
             disabled={isBusy || !quote || quoteStale || !pickupHold || !deliveryHold}
+            aria-describedby={`${uid}-order-step-hint`}
             leadingIcon={<Check size={16} aria-hidden="true" />}
             onClick={() => void handleBook()}
           >
             Подтвердить заказ
           </Button>
         </div>
+        {/* A disabled button that explains nothing is a dead end: the customer has to be told
+            which step is missing (MA-28). The hint is linked to the two disabled controls. */}
+        <p className="muted" id={`${uid}-order-step-hint`} style={{ marginBlockStart: 8 }}>
+          {!quote
+            ? "Сначала рассчитайте стоимость — без расчёта забронировать слоты нельзя."
+            : quoteStale
+              ? "Расчёт устарел: параметры заказа изменились — рассчитайте стоимость заново."
+              : !pickupHold || !deliveryHold
+                ? "Забронируйте слоты забора и доставки — после этого заказ можно подтвердить."
+                : "Всё готово: заказ можно подтвердить."}
+        </p>
       </section>
 
       <section className="panel">
@@ -1192,6 +1369,26 @@ function NewOrderTab({
             title="Расчёта пока нет"
             text="Стоимость считает сервер по действующему тарифу. Выберите дом, услугу и окна забора с доставкой, затем нажмите «Рассчитать стоимость»."
           />
+        )}
+        {lastQuote && !quote && (
+          <div className="alert-banner" role="status">
+            <History size={16} aria-hidden="true" />
+            <span>
+              <strong>Ваш прошлый расчёт: {money(lastQuote.totalKopeks)}</strong> — действует до{" "}
+              {dt(lastQuote.expiresAt)}. Параметры заказа могли измениться, поэтому для оформления
+              заказа расчёт нужно подтвердить заново.
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setQuote(lastQuote);
+                setQuoteFingerprint("");
+              }}
+            >
+              Показать расчёт
+            </Button>
+          </div>
         )}
         {quote && (
           <>
@@ -1355,6 +1552,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<OrderDetailDto | null>(null);
+  const detailPanelRef = useRef<HTMLElement | null>(null);
   const [finance, setFinance] = useState<FinanceDto | null>(null);
   const [timeline, setTimeline] = useState<TimelineEventDto[]>([]);
   const [claims, setClaims] = useState<ClaimDto[]>([]);
@@ -1498,6 +1696,13 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
+  // The detail of a picked order lives under the list. Without this the screen looks unchanged:
+  // nothing scrolls, nothing takes focus, and the user is left guessing whether the click worked.
+  useEffect(() => {
+    if (!detail) return;
+    revealRegion(detailPanelRef.current);
+  }, [detail]);
+
   const runAction = async (key: string, fn: () => Promise<void>, okMessage: string) => {
     setBusy(key);
     notify(null);
@@ -1532,7 +1737,14 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   };
 
   const handleAdjustmentDecision = async (adjustmentId: string, accept: boolean) => {
-    if (!detail?.acceptedQuoteHash) return;
+    if (!detail?.acceptedQuoteHash) {
+      // A silent return left the customer staring at a dead button with no explanation.
+      notify({
+        kind: "error",
+        text: "Решение по доплате недоступно: у заказа нет принятой котировки. Обратитесь в поддержку.",
+      });
+      return;
+    }
     await runAction(
       `adjustment-${adjustmentId}`,
       async () => {
@@ -1789,9 +2001,9 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
 
       {detail && (
         <>
-          <section className="panel">
+          <section className="panel" ref={detailPanelRef}>
             <div className="panel-head">
-              <h3 className="panel-title" style={{ margin: 0 }}>
+              <h3 className="panel-title" tabIndex={-1} style={{ margin: 0 }}>
                 Заказ <span className="mono">{detail.publicNumber}</span>
               </h3>
               <Badge tone={orderStateTone(detail.lifecycleState)}>
@@ -1974,6 +2186,11 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                         <Button
                           variant="primary"
                           disabled={busy !== null || !detail.acceptedQuoteHash}
+                          title={
+                            detail.acceptedQuoteHash
+                              ? undefined
+                              : "Решение недоступно: у заказа нет принятой котировки. Обратитесь в поддержку."
+                          }
                           leadingIcon={<Check size={16} aria-hidden="true" />}
                           onClick={() => void handleAdjustmentDecision(adjustment.id, true)}
                         >
@@ -1982,6 +2199,11 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                         <Button
                           variant="danger"
                           disabled={busy !== null || !detail.acceptedQuoteHash}
+                          title={
+                            detail.acceptedQuoteHash
+                              ? undefined
+                              : "Решение недоступно: у заказа нет принятой котировки. Обратитесь в поддержку."
+                          }
                           onClick={() => void handleAdjustmentDecision(adjustment.id, false)}
                         >
                           Отказаться от доплаты
@@ -2086,7 +2308,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             </div>
 
             {detail.garments.length > 0 && (
-              <fieldset style={{ border: "1px solid var(--border-hairline)", borderRadius: 10, padding: 12 }}>
+              <fieldset className="fieldset">
                 <legend className="muted">Вещи по претензии (необязательно)</legend>
                 {detail.garments.map((garment) => (
                   <label className="check-row" key={garment.id}>
@@ -2686,6 +2908,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [threadDetail, setThreadDetail] = useState<ThreadDetailDto | null>(null);
+  const threadDetailPanelRef = useRef<HTMLElement | null>(null);
   const threadReqRef = useRef(0);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
@@ -2845,6 +3068,14 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
     void loadThread(activeThreadId);
   }, [activeThreadId, loadThread]);
 
+  // The opened thread is rendered under the list. Without this the screen looks unchanged: nothing
+  // scrolls, nothing takes focus, and the customer is left guessing whether the click worked
+  // (P1-06).
+  useEffect(() => {
+    if (!threadDetail) return;
+    revealRegion(threadDetailPanelRef.current);
+  }, [threadDetail]);
+
   const handleOpenThread = async () => {
     if (!orderId) {
       notify({ kind: "error", text: "Выберите заказ, к которому относится обращение" });
@@ -2970,9 +3201,9 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       </section>
 
       {threadDetail && (
-        <section className="panel">
+        <section className="panel" ref={threadDetailPanelRef}>
           <div className="panel-head">
-            <h3 className="panel-title" style={{ margin: 0 }}>{threadDetail.thread.subject}</h3>
+            <h3 className="panel-title" tabIndex={-1} style={{ margin: 0 }}>{threadDetail.thread.subject}</h3>
             <Badge tone={threadDetail.thread.state === "open" ? "warn" : "ok"}>
               {threadDetail.thread.state === "open" ? "Открыто" : "Закрыто"}
             </Badge>

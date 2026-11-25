@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useId,
+  type HTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -55,20 +56,58 @@ export function Field({ label, children, hint, error, optional = false, classNam
 /* Input                                                               */
 /* ------------------------------------------------------------------ */
 
-export type InputProps = InputHTMLAttributes<HTMLInputElement> & {
-  label?: ReactNode;
-  hint?: ReactNode;
-  error?: ReactNode;
-  optional?: boolean;
-  className?: string;
+/**
+ * Keyboard semantics of a control. The primitives fill in a sane default
+ * from the type of the field, so every form can set the hints per field
+ * without repeating the same markup (MA-24).
+ */
+export type ControlSemantics = {
+  /** Virtual keyboard: `tel`, `numeric`, `decimal`, `email`, … */
+  inputMode?: HTMLAttributes<HTMLElement>["inputMode"];
+  /** Browser autofill hint: `tel`, `email`, `one-time-code`, … */
+  autoComplete?: string;
+  /** Label of the action key of the virtual keyboard. */
+  enterKeyHint?: HTMLAttributes<HTMLElement>["enterKeyHint"];
 };
 
+const INPUT_MODE_BY_TYPE: Record<string, NonNullable<HTMLAttributes<HTMLElement>["inputMode"]>> = {
+  tel: "tel",
+  email: "email",
+  url: "url",
+  search: "search",
+  number: "decimal",
+};
+
+const AUTOCOMPLETE_BY_TYPE: Record<string, string> = {
+  tel: "tel",
+  email: "email",
+  "one-time-code": "one-time-code",
+};
+
+export type InputProps = Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  keyof ControlSemantics
+> &
+  ControlSemantics & {
+    label?: ReactNode;
+    hint?: ReactNode;
+    error?: ReactNode;
+    optional?: boolean;
+    className?: string;
+  };
+
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  { label, hint, error, optional, className, id, ...rest },
+  { label, hint, error, optional, className, id, type, inputMode, autoComplete, enterKeyHint, ...rest },
   ref,
 ) {
+  const semantics: ControlSemantics = {
+    inputMode: inputMode ?? INPUT_MODE_BY_TYPE[type ?? "text"],
+    autoComplete: autoComplete ?? AUTOCOMPLETE_BY_TYPE[type ?? ""],
+    enterKeyHint: enterKeyHint ?? "done",
+  };
+
   if (!label) {
-    return <input ref={ref} id={id} className={cx("input", className)} {...rest} />;
+    return <input ref={ref} id={id} type={type} className={cx("input", className)} {...semantics} {...rest} />;
   }
   return (
     <Field label={label} hint={hint} error={error} optional={optional} className={className}>
@@ -76,8 +115,10 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
         <input
           ref={ref}
           id={fieldId}
+          type={type}
           aria-describedby={describedBy}
           aria-invalid={invalid || undefined}
+          {...semantics}
           {...rest}
         />
       )}
@@ -89,16 +130,33 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
 /* Select                                                              */
 /* ------------------------------------------------------------------ */
 
-export type SelectProps = SelectHTMLAttributes<HTMLSelectElement> & {
-  label?: ReactNode;
-  hint?: ReactNode;
-  error?: ReactNode;
-  optional?: boolean;
-  className?: string;
-};
+export type SelectProps = Omit<
+  SelectHTMLAttributes<HTMLSelectElement>,
+  keyof ControlSemantics
+> &
+  ControlSemantics & {
+    label?: ReactNode;
+    hint?: ReactNode;
+    error?: ReactNode;
+    optional?: boolean;
+    className?: string;
+  };
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select(
-  { label, hint, error, optional, className, id, children, ...rest },
+  {
+    label,
+    hint,
+    error,
+    optional,
+    className,
+    id,
+    children,
+    // `inputMode` and `enterKeyHint` describe a text field: a native select has
+    // no keyboard of its own, so only the autofill hint reaches the element.
+    inputMode: _inputMode,
+    enterKeyHint: _enterKeyHint,
+    ...rest
+  },
   ref,
 ) {
   if (!label) {

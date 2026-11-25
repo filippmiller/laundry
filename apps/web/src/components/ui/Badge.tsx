@@ -32,7 +32,7 @@ export function Badge({
     <span className={cx("badge", TONE_CLASS[tone], dot && "badge--dot", large && "badge--lg", className)}>
       {dot ? <span className="badge__dot" aria-hidden="true" /> : null}
       {icon}
-      {children}
+      <span className="badge__label">{children}</span>
     </span>
   );
 }

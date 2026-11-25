@@ -55,7 +55,9 @@ export function DataTable<T>({
               key={rowKey(row, index)}
               className={onRowClick ? "clean-table__row--interactive" : undefined}
               tabIndex={onRowClick ? 0 : undefined}
-              role={onRowClick ? "button" : undefined}
+              /* No `role` on the row: a `<tr>` keeps the table semantics for
+                 screen readers and cell navigation (MA-18). The row stays
+                 focusable and reacts to Enter and Space. */
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               onKeyDown={
                 onRowClick

@@ -1,12 +1,12 @@
 import { and, asc, eq, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import type { Db, DbLike } from "../db/client.js";
 import {
   buildings, cities, courierShifts, customerAddresses, documentVersions, membershipRoles, memberships,
   organizations, partnerContracts, partnerPriceVersions, partners, priceRules, seals, serviceWindows, services,
   tariffPlans, tariffVersions, users,
 } from "../db/schema.js";
 import { AppError } from "../core/errors.js";
-import { seedDemoTenantBook, DEMO_PERSONAS } from "./demo-book.js";
+import { seedDemoTenantBook, DEMO_PERSONAS, isDemoPartnerRole } from "./demo-book.js";
 const DEMO_NAME = "Демо-прачечная";
 const TERMS = "offer-demo-2026-11";
 
@@ -46,7 +46,7 @@ const DEMO_WHOLESALE = {
  * seed was about 1 ₽ per kilogram, making every financial figure in the product nonsense. This
  * touches only the demo tenant.
  */
-async function ensureDemoEconomics(db: Db, organizationId: string): Promise<void> {
+async function ensureDemoEconomics(db: DbLike, organizationId: string): Promise<void> {
   const serviceRows = await db.select({ id: services.id, code: services.code }).from(services)
     .where(eq(services.organizationId, organizationId));
   const byCode = new Map(serviceRows.map(row => [row.code, row.id]));
@@ -111,6 +111,18 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
   ) {
     throw new AppError("UNAUTHORIZED", "DEMO_SEED_DISABLED");
   }
+  // The demo tenant is created on demand, and in the preview profile the endpoint is public:
+  // two visitors (or two tabs of the same visitor) can ask for it at the same moment. Without a
+  // lock the second call collides with the first one on the unique indexes and the caller gets a
+  // 409 instead of the demo book. The advisory lock makes the second caller wait for the first
+  // one and then find the tenant that is already there.
+  return db.transaction(async tx => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('laundry:seed-demo'))`);
+    return seedDemoInTransaction(tx, options);
+  });
+}
+
+async function seedDemoInTransaction(db: DbLike, options?: { previewAuthorized?: boolean }) {
   const [existing] = await db.select().from(organizations).where(eq(organizations.name, DEMO_NAME)).limit(1);
   if (existing) return seedBookForExistingTenant(db, existing.id);
 
@@ -160,7 +172,7 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
     }
     const [membership] = await db.insert(memberships).values({
       organizationId: org.id, userId: user.id,
-      partnerId: demo.role === "laundry_operator" ? partner.id : null,
+      partnerId: isDemoPartnerRole(demo.role) ? partner.id : null,
     }).returning();
     await db.insert(membershipRoles).values({ membershipId: membership.id, role: demo.role });
   }
@@ -248,9 +260,9 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
  * produces are indistinguishable in shape from real rows — and every scenario reuses a stable
  * idempotency key, so a second run replays instead of duplicating.
  */
-async function seedBookForTenant(db: Db, summary: Awaited<ReturnType<typeof demoSummary>>) {
+async function seedBookForTenant(db: DbLike, summary: Awaited<ReturnType<typeof demoSummary>>) {
   const partnerId = summary.partners[0]?.id;
-  if (!partnerId) return { orders: 0, customers: 0, protectedOrders: 0, garments: 0, invoices: 0, captures: 0, refunds: 0, claims: 0 };
+  if (!partnerId) return { orders: 0, customers: 0, protectedOrders: 0, garments: 0, invoices: 0, captures: 0, refunds: 0, claims: 0, partnerInvoices: 0, partnerDisputes: 0, partnerCreditNotes: 0, partnerPayouts: 0 };
   return seedDemoTenantBook(db, {
     organizationId: summary.organizationId,
     buildings: summary.buildings,
@@ -262,7 +274,7 @@ async function seedBookForTenant(db: Db, summary: Awaited<ReturnType<typeof demo
   });
 }
 
-async function seedBookForExistingTenant(db: Db, organizationId: string) {
+async function seedBookForExistingTenant(db: DbLike, organizationId: string) {
   await ensureDemoEconomics(db, organizationId);
   const minEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   await db.update(courierShifts).set({
@@ -277,7 +289,7 @@ async function seedBookForExistingTenant(db: Db, organizationId: string) {
 }
 
 async function demoSummary(
-  db: Db,
+  db: DbLike,
   organizationId: string,
   extra: Record<string, string> = {},
 ) {

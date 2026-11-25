@@ -13,6 +13,9 @@
     scrollbar-gutter: stable;
     scroll-behavior: smooth;
     -webkit-text-size-adjust: 100%;
+    /* The topbar is sticky, so a jump to an anchor has to leave room for it
+       (P2-02). */
+    scroll-padding-top: var(--topbar-height);
   }
 
   body {
@@ -115,12 +118,31 @@
   /* ------------------------------------------------------------------
      Canvas — a single, very soft daylight gradient gives the alabaster
      surface depth without introducing a second colour.
+
+     The gradient lives on a fixed layer instead of
+     `background-attachment: fixed` on the body: that attachment repaints
+     the whole document on every scroll frame on mobile browsers (MA-20).
      ------------------------------------------------------------------ */
-  body {
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
     background-image:
       radial-gradient(1100px 520px at 12% -8%, rgba(255, 255, 255, 0.9) 0%, transparent 62%),
       radial-gradient(900px 460px at 92% 0%, rgba(230, 244, 240, 0.55) 0%, transparent 58%);
-    background-attachment: fixed;
+  }
+
+  /* ------------------------------------------------------------------
+     Scroll lock — the document is frozen while the mobile drawer is open
+     so the page behind the menu cannot scroll (MA-08). The class is
+     toggled on <html> and <body> by the shell.
+     ------------------------------------------------------------------ */
+  html.scroll-locked,
+  body.scroll-locked {
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 
   /* ------------------------------------------------------------------

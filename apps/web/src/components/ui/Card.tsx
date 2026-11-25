@@ -37,24 +37,34 @@ export function Card({
   );
 }
 
+/**
+ * The heading level of a card header. A card that lives inside another card
+ * must not repeat the level of its parent (MA-15 / MA-16): the default stays
+ * at 2, a nested card asks for 3.
+ */
+export type HeadingLevel = 2 | 3 | 4 | 5 | 6;
+
 export function CardHeader({
   title,
   subtitle,
   actions,
   eyebrow,
+  headingLevel = 2,
   className,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
   actions?: ReactNode;
   eyebrow?: ReactNode;
+  headingLevel?: HeadingLevel;
   className?: string;
 }) {
+  const Heading = `h${headingLevel}` as "h2" | "h3" | "h4" | "h5" | "h6";
   return (
     <div className={cx("panel-head", className)}>
       <div className="page-header__text">
         {eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}
-        <h2 className="panel-title">{title}</h2>
+        <Heading className="panel-title">{title}</Heading>
         {subtitle ? <p className="panel-subtitle">{subtitle}</p> : null}
       </div>
       {actions ? <div className="panel-actions">{actions}</div> : null}

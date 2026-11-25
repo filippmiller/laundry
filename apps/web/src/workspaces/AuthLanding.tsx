@@ -13,6 +13,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import { api, dt, type DemoConfig } from "../api";
+import { Badge } from "../components/ui/Badge";
 import { formatError, ORDER_STATE_LABELS, ROLE_LABELS, stateLabel } from "../labels";
 
 export type Me = { userId: string; organizationId: string; roles: string[] };
@@ -45,7 +46,9 @@ const INPUT_STYLE = {
   border: "1px solid var(--border-strong, #c9d1d9)",
   background: "var(--bg-surface, #ffffff)",
   color: "var(--ink-primary, #141b24)",
-  fontSize: "0.95rem",
+  // 16 px, not 15.2 px: below that iOS Safari zooms the whole page the moment the field is
+  // focused, and the user then has to zoom back out by hand (MA-06).
+  fontSize: "1rem",
 } as const;
 
 const FORM_STACK_STYLE = {
@@ -317,10 +320,9 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
       <section className="panel" aria-labelledby={`${baseId}-editorial-title`}>
         <div className="panel-head">
           <div>
-            <span className="pill info" style={{ marginBlockEnd: 10 }}>
-              <Sparkles size={14} aria-hidden="true" />
-              Соседский сервис ухода за вещами
-            </span>
+            <Badge tone="info" icon={<Sparkles size={14} aria-hidden="true" />}>
+              Соседний сервис ухода за вещами
+            </Badge>
             <h1 id={`${baseId}-editorial-title`} className="panel-title">
               Чисто — дворовая прачечная и химчистка
             </h1>
@@ -412,7 +414,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
               <h2 className="section-title" style={{ margin: 0, fontSize: "1.2rem" }}>
                 Вход в демо
               </h2>
-              <span className="pill ok">Тестовый стенд</span>
+              <Badge tone="ok">Тестовый стенд</Badge>
             </div>
 
             {previewConfig.requiresPreviewKey && (
@@ -423,10 +425,9 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                     Требуется ключ предпросмотра
                   </span>
                   {previewUnlocked && (
-                    <span className="pill ok">
-                      <CheckCircle2 size={14} aria-hidden="true" />
+                    <Badge tone="ok" icon={<CheckCircle2 size={14} aria-hidden="true" />}>
                       Доступ открыт
-                    </span>
+                    </Badge>
                   )}
                 </div>
                 <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
@@ -460,6 +461,9 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                 <input
                   id={demoPhoneId}
                   type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  enterKeyHint="go"
                   value={demoPhone}
                   onChange={(e) => {
                     demoTouchedRef.current = true;
@@ -550,10 +554,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
               <h2 className="section-title" style={{ margin: 0, fontSize: "1.2rem" }}>
                 Вход по телефону (OTP)
               </h2>
-              <span className="pill">
-                <Phone size={14} aria-hidden="true" />
-                Одноразовый код
-              </span>
+              <Badge icon={<Phone size={14} aria-hidden="true" />}>Одноразовый код</Badge>
             </div>
 
             <form onSubmit={handleOtpRequest} style={{ ...FORM_STACK_STYLE, marginBlockEnd: 18 }}>
@@ -577,6 +578,9 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                 <input
                   id={otpPhoneId}
                   type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  enterKeyHint="send"
                   value={otpPhone}
                   onChange={(e) => setOtpPhone(e.target.value)}
                   placeholder="+79990000001"
@@ -606,6 +610,8 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                   id={otpCodeId}
                   type="text"
                   inputMode="numeric"
+                  autoComplete="one-time-code"
+                  enterKeyHint="send"
                   value={otpCode}
                   onChange={(e) => setOtpCode(e.target.value)}
                   placeholder={otpRequested ? "Введите код из СМС" : "Сначала запросите код"}
@@ -633,10 +639,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
               <h2 className="section-title" style={{ margin: 0, fontSize: "1.2rem" }}>
                 Отследить заказ
               </h2>
-              <span className="pill">
-                <Truck size={14} aria-hidden="true" />
-                Без входа
-              </span>
+              <Badge icon={<Truck size={14} aria-hidden="true" />}>Без входа</Badge>
             </div>
 
             <form onSubmit={handleTrackSubmit} style={FORM_STACK_STYLE}>
@@ -660,6 +663,9 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                 <input
                   id={trackNumberId}
                   type="text"
+                  inputMode="text"
+                  autoComplete="off"
+                  enterKeyHint="next"
                   value={trackNumber}
                   onChange={(e) => setTrackNumber(e.target.value)}
                   placeholder="LA-0001"
@@ -673,6 +679,9 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                 <input
                   id={trackPhoneId}
                   type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  enterKeyHint="go"
                   value={trackPhone}
                   onChange={(e) => setTrackPhone(e.target.value)}
                   placeholder="+79990000001"
@@ -695,9 +704,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                   <span className="mono" style={{ fontWeight: 700 }}>
                     {trackResult.publicNumber ?? trackNumber.trim()}
                   </span>
-                  <span className="pill info">
-                    {stateLabel(ORDER_STATE_LABELS, trackResult.state)}
-                  </span>
+                  <Badge tone="info">{stateLabel(ORDER_STATE_LABELS, trackResult.state)}</Badge>
                 </div>
                 <div className="muted" style={{ fontSize: "0.875rem" }}>
                   Обновлено: <span className="mono">{dt(trackResult.updatedAt)}</span>

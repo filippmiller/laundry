@@ -6,6 +6,7 @@ import type { WorkspaceDef, WorkspaceKey } from "../workspaces/registry";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { Toast, ToastRegion } from "./ui/Toast";
+import { ProfilePanel } from "./ProfilePanel";
 
 export function Shell({
   me,
@@ -27,9 +28,11 @@ export function Shell({
   children: ReactNode;
 }) {
   const [railOpen, setRailOpen] = useState(false);
+  // «Мои данные и сессии» is a personal right, so it lives in the shell: every role gets it.
+  const [profileOpen, setProfileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(() =>
     typeof window !== "undefined" && typeof window.matchMedia === "function"
-      ? window.matchMedia("(max-width: 900px)").matches
+      ? window.matchMedia("(max-width: 768px)").matches
       : false,
   );
   const toggleRef = useRef<HTMLButtonElement>(null);
@@ -40,7 +43,7 @@ export function Shell({
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
-    const mq = window.matchMedia("(max-width: 900px)");
+    const mq = window.matchMedia("(max-width: 768px)");
     const update = () => {
       setIsMobile(mq.matches);
       if (!mq.matches) setRailOpen(false);
@@ -57,12 +60,14 @@ export function Shell({
       const firstFocusable = railRef.current?.querySelector<HTMLElement>(
         'button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
       );
-      (firstFocusable ?? railRef.current)?.focus();
+      // `preventScroll`: focusing an element that is out of view scrolls the page, and the drawer
+      // must not move the reading position of the page behind it.
+      (firstFocusable ?? railRef.current)?.focus({ preventScroll: true });
       return;
     }
     if (!railOpen && wasOpenRef.current) {
       wasOpenRef.current = false;
-      toggleRef.current?.focus();
+      toggleRef.current?.focus({ preventScroll: true });
     }
   }, [railOpen, isMobile]);
 
@@ -76,6 +81,50 @@ export function Shell({
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [railOpen]);
+
+  // The reading position of the page behind the drawer.
+  //
+  // It has to be remembered *before* the drawer opens: applying `inert` to the content column
+  // shifts the scroll offset, so a position read afterwards is already the wrong one.
+  const railOpenRef = useRef(false);
+  const scrollYRef = useRef(0);
+
+  useEffect(() => {
+    railOpenRef.current = railOpen;
+  }, [railOpen]);
+
+  useEffect(() => {
+    function onScroll() {
+      // While the drawer is open the document is locked and `inert` may shift the offset; the
+      // position to restore is the one from before the drawer opened.
+      if (railOpenRef.current) return;
+      scrollYRef.current = window.scrollY;
+    }
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // The page behind the open drawer must not scroll, and it has to come back
+  // to the same place when the drawer closes (MA-08).
+  useEffect(() => {
+    if (!isMobile || !railOpen) return;
+    const root = document.documentElement;
+    const scrollY = scrollYRef.current;
+    root.classList.add("scroll-locked");
+    document.body.classList.add("scroll-locked");
+    // `overflow: hidden` on the root resets the visible offset in Chrome: the page behind the
+    // drawer jumps up to the top of the document while the menu is open. Re-applying the saved
+    // offset keeps the content exactly where the user left it — the close path restores it again.
+    window.scrollTo({ top: scrollY, behavior: "instant" as ScrollBehavior });
+    return () => {
+      root.classList.remove("scroll-locked");
+      document.body.classList.remove("scroll-locked");
+      // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, and `auto` follows it —
+      // the page would then glide back to the top instead of returning to the same line.
+      window.scrollTo({ top: scrollY, behavior: "instant" as ScrollBehavior });
+    };
+  }, [railOpen, isMobile]);
 
   function selectWorkspace(key: WorkspaceKey) {
     onSelectWorkspace(key);
@@ -166,6 +215,16 @@ export function Shell({
                 Выйти
               </Button>
             ) : null}
+            {me ? (
+              <Button
+                variant="quiet"
+                block
+                leadingIcon={<UserRound size={16} aria-hidden="true" />}
+                onClick={() => setProfileOpen(true)}
+              >
+                Мои данные и сессии
+              </Button>
+            ) : null}
           </div>
         </aside>
 
@@ -177,11 +236,11 @@ export function Shell({
           onClick={() => setRailOpen(false)}
         />
 
-        <div
-          className="app-main"
-          inert={isMobile && railOpen ? true : undefined}
-          aria-hidden={isMobile && railOpen ? true : undefined}
-        >
+        {/* The drawer makes the page behind it inert — but not the topbar: the «Закрыть меню»
+            button lives there, and while it was inside the inert region the visible close control
+            did nothing at all (P1-05). On a phone there was no keyboard, so the only working way
+            out was tapping the exposed edge of the backdrop. */}
+        <div className="app-main">
           <header className="topbar">
             <div className="topbar__lead">
               <button
@@ -215,11 +274,21 @@ export function Shell({
             </div>
           </header>
 
-          <main className="workspace" id="workspace" tabIndex={-1}>
+          <main
+            className="workspace"
+            id="workspace"
+            tabIndex={-1}
+            inert={isMobile && railOpen ? true : undefined}
+            aria-hidden={isMobile && railOpen ? true : undefined}
+          >
             {children}
           </main>
 
-          <footer className="footer">
+          <footer
+            className="footer"
+            inert={isMobile && railOpen ? true : undefined}
+            aria-hidden={isMobile && railOpen ? true : undefined}
+          >
             Суммы указаны в копейках на сервере · тарифы демонстрационные · юридические гейты не пройдены
           </footer>
         </div>
@@ -232,6 +301,8 @@ export function Shell({
           </Toast>
         ) : null}
       </ToastRegion>
+
+      <ProfilePanel open={profileOpen} onClose={() => setProfileOpen(false)} notify={setNotice} />
     </div>
   );
 }

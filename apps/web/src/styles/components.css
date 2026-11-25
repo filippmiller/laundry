@@ -11,6 +11,9 @@
   .card {
     position: relative;
     background: var(--bg-surface);
+    /* A tab strip inside a surface sticks over that surface, not over the
+       canvas. */
+    --tab-bar-surface: var(--bg-surface);
     border: 1px solid var(--border-hairline);
     border-radius: var(--radius-lg);
     padding: clamp(var(--space-4), 2.4vw, var(--space-6));
@@ -33,7 +36,6 @@
   .card--interactive:hover {
     border-color: var(--border-strong);
     box-shadow: var(--shadow-raised);
-    transform: translateY(-2px);
   }
 
   .card--interactive:active {
@@ -64,6 +66,25 @@
     padding: var(--space-3) var(--space-4);
   }
 
+  /* Long panels can be skipped until they are scrolled into view. Add the
+     class to the heavy blocks of a workspace to shorten the first screen
+     without touching their markup (MA-03 / MA-04 / MA-12). */
+  .content-auto {
+    content-visibility: auto;
+    contain-intrinsic-size: auto var(--content-auto-size);
+  }
+
+  /* A responsive grid of metric tiles.
+     `minmax(min(170px, 100%), 1fr)` and not `minmax(170px, 1fr)`: a plain 170 px track is
+     wider than the container at 200 % zoom on a phone, and the document then scrolls sideways
+     (MA-03 / MA-10). */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+    gap: var(--space-3);
+    min-inline-size: 0;
+  }
+
   .panel-head {
     display: flex;
     justify-content: space-between;
@@ -78,6 +99,10 @@
     font-weight: 700;
     letter-spacing: var(--tracking-tight);
     line-height: var(--leading-tight);
+    /* A long word in a heading must not push the card past the viewport.
+       `anywhere` also lowers the intrinsic width of the heading, so the card
+       itself may shrink. */
+    overflow-wrap: anywhere;
   }
 
   .panel-subtitle {
@@ -118,10 +143,20 @@
     gap: 6px;
   }
 
+  /* The text of a header block has to be allowed to shrink, otherwise a long
+     word widens the card and the document. */
+  .page-header__text > * {
+    min-inline-size: 0;
+    /* «Администрирование» is 19 characters and does not fit into a 160 px
+       viewport at 200 % zoom: without this the document scrolls sideways. */
+    overflow-wrap: anywhere;
+  }
+
   .page-header__title {
     font-size: var(--text-2xl);
     font-weight: 700;
     letter-spacing: var(--tracking-tight);
+    overflow-wrap: anywhere;
   }
 
   .page-header__lede {
@@ -136,6 +171,15 @@
     align-items: center;
     gap: var(--space-2);
     flex-wrap: wrap;
+    /* The actions must not widen the header: a badge with a long value (a partner id, a role
+       list) has to shrink and cut itself off with an ellipsis (P3-01). */
+    min-inline-size: 0;
+    max-inline-size: 100%;
+  }
+
+  .page-header__actions > * {
+    min-inline-size: 0;
+    max-inline-size: 100%;
   }
 
   /* ==================================================================
@@ -161,7 +205,12 @@
     font-weight: 600;
     letter-spacing: -0.005em;
     border: 1px solid transparent;
-    white-space: nowrap;
+    /* The label may wrap: a button that cannot shrink overflows its card at
+       200 % zoom (MA-10). */
+    white-space: normal;
+    min-inline-size: 0;
+    max-inline-size: 100%;
+    overflow-wrap: break-word;
     transition:
       background-color var(--dur-fast) var(--ease-out),
       border-color var(--dur-fast) var(--ease-out),
@@ -192,7 +241,6 @@
   button.primary:hover:not(:disabled) {
     background: linear-gradient(180deg, var(--accent-hover) 0%, #053e32 100%);
     box-shadow: 0 2px 4px rgba(20, 25, 32, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.16);
-    transform: translateY(-1px);
   }
 
   button.primary:active:not(:disabled) {
@@ -209,7 +257,6 @@
   button.secondary:hover:not(:disabled) {
     background: var(--accent-soft-strong);
     border-color: rgba(11, 107, 88, 0.28);
-    transform: translateY(-1px);
   }
 
   /* -- Ghost / neutral --------------------------------------------------- */
@@ -223,7 +270,6 @@
   button.ghost:hover:not(:disabled) {
     background: var(--bg-subtle);
     border-color: var(--border-strong);
-    transform: translateY(-1px);
   }
 
   /* -- Quiet (borderless, for dense toolbars) ---------------------------- */
@@ -249,7 +295,6 @@
   button.outline:hover:not(:disabled) {
     background: var(--bg-surface);
     border-color: var(--ink-tertiary);
-    transform: translateY(-1px);
   }
 
   /* -- Danger ------------------------------------------------------------ */
@@ -262,7 +307,6 @@
   button.danger-btn:hover:not(:disabled) {
     background: #f9d5d2;
     border-color: rgba(158, 28, 24, 0.35);
-    transform: translateY(-1px);
   }
 
 
@@ -316,7 +360,22 @@
     margin-block-start: var(--space-3);
   }
 
+  /* Every lift is motion, so it only runs when the user asked for animations
+     (MA-34). */
   @media (prefers-reduced-motion: no-preference) {
+    button.primary:hover:not(:disabled),
+    button.secondary:hover:not(:disabled),
+    button.ghost:hover:not(:disabled),
+    button.outline:hover:not(:disabled),
+    button.danger-btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
+
+    .card--interactive:hover,
+    .stat-tile:hover {
+      transform: translateY(-2px);
+    }
+
     button:active:not(:disabled) {
       transform: translateY(1px);
     }
@@ -339,6 +398,21 @@
     background: var(--status-neutral-bg);
     color: var(--status-neutral-ink);
     border: 1px solid var(--status-neutral-border);
+    white-space: nowrap;
+    /* A badge or a counter must never widen its row: it is cut and marked
+       with an ellipsis instead (P3-01). */
+    max-inline-size: 100%;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* The label of a badge carries the ellipsis: the badge itself is a flex
+     container, and `text-overflow` does not reach into it. */
+  .badge__label {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
@@ -411,6 +485,48 @@
     gap: 6px;
     margin-block: var(--space-3);
     min-inline-size: 0;
+  }
+
+  /* A grouped set of controls inside one field: the border carries the grouping, not
+     decoration, so it follows the hairline border token like every other surface. */
+  .fieldset {
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3);
+    margin-block: var(--space-3);
+    min-inline-size: 0;
+  }
+
+  .fieldset legend {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--ink-primary);
+    padding-inline: var(--space-1);
+    /* A long word in a legend must not push the fieldset past the viewport. */
+    max-inline-size: 100%;
+    overflow-wrap: break-word;
+  }
+
+  /* A checkbox with its label: the whole row is the tap target, so the box itself does not
+     have to be 44 px wide for the control to be reachable on a phone. */
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-block-size: var(--tap-target);
+    padding-block: 6px;
+    font-size: var(--text-sm);
+    font-weight: 400;
+    color: var(--ink-primary);
+    cursor: pointer;
+  }
+
+  .check-row input[type="checkbox"] {
+    inline-size: 22px;
+    block-size: 22px;
+    margin: 0;
+    flex: 0 0 auto;
+    accent-color: var(--accent);
   }
 
   .field label,
@@ -556,21 +672,52 @@
     line-height: 1.4;
   }
 
+  /* The text of a check row has to be allowed to shrink: a long Russian word
+     otherwise widens the row and pushes the document sideways (the flex child
+     that holds long content needs `min-inline-size: 0`). */
+  .check-row > span,
+  .check-row__text > span {
+    min-inline-size: 0;
+    overflow-wrap: break-word;
+  }
+
   /* ==================================================================
      Tabs & segmented control
      ================================================================== */
 
+  /* A tab strip is one row that scrolls sideways. Wrapping it put six tabs on
+     six rows at 320 px and pushed the content of the page below the fold
+     (MA-02). It also sticks under the topbar, so the section stays reachable
+     while the page scrolls (P2-01). */
   .tab-bar {
+    position: sticky;
+    inset-block-start: var(--topbar-height);
+    z-index: var(--z-sticky);
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: var(--space-2);
     margin-block-end: var(--space-4);
+    background: var(--tab-bar-surface);
     border-block-end: 1px solid var(--border-hairline);
-    padding-block-end: var(--space-3);
+    padding-block: 2px var(--space-3);
+    min-inline-size: 0;
+    max-inline-size: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+
+  .tab-bar::-webkit-scrollbar {
+    display: none;
   }
 
 
   button.tab-btn {
+    flex: none;
+    scroll-snap-align: start;
     background: transparent;
     color: var(--ink-secondary);
     border-color: transparent;
@@ -659,7 +806,6 @@
   .stat-tile:hover {
     border-color: var(--border-strong);
     box-shadow: var(--shadow-raised);
-    transform: translateY(-2px);
   }
 
   .stat-tile--accent {
@@ -678,6 +824,12 @@
     font-size: var(--text-sm);
     color: var(--ink-secondary);
     line-height: 1.35;
+    /* Two lines are reserved for the label so that the numbers of neighbouring
+       tiles stay on one line (MA-36). */
+    min-block-size: 2.7em;
+    min-block-size: 2lh;
+    min-inline-size: 0;
+    overflow-wrap: anywhere;
   }
 
   .stat-value {
@@ -817,6 +969,19 @@
     border-radius: var(--radius-md);
     background: var(--bg-surface);
     overscroll-behavior-x: contain;
+    /* A table that is wider than the screen used to scroll sideways without any hint: on iOS
+       the scrollbar is hidden until the swipe, so the columns were silently cut off (MA-27).
+       The two `local` gradients travel with the content and cover the shadows, so a shadow is
+       visible only on the side that still has content to scroll to. */
+    background-image:
+      linear-gradient(to right, var(--bg-surface), rgba(255, 255, 255, 0)),
+      linear-gradient(to left, var(--bg-surface), rgba(255, 255, 255, 0)),
+      radial-gradient(farthest-side at 0 50%, var(--shadow-hairline, rgba(15, 26, 36, 0.16)), transparent),
+      radial-gradient(farthest-side at 100% 50%, var(--shadow-hairline, rgba(15, 26, 36, 0.16)), transparent);
+    background-position: left center, right center, left center, right center;
+    background-repeat: no-repeat;
+    background-size: 32px 100%, 32px 100%, 12px 100%, 12px 100%;
+    background-attachment: local, local, scroll, scroll;
   }
 
   table.clean-table {
@@ -922,6 +1087,14 @@
     min-inline-size: 0;
   }
 
+  /* The text of a notice has to be allowed to shrink, otherwise a long word
+     widens the notice and the document (a flex child that holds long
+     content). */
+  .notice__body > * {
+    min-inline-size: 0;
+    overflow-wrap: break-word;
+  }
+
   .alert-banner {
     display: flex;
     align-items: flex-start;
@@ -938,14 +1111,25 @@
   /* -- Toast (top-right stack) ------------------------------------------ */
   .toast-region {
     position: fixed;
-    inset-block-start: calc(var(--topbar-height) + var(--space-3));
-    inset-inline-end: var(--space-4);
+    inset-block-start: calc(var(--topbar-height) + var(--safe-top) + var(--space-3));
+    inset-inline-end: calc(var(--safe-right) + var(--space-4));
     z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    inline-size: min(380px, calc(100vw - var(--space-8)));
+    /* `100%` of the initial containing block, not `100vw`: the viewport width
+       includes the scrollbar and would push the region past the edge
+       (MA-26). */
+    inline-size: min(380px, calc(100% - var(--space-8)));
     pointer-events: none;
+  }
+
+  /* The compact topbar is 56 px, so the region has to follow it down
+     (MA-32). */
+  @media (max-width: 640px) {
+    .toast-region {
+      inset-block-start: calc(var(--topbar-height-compact) + var(--safe-top) + var(--space-3));
+    }
   }
 
   .toast {
@@ -1462,7 +1646,7 @@
     color: var(--ink-inverse);
   }
 
-  @media (pointer: coarse), (max-width: 900px) {
+  @media (pointer: coarse), (max-width: 768px) {
     button.btn--sm,
     .segmented__item {
       min-block-size: var(--tap-target);

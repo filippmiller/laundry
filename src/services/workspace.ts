@@ -5,7 +5,7 @@ import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-or
 import type { Db, Tx } from "../db/client.js";
 import {
   buildings, claims, compensations, courierShifts, custodyEvents, customerAddresses,
-  evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
+  evidenceAssets, evidenceAccessEvents, evidenceLegalHolds, auditEvents,
   garmentEvidence, garments, notifications, orders, outboxEvents, reviews, sessions, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
@@ -14,6 +14,7 @@ import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 import { hasActiveCourierOrderEntitlement } from "./courier-entitlement.js";
+import { maskPhone } from "./churn.js";
 
 const SUPPORT_ROLES = [...ROLE_GROUPS.support, ...ROLE_GROUPS.admin] as const;
 const STAFF = ["dispatcher", "platform_finance", "claims_approver", "customer_support", "platform_admin"] as const;
@@ -1016,5 +1017,20 @@ export async function searchOrders(db: Db, principal: Principal, query: string) 
       sql`customer_id IN (SELECT id FROM users WHERE phone = ${trimmed})`,
     ),
   )).orderBy(desc(orders.createdAt)).limit(20);
+  // Searching by somebody's phone number is a lookup in another person's personal data: the
+  // access is written down, and a phone number is never written down in full.
+  const looksLikePhone = trimmed.startsWith("+") || /^\d+$/.test(trimmed);
+  await db.insert(auditEvents).values({
+    organizationId: principal.organizationId,
+    actorId: principal.userId,
+    action: "privacy.order_search",
+    resourceType: "order_search",
+    resourceId: null,
+    scopeJson: {
+      query: looksLikePhone ? maskPhone(trimmed) : trimmed,
+      resultCount: rows.length,
+    },
+    requestId: principal.requestId,
+  });
   return rows;
 }

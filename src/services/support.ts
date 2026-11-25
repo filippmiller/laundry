@@ -1,6 +1,6 @@
 import { and, desc, eq, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { orders, supportMessages, supportThreads } from "../db/schema.js";
+import { notifications, orders, supportMessageDrafts, supportMessages, supportThreads } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
@@ -271,13 +271,148 @@ export async function closeThread(
     organizationId: principal.organizationId, scope: "support:close", key: input.key, actorId: principal.userId,
     requestHash: hashRequest({ ...input, actorId: principal.userId }),
   }, async tx => {
-    const { thread } = await loadThread(tx, principal, input.threadId, { lock: true });
+    const { thread, customerId } = await loadThread(tx, principal, input.threadId, { lock: true });
     if (thread.state === "closed") return { threadId: thread.id, state: "closed" as const };
     await tx.update(supportThreads).set({ state: "closed" }).where(eq(supportThreads.id, thread.id));
     await appendEvent(tx, {
       principal, aggregateType: "support_thread", aggregateId: thread.id,
       eventType: "support.closed", reason: input.reason,
     });
+    // The customer has to learn that the conversation is over without opening the thread again.
+    // The dedupe key is the one the outbox uses for the same event, so the customer never sees
+    // the notice twice.
+    if (customerId) {
+      await tx.insert(notifications).values({
+        organizationId: principal.organizationId,
+        recipientId: customerId,
+        orderId: thread.orderId,
+        channel: "push",
+        template: "support_closed",
+        payloadJson: { threadId: thread.id, subject: thread.subject, reason: input.reason },
+        dedupeKey: `support:${thread.id}:closed`,
+      }).onConflictDoNothing();
+    }
+    // A closed thread has no answer left to write: the pending drafts go with it.
+    await tx.delete(supportMessageDrafts).where(and(
+      eq(supportMessageDrafts.organizationId, principal.organizationId),
+      eq(supportMessageDrafts.threadId, thread.id),
+    ));
     return { threadId: thread.id, state: "closed" as const };
+  });
+}
+
+/**
+ * Reopens a closed thread.
+ *
+ * A closed thread was a dead end: the customer could not continue the conversation and had to
+ * open a new one, which split the history. Reopening keeps the thread and its messages together.
+ */
+export async function reopenThread(
+  db: Db,
+  principal: Principal,
+  input: { threadId: string; key: string },
+) {
+  assertRole(principal, ...SUPPORT_ROLES);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "support:reopen", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const { thread, customerId } = await loadThread(tx, principal, input.threadId, { lock: true });
+    if (thread.state !== "closed") throw errors.transition(thread.state, "open");
+    await tx.update(supportThreads).set({ state: "open" }).where(eq(supportThreads.id, thread.id));
+    await appendEvent(tx, {
+      principal, aggregateType: "support_thread", aggregateId: thread.id,
+      eventType: "support.reopened",
+      payload: { previousState: thread.state, customerId: customerId ?? null },
+    });
+    // The customer asked to continue the conversation; the notice says the thread is open again.
+    if (customerId) {
+      await tx.insert(notifications).values({
+        organizationId: principal.organizationId,
+        recipientId: customerId,
+        orderId: thread.orderId,
+        channel: "push",
+        template: "support_reopened",
+        payloadJson: { threadId: thread.id, subject: thread.subject },
+        dedupeKey: `support:${thread.id}:reopened`,
+      }).onConflictDoNothing();
+    }
+    return { threadId: thread.id, state: "open" as const };
+  });
+}
+
+/**
+ * Saves the reply the support agent is writing.
+ *
+ * The draft belongs to its author and to nobody else: one row per (thread, author), readable only
+ * by the author. It is stored on the server so a reload or a switch to another thread does not
+ * throw the text away.
+ */
+export async function putThreadDraft(
+  db: Db,
+  principal: Principal,
+  input: { threadId: string; body: string; key: string },
+) {
+  assertRole(principal, ...SUPPORT_ROLES);
+  if (input.body.trim().length < 1) throw new AppError("VALIDATION_ERROR", "DRAFT_BODY_REQUIRED");
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "support:draft", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    await loadThread(tx, principal, input.threadId);
+    const [draft] = await tx.insert(supportMessageDrafts).values({
+      organizationId: principal.organizationId,
+      threadId: input.threadId,
+      authorId: principal.userId,
+      body: input.body,
+    }).onConflictDoUpdate({
+      target: [supportMessageDrafts.threadId, supportMessageDrafts.authorId],
+      set: { body: input.body, updatedAt: new Date() },
+    }).returning({
+      threadId: supportMessageDrafts.threadId,
+      body: supportMessageDrafts.body,
+      updatedAt: supportMessageDrafts.updatedAt,
+    });
+    return { threadId: draft.threadId, body: draft.body, updatedAt: draft.updatedAt.toISOString() };
+  });
+}
+
+/** Reads the caller's own draft of a thread; another author's draft is invisible. */
+export async function getThreadDraft(
+  db: Db,
+  principal: Principal,
+  input: { threadId: string },
+) {
+  assertRole(principal, ...SUPPORT_ROLES);
+  const [draft] = await db.select({
+    threadId: supportMessageDrafts.threadId,
+    body: supportMessageDrafts.body,
+    updatedAt: supportMessageDrafts.updatedAt,
+  }).from(supportMessageDrafts).where(and(
+    eq(supportMessageDrafts.organizationId, principal.organizationId),
+    eq(supportMessageDrafts.threadId, input.threadId),
+    eq(supportMessageDrafts.authorId, principal.userId),
+  )).limit(1);
+  if (!draft) return null;
+  return { threadId: draft.threadId, body: draft.body, updatedAt: draft.updatedAt.toISOString() };
+}
+
+/** Deletes the caller's own draft. A missing draft is not an error. */
+export async function deleteThreadDraft(
+  db: Db,
+  principal: Principal,
+  input: { threadId: string; key: string },
+) {
+  assertRole(principal, ...SUPPORT_ROLES);
+  return withIdempotencyFlat(db, {
+    organizationId: principal.organizationId, scope: "support:draft_delete", key: input.key, actorId: principal.userId,
+    requestHash: hashRequest({ ...input, actorId: principal.userId }),
+  }, async tx => {
+    const deleted = await tx.delete(supportMessageDrafts).where(and(
+      eq(supportMessageDrafts.organizationId, principal.organizationId),
+      eq(supportMessageDrafts.threadId, input.threadId),
+      eq(supportMessageDrafts.authorId, principal.userId),
+    )).returning({ id: supportMessageDrafts.id });
+    return { threadId: input.threadId, deleted: deleted.length > 0 };
   });
 }

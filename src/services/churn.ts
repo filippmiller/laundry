@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { auditEvents } from "../db/schema.js";
+import { assertRole, hasRole, type Principal, type Role, ROLE_GROUPS } from "../core/context.js";
 
 /**
  * "This customer is about to leave."
@@ -20,7 +21,13 @@ export const FAILED_DELIVERY_OUTCOMES = ["recipient_unavailable", "wrong_recipie
 export type ChurnRisk = {
   customerId: string;
   displayName: string;
+  /**
+   * The customer's phone. Masked (`+7999•••0103`) for every role that has no need to dial it;
+   * the full number is handed out only to the roles that actually call the customer.
+   */
   phone: string | null;
+  /** True when `phone` is masked and not the real number. */
+  phoneMasked: boolean;
   failedAttempts: number;
   lastOutcome: string;
   lastAttemptAt: string;
@@ -31,8 +38,30 @@ export type ChurnSignal = {
   windowDays: number;
   threshold: number;
   atRisk: ChurnRisk[];
+  /** True when every phone in `atRisk` is masked. */
+  phoneMasked: boolean;
   note: string;
 };
+
+/**
+ * The roles that pick up the phone and call the customer about the failed delivery. Every other
+ * role reads the signal with the number masked: the signal says who to call, it is not a
+ * directory of everybody's phone number.
+ */
+const CHURN_PHONE_ROLES: Role[] = ["dispatcher", "customer_support"];
+
+/**
+ * Masks a phone number, keeping the country and operator prefix and the last four digits:
+ * `+79990000103` becomes `+7999•••0103`.
+ */
+export function maskPhone(phone: string | null | undefined): string | null {
+  if (!phone) return null;
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 8) return `+${"•".repeat(Math.max(digits.length, 3))}`;
+  const head = digits.slice(0, 4);
+  const tail = digits.slice(-4);
+  return `+${head}${"•".repeat(digits.length - 8)}${tail}`;
+}
 
 const DAY_MS = 86_400_000;
 
@@ -80,20 +109,43 @@ export async function churnSignal(
   `);
 
   const rows = (result.rows ?? []) as unknown as ChurnRow[];
+  // The number is personal data of somebody who never asked for it: it is masked unless the
+  // caller is one of the roles that has to dial the customer.
+  const phoneMasked = !hasRole(principal, ...CHURN_PHONE_ROLES);
   const atRisk: ChurnRisk[] = rows.map(row => ({
     customerId: row.customer_id,
     displayName: row.display_name ?? "",
-    phone: row.phone ?? null,
+    phone: phoneMasked ? maskPhone(row.phone) : (row.phone ?? null),
+    phoneMasked,
     failedAttempts: Number(row.failed_attempts ?? 0),
     lastOutcome: row.last_outcome ?? "",
     lastAttemptAt: row.last_attempt_at ? new Date(row.last_attempt_at).toISOString() : "",
     orderCount: Number(row.order_count ?? 0),
   }));
 
+  // Reading the signal is itself an access to personal data: it is written down who looked at
+  // which customers, so the access can be reviewed afterwards.
+  await db.insert(auditEvents).values({
+    organizationId: principal.organizationId,
+    actorId: principal.userId,
+    action: "privacy.churn_read",
+    resourceType: "churn_signal",
+    resourceId: null,
+    scopeJson: {
+      customerIds: atRisk.map(risk => risk.customerId),
+      count: atRisk.length,
+      windowDays: days,
+      threshold,
+      phoneMasked,
+    },
+    requestId: principal.requestId,
+  });
+
   return {
     windowDays: days,
     threshold,
     atRisk,
+    phoneMasked,
     note: "Сигнал оттока: клиенты, у которых доставка не состоялась дважды и больше за период. Причина — недовыполненная доставка, а не жалоба.",
   };
 }

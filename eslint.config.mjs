@@ -17,4 +17,19 @@ export default tseslint.config(
       "@typescript-eslint/no-require-imports": "off",
     },
   },
+  {
+    // The mobile probe drives a real browser: the bodies of `page.evaluate()` run inside
+    // the page, not in Node, so they need the browser globals on top of the Node ones.
+    files: ["scripts/verify-mobile-layout.mjs"],
+    languageOptions: {
+      globals: {
+        document: "readonly",
+        window: "readonly",
+        getComputedStyle: "readonly",
+        Element: "readonly",
+        HTMLElement: "readonly",
+        Node: "readonly",
+      },
+    },
+  },
 );

@@ -11,7 +11,7 @@ import type { Db } from "../db/client.js";
 import { assertRole, hasRole, type Principal, type Role, ROLE_GROUPS } from "../core/context.js";
 import { AppError } from "../core/errors.js";
 import { hashRequest, isUniqueViolation } from "../core/idempotency.js";
-import { demoLogin, logout, previewDemoLogin, principalFromToken } from "../services/auth.js";
+import { demoLogin, logout, previewDemoLogin, principalFromToken, previewKeyRequired } from "../services/auth.js";
 import { isPreviewProfileEnabled } from "../core/preview.js";
 import { listServices, listWindows, resolveAddress } from "../services/catalog.js";
 import { createQuote, getQuote } from "../services/quotes.js";
@@ -25,8 +25,10 @@ import { arriveStop, assignDelivery, assignPickup, closeOrder, currentCourierSto
 import { decideClaim, getClaim, listClaimsPage, openClaim, reopenClaim } from "../services/claims.js";
 import {
   approvePartnerCreditNote, approvePartnerPayout, capturePayment, createCustomerInvoice, createPartnerInvoice,
-  createPartnerPayout, disputePartnerLine, handlePaymentWebhook, listChargebacks, listPartnerCreditNotes, listPartnerPayouts,
-  orderFinance, partnerAccruals, processPendingRefunds, refundPayment, resolvePartnerDispute, settleClaimCompensation,
+  createPartnerPayout, disputePartnerLine, drainOutbox, expireDueHolds, handlePaymentWebhook, listChargebacks,
+  listPartnerCreditNotes, listPartnerDisputes, listPartnerPayouts, listPartnerScopedCreditNotes,
+  listPartnerScopedDisputes, listPartnerScopedPayouts, orderFinance, partnerAccruals, processPendingRefunds,
+  refundPayment, resolvePartnerDispute, settleClaimCompensation,
 } from "../services/finance.js";
 import { holdSlot, holdSlotPair, reconcileCapacity, releaseSlot } from "../domain/slot-reservation.js";
 import { MAX_DECLARED_ROWS, MAX_PICKED_QUANTITY } from "../../shared/garment-taxonomy.js";
@@ -34,7 +36,7 @@ import {
   grantRole, listAuditEvents, listMembersPage, memberRoles, revokeRole, revokeSession, setMembershipState,
 } from "../services/admin.js";
 import { fraudSignals } from "../services/fraud.js";
-import { closeThread, getThread, listThreadsPage, openThread, postMessage } from "../services/support.js";
+import { closeThread, deleteThreadDraft, getThread, getThreadDraft, listThreadsPage, openThread, postMessage, putThreadDraft, reopenThread } from "../services/support.js";
 import { createReview, hideReview, likeReview, listReviews, unlikeReview } from "../services/reviews.js";
 import { markChargeback, paymentDrift } from "../services/payment-inbox.js";
 import {
@@ -94,7 +96,7 @@ type Ctx = {
   reply: FastifyReply;
 };
 type RouteDef = {
-  method: "GET" | "POST" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "DELETE";
   path: string;
   summary: string;
   tags: string[];
@@ -335,6 +337,16 @@ export function buildApp(db: Db) {
     handler: () => ({ status: "ok", service: "laundry", time: new Date().toISOString() }),
   });
   add({
+    // The landing page used to guess whether a preview access key was needed from the mere
+    // presence of demo data, so the key field never appeared and the backend accepted any key.
+    // The server states the truth instead: the field shows up exactly when a key is enforced.
+    method: "GET", path: "/preview/config", summary: "Whether the isolated preview is enabled and whether it needs an access key", tags: ["System"], public: true,
+    handler: () => ({
+      previewEnabled: isPreviewProfileEnabled(),
+      requiresPreviewKey: previewKeyRequired(),
+    }),
+  });
+  add({
     method: "GET", path: "/health/ready", summary: "Readiness", tags: ["System"], public: true,
     handler: async ctx => {
       try {
@@ -570,7 +582,7 @@ export function buildApp(db: Db) {
     }),
   });
   add({
-    method: "POST", path: "/slots/holds", summary: "Hold shared-window capacity", tags: ["Customer"],
+    method: "POST", path: "/slots/holds", summary: "Hold shared-window capacity (internal: the UI books a pickup+delivery pair)", tags: ["Customer"],
     body: z.object({ windowId: z.uuid(), key: z.string().min(1).optional(), ttlMinutes: z.number().int().min(1).max(60).default(10) }),
     handler: ctx => holdSlot(db, {
       principal: ctx.principal,
@@ -791,6 +803,34 @@ export function buildApp(db: Db) {
     body: z.object({ reason: z.string().min(3), key: z.string().optional() }),
     handler: ctx => closeThread(db, ctx.principal, {
       threadId: ctx.params.id, reason: ctx.body.reason, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/support/threads/:id/reopen", summary: "Reopen a closed support thread", tags: ["Support"],
+    params: idSchema,
+    body: z.object({ key: z.string().optional() }),
+    handler: ctx => reopenThread(db, ctx.principal, {
+      threadId: ctx.params.id, key: ctx.body.key ?? idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "GET", path: "/support/threads/:id/draft", summary: "Read my own draft reply for a support thread", tags: ["Support"],
+    params: idSchema,
+    handler: ctx => getThreadDraft(db, ctx.principal, { threadId: ctx.params.id }),
+  });
+  add({
+    method: "PUT", path: "/support/threads/:id/draft", summary: "Save my own draft reply for a support thread", tags: ["Support"],
+    params: idSchema,
+    body: z.object({ body: z.string().max(20_000) }),
+    handler: ctx => putThreadDraft(db, ctx.principal, {
+      threadId: ctx.params.id, body: ctx.body.body, key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "DELETE", path: "/support/threads/:id/draft", summary: "Delete my own draft reply for a support thread", tags: ["Support"],
+    params: idSchema,
+    handler: ctx => deleteThreadDraft(db, ctx.principal, {
+      threadId: ctx.params.id, key: idempotencyKey(ctx),
     }),
   });
 
@@ -1086,6 +1126,18 @@ export function buildApp(db: Db) {
     handler: ctx => opsMetrics(db, ctx.principal),
   });
   add({
+    method: "POST", path: "/ops/expire-holds", summary: "Release slot holds whose TTL has expired", tags: ["Admin"],
+    roles: ["system_worker", "platform_admin"],
+    body: z.object({ key: z.string().min(1).optional() }),
+    handler: ctx => expireDueHolds(db, ctx.principal),
+  });
+  add({
+    method: "POST", path: "/ops/outbox/drain", summary: "Deliver pending outbox events to the notification feed", tags: ["Admin"],
+    roles: ["system_worker", "platform_admin"],
+    body: z.object({ key: z.string().min(1).optional() }),
+    handler: ctx => drainOutbox(db, ctx.principal),
+  });
+  add({
     method: "POST", path: "/evidence", summary: "Register photo evidence metadata (hash, object key)", tags: ["Customer"],
     body: z.object({
       ownerType: z.enum(["order", "claim", "custody_event"]), ownerId: z.uuid(),
@@ -1366,6 +1418,53 @@ export function buildApp(db: Db) {
     }),
   });
   add({
+    method: "GET", path: "/finance/partner-disputes", summary: "Paginated partner invoice-line disputes", tags: ["Finance"],
+    roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
+    query: z.object({
+      state: z.enum(["open", "investigating", "resolved"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).optional(),
+    }),
+    handler: ctx => listPartnerDisputes(db, ctx.principal, {
+      state: ctx.query.state as "open" | "investigating" | "resolved" | undefined,
+      limit: ctx.query.limit as number | undefined,
+      cursor: ctx.query.cursor as string | undefined,
+    }),
+  });
+  add({
+    method: "GET", path: "/partner/disputes", summary: "Disputes opened on my partner's invoice lines", tags: ["Partner"],
+    roles: [...ROLE_GROUPS.partner],
+    handler: ctx => listPartnerScopedDisputes(db, ctx.principal),
+  });
+  add({
+    method: "GET", path: "/partner/payouts", summary: "My partner payouts (active queue or history)", tags: ["Partner"],
+    roles: [...ROLE_GROUPS.partner],
+    query: z.object({
+      bucket: z.enum(["active", "history", "all"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).optional(),
+    }),
+    handler: ctx => listPartnerScopedPayouts(db, ctx.principal, {
+      bucket: ctx.query.bucket as "active" | "history" | "all" | undefined,
+      limit: ctx.query.limit as number | undefined,
+      cursor: ctx.query.cursor as string | undefined,
+    }),
+  });
+  add({
+    method: "GET", path: "/partner/credit-notes", summary: "My partner credit notes (active queue or history)", tags: ["Partner"],
+    roles: [...ROLE_GROUPS.partner],
+    query: z.object({
+      bucket: z.enum(["active", "history", "all"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).optional(),
+    }),
+    handler: ctx => listPartnerScopedCreditNotes(db, ctx.principal, {
+      bucket: ctx.query.bucket as "active" | "history" | "all" | undefined,
+      limit: ctx.query.limit as number | undefined,
+      cursor: ctx.query.cursor as string | undefined,
+    }),
+  });
+  add({
     method: "GET", path: "/finance/partner-credit-notes", summary: "Paginated partner credit notes (active queue or history)", tags: ["Finance"],
     roles: [...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin],
     query: z.object({
@@ -1516,8 +1615,8 @@ export function buildApp(db: Db) {
     handler: ctx => itemMix(db, ctx.principal, { days: ctx.query.days as number | undefined }),
   });
   add({
-    method: "GET", path: "/ops/chronometry", summary: "How long an order takes at every stage: median and tail", tags: ["Dispatch"],
-    roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.support],
+    method: "GET", path: "/ops/chronometry", summary: "How long an order takes at every stage: median and tail", tags: ["Dispatch", "Partner"],
+    roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin, ...ROLE_GROUPS.support, ...ROLE_GROUPS.partner],
     query: z.object({ days: z.coerce.number().int().min(1).max(365).optional() }),
     handler: ctx => chronometry(db, ctx.principal, { days: ctx.query.days as number | undefined }),
   });

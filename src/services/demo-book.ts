@@ -1,8 +1,9 @@
-import { and, asc, eq, gt, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import type { Db, DbLike } from "../db/client.js";
 import type { Principal, Role } from "../core/context.js";
 import {
-  courierShifts, customerAddresses, memberships, membershipRoles, partners, seals, serviceWindows, users,
+  courierShifts, customerAddresses, memberships, membershipRoles, orderLines, partnerCreditNotes, partnerDisputes,
+  partnerInvoiceLines, partnerPayouts, partnerServiceAccruals, partners, seals, serviceWindows, users,
 } from "../db/schema.js";
 import { createQuote } from "./quotes.js";
 import { createOrder, scheduleOrder } from "./orders.js";
@@ -12,7 +13,11 @@ import { recordIntake } from "./intake.js";
 import {
   assignOrderToPartner, completeProcessing, receiveHandoff, recordQualityCheck, startInspection, startProcessing,
 } from "./partner.js";
-import { capturePayment, createCustomerInvoice, refundPayment } from "./finance.js";
+import {
+  approvePartnerCreditNote, capturePayment, createCustomerInvoice, createPartnerInvoice, createPartnerPayout,
+  disputePartnerLine, refundPayment, resolvePartnerDispute,
+} from "./finance.js";
+import { queryPartnerAccrualTotals } from "./partner-payable.js";
 import { decideClaim, openClaim } from "./claims.js";
 import { decideCompensation, proposeCompensation } from "./workspace.js";
 
@@ -54,13 +59,25 @@ export const DEMO_PERSONAS: Array<{ role: Role; phone: string; displayName: stri
   { role: "claims_approver", phone: "+79990000006", displayName: "Претензии" },
   { role: "customer_support", phone: "+79990000007", displayName: "Поддержка Ольга" },
   { role: "platform_admin", phone: "+79990000008", displayName: "Администратор" },
+  { role: "partner_finance", phone: "+79990000009", displayName: "Финансы прачечной" },
+  { role: "laundry_supervisor", phone: "+79990000010", displayName: "Старший технолог" },
 ];
+
+/**
+ * The personas that belong to the laundry partner. They carry the partner scope, so the partner
+ * workspace (accruals, invoices, payouts, credit notes, disputes) is not empty for them.
+ */
+export const DEMO_PARTNER_ROLES: Role[] = ["laundry_operator", "laundry_supervisor", "partner_finance"];
+
+export function isDemoPartnerRole(role: Role): boolean {
+  return DEMO_PARTNER_ROLES.includes(role);
+}
 
 /**
  * Makes sure every persona of the roster has a user, a membership in this tenant and the role
  * itself. Idempotent: an existing persona is left untouched.
  */
-async function ensurePersonas(db: Db, organizationId: string): Promise<void> {
+async function ensurePersonas(db: DbLike, organizationId: string): Promise<void> {
   let partnerId: string | null = null;
   const [existingPartner] = await db.select({ id: partners.id }).from(partners)
     .where(eq(partners.organizationId, organizationId)).limit(1);
@@ -77,7 +94,7 @@ async function ensurePersonas(db: Db, organizationId: string): Promise<void> {
     if (!user) {
       [user] = await db.insert(users).values({ phone: persona.phone, displayName: persona.displayName }).returning();
     }
-    const membershipPartnerId = persona.role === "laundry_operator" ? partnerId : null;
+    const membershipPartnerId = isDemoPartnerRole(persona.role) ? partnerId : null;
     let [membership] = await db.select({ id: memberships.id }).from(memberships).where(and(
       eq(memberships.organizationId, organizationId),
       eq(memberships.userId, user.id),
@@ -218,6 +235,7 @@ type DemoBookContext = {
     courier: Principal;
     dispatcher: Principal;
     partner: Principal;
+    partnerFinance: Principal;
     finance: Principal;
     support: Principal;
     claimsApprover: Principal;
@@ -240,7 +258,7 @@ type DemoBookContext = {
 };
 
 async function principalForRole(
-  db: Db,
+  db: DbLike,
   organizationId: string,
   role: Role,
   extra: Partial<Principal> = {},
@@ -279,7 +297,7 @@ async function principalForRole(
  * window id, so a new pair means a new scenario run rather than an idempotency conflict.
  */
 async function ensureWindows(
-  db: Db,
+  db: DbLike,
   organizationId: string,
   buildings: DemoBuilding[],
 ): Promise<Array<{
@@ -359,7 +377,7 @@ async function ensureWindows(
 }
 
 /** Extra customers give the finance dashboard more than one debtor to show. */
-async function ensureExtraCustomers(db: Db, context: DemoBookContext): Promise<void> {
+async function ensureExtraCustomers(db: DbLike, context: DemoBookContext): Promise<void> {
   for (const extra of EXTRA_CUSTOMERS) {
     const building = context.buildings.find(entry => entry.address === extra.buildingAddress)
       ?? context.buildings[0];
@@ -409,7 +427,7 @@ async function ensureExtraCustomers(db: Db, context: DemoBookContext): Promise<v
  * seed is re-run against the same window (the intake then replays) and unique when a new window
  * forces a new run (a fresh seal is issued rather than reusing one that is already assigned).
  */
-async function sealFor(db: Db, organizationId: string, tag: string): Promise<string> {
+async function sealFor(db: DbLike, organizationId: string, tag: string): Promise<string> {
   const serial = `DEMO-SEAL-${tag.toUpperCase()}`;
   await db.insert(seals).values({ organizationId, serialNumber: serial }).onConflictDoNothing();
   return serial;
@@ -420,7 +438,7 @@ async function sealFor(db: Db, organizationId: string, tag: string): Promise<str
  * Ledger journals are deliberately left alone: they are append-only.
  */
 async function backdateOrder(
-  db: Db,
+  db: DbLike,
   organizationId: string,
   orderId: string,
   at: Date,
@@ -480,19 +498,177 @@ export type DemoBookResult = {
   captures: number;
   refunds: number;
   claims: number;
+  partnerInvoices: number;
+  partnerDisputes: number;
+  partnerCreditNotes: number;
+  partnerPayouts: number;
 };
+
+/**
+ * The scenarios whose partner accruals make up the partner invoice of the demo stand.
+ *
+ * The partner money slice is the one part of the book the finance workspace cannot show on its
+ * own: a partner invoice, a dispute that is still open, a credit note and a payout.
+ */
+const PARTNER_MONEY_SCENARIOS = ["s01", "s02", "s03"];
+
+type PartnerMoneyOrder = { scenarioId: string; orderId: string; buildingId: string };
+
+/**
+ * Reuses the dispute of an invoice line if there already is one.
+ *
+ * The demo book runs again on every visit to the stand, and a dispute that is already open (or
+ * already settled) must not turn the second run into an error.
+ */
+async function ensureDemoDispute(
+  db: DbLike,
+  context: DemoBookContext,
+  lineId: string,
+  reason: string,
+  key: string,
+) {
+  const [existing] = await db.select({ id: partnerDisputes.id, state: partnerDisputes.state })
+    .from(partnerDisputes)
+    .where(and(
+      eq(partnerDisputes.organizationId, context.organizationId),
+      eq(partnerDisputes.invoiceLineId, lineId),
+    ))
+    .orderBy(desc(partnerDisputes.openedAt))
+    .limit(1);
+  if (existing) return existing;
+  const dispute = await disputePartnerLine(db, context.principals.partnerFinance, { lineId, reason, key });
+  return { id: dispute.disputeId, state: "open" as string };
+}
+
+/**
+ * Creates the partner money slice of the demo stand through the domain services: a partner
+ * invoice over a few billed lines, one dispute that stays open, one settled dispute that produces
+ * a credit note, and a payout of what is payable.
+ */
+async function seedPartnerMoney(
+  db: DbLike,
+  context: DemoBookContext,
+  orders: PartnerMoneyOrder[],
+): Promise<Pick<DemoBookResult, "partnerInvoices" | "partnerDisputes" | "partnerCreditNotes" | "partnerPayouts">> {
+  const result = { partnerInvoices: 0, partnerDisputes: 0, partnerCreditNotes: 0, partnerPayouts: 0 };
+  const chosen = orders.filter(order => PARTNER_MONEY_SCENARIOS.includes(order.scenarioId));
+  if (chosen.length < 2) return result;
+  const building = context.buildings.find(entry => entry.id === chosen[0].buildingId);
+  if (!building) return result;
+
+  // The accruals of the chosen orders are moved into a period of their own, so the partner
+  // invoice covers exactly this work and not everything the book has produced so far. The anchor
+  // is the window's own timestamp, so a re-run against the same window replays instead of
+  // invoicing the work twice.
+  const moneyAt = new Date(building.pickupStartsAt.getTime() - 2 * 86_400_000);
+  const orderLineIds = await db.select({ id: orderLines.id }).from(orderLines)
+    .where(inArray(orderLines.orderId, chosen.map(order => order.orderId)));
+  if (orderLineIds.length) {
+    await db.update(partnerServiceAccruals).set({ createdAt: moneyAt }).where(and(
+      eq(partnerServiceAccruals.organizationId, context.organizationId),
+      inArray(partnerServiceAccruals.orderLineId, orderLineIds.map(row => row.id)),
+    ));
+  }
+  const periodStart = new Date(moneyAt.getTime() - 3_600_000);
+  const periodEnd = new Date(moneyAt.getTime() + 3_600_000);
+  // The invoice number is derived from the first twelve characters of the key, so the key has to
+  // start with something that differs from one window to the next.
+  const tag = building.pickupWindowId.slice(0, 8);
+
+  const invoice = await createPartnerInvoice(db, context.principals.finance, {
+    partnerId: context.partnerId,
+    periodStart,
+    periodEnd,
+    key: `demo-book-${tag}-pinv`,
+  });
+  const lines = await db.select({
+    id: partnerInvoiceLines.id,
+    amountKopeks: partnerInvoiceLines.amountKopeks,
+  }).from(partnerInvoiceLines).where(eq(partnerInvoiceLines.invoiceId, invoice.invoiceId));
+  result.partnerInvoices = 1;
+  if (lines.length < 2) return result;
+
+  // The partner contests one line and waits for the platform: the dispute stays open.
+  await ensureDemoDispute(
+    db, context, lines[0].id,
+    "Фактический вес по описи не совпал с начисленным.",
+    `demo-book-${tag}-dispute-open`,
+  );
+  result.partnerDisputes += 1;
+
+  // The second line is settled: the platform credits the difference, which produces the credit note.
+  const settledDispute = await ensureDemoDispute(
+    db, context, lines[1].id,
+    "Часть вещей обработана не по тарифу.",
+    `demo-book-${tag}-dispute-settled`,
+  );
+  result.partnerDisputes += 1;
+  if (!["resolved", "rejected"].includes(settledDispute.state)) {
+    await resolvePartnerDispute(db, context.principals.finance, {
+      disputeId: settledDispute.id,
+      outcome: "upheld",
+      reason: "Расхождение подтверждено приёмкой у прачечной, начисление уменьшено.",
+      key: `demo-book-${tag}-resolve`,
+    });
+  }
+  const [note] = await db.select({ id: partnerCreditNotes.id, state: partnerCreditNotes.state })
+    .from(partnerCreditNotes)
+    .where(and(
+      eq(partnerCreditNotes.organizationId, context.organizationId),
+      eq(partnerCreditNotes.disputeId, settledDispute.id),
+    ))
+    .orderBy(desc(partnerCreditNotes.createdAt))
+    .limit(1);
+  if (note && note.state === "draft") {
+    await approvePartnerCreditNote(db, context.principals.finance, {
+      creditNoteId: note.id,
+      key: `demo-book-${tag}-credit-note-approve`,
+    });
+    result.partnerCreditNotes += 1;
+  }
+
+  // What is left after the contested and the credited part is what the partner is paid for.
+  const [totals] = await queryPartnerAccrualTotals(db, context.organizationId, context.partnerId);
+  const [paidRow] = await db.select({ total: sql<number>`COALESCE(SUM(${partnerPayouts.amountKopeks}), 0)::bigint` })
+    .from(partnerPayouts).where(and(
+      eq(partnerPayouts.organizationId, context.organizationId),
+      eq(partnerPayouts.partnerId, context.partnerId),
+      inArray(partnerPayouts.state, ["approved", "paid"]),
+    ));
+  const [reservedRow] = await db.select({ total: sql<number>`COALESCE(SUM(${partnerPayouts.amountKopeks}), 0)::bigint` })
+    .from(partnerPayouts).where(and(
+      eq(partnerPayouts.organizationId, context.organizationId),
+      eq(partnerPayouts.partnerId, context.partnerId),
+      inArray(partnerPayouts.state, ["scheduled", "pending"]),
+    ));
+  const availableKopeks = (totals?.grossPayableKopeks ?? 0) - Number(paidRow?.total ?? 0) - Number(reservedRow?.total ?? 0);
+  if (availableKopeks > 0) {
+    await createPartnerPayout(db, context.principals.finance, {
+      partnerId: context.partnerId,
+      amountKopeks: availableKopeks,
+      reference: `DEMO-PAYOUT-${tag}`,
+      key: `demo-book-${tag}-payout`,
+    });
+    result.partnerPayouts += 1;
+  }
+
+  // The open dispute has to stay open: the demo stand shows a partner waiting for an answer.
+  return result;
+}
 
 /**
  * Creates the demo book. Safe to call only on a freshly seeded tenant: every write is driven by
  * idempotency keys prefixed with the scenario id, so a second call replays instead of duplicating.
  */
-export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<DemoBookResult> {
+export async function seedDemoBook(db: DbLike, context: DemoBookContext): Promise<DemoBookResult> {
   await ensureExtraCustomers(db, context);
 
   const result: DemoBookResult = {
     orders: 0, customers: 0, protectedOrders: 0, garments: 0,
     invoices: 0, captures: 0, refunds: 0, claims: 0,
+    partnerInvoices: 0, partnerDisputes: 0, partnerCreditNotes: 0, partnerPayouts: 0,
   };
+  const partnerMoneyOrders: PartnerMoneyOrder[] = [];
 
   for (const scenario of SCENARIOS) {
     const customer = scenario.customer === "anna"
@@ -536,6 +712,7 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
       key: key("order"),
     });
     result.orders += 1;
+    partnerMoneyOrders.push({ scenarioId: scenario.id, orderId: order.id, buildingId: building.id });
 
     // The hold expiry is the window's own end, not a wall-clock value: the idempotency
     // fingerprint covers it, and a value derived from `Date.now()` would change on every
@@ -748,7 +925,8 @@ export async function seedDemoBook(db: Db, context: DemoBookContext): Promise<De
   }
 
   result.customers = EXTRA_CUSTOMERS.length + 1;
-  return result;
+  const money = await seedPartnerMoney(db, context, partnerMoneyOrders);
+  return { ...result, ...money };
 }
 
 function daysAgo(days: number): Date {
@@ -760,7 +938,7 @@ function daysAgo(days: number): Date {
  * principals and drives the scenarios.
  */
 export async function seedDemoTenantBook(
-  db: Db,
+  db: DbLike,
   input: {
     organizationId: string;
     buildings: DemoBuilding[];
@@ -780,7 +958,7 @@ export async function seedDemoTenantBook(
  * Builds the demo-book context from the tenant the base seed created.
  */
 export async function buildDemoBookContext(
-  db: Db,
+  db: DbLike,
   input: {
     organizationId: string;
     buildings: DemoBuilding[];
@@ -794,11 +972,12 @@ export async function buildDemoBookContext(
   if (!input.tariffVersionId) throw new Error("DEMO_TARIFF_VERSION_MISSING");
   if (!input.serviceId) throw new Error("DEMO_SERVICE_MISSING");
   const windows = await ensureWindows(db, input.organizationId, input.buildings);
-  const [anna, courier, dispatcher, partner, finance, support, claimsApprover] = await Promise.all([
+  const [anna, courier, dispatcher, partner, partnerFinance, finance, support, claimsApprover] = await Promise.all([
     principalForRole(db, input.organizationId, "customer"),
     principalForRole(db, input.organizationId, "courier"),
     principalForRole(db, input.organizationId, "dispatcher"),
     principalForRole(db, input.organizationId, "laundry_operator", { partnerId: input.partnerId }),
+    principalForRole(db, input.organizationId, "partner_finance", { partnerId: input.partnerId }),
     principalForRole(db, input.organizationId, "platform_finance"),
     principalForRole(db, input.organizationId, "customer_support"),
     principalForRole(db, input.organizationId, "claims_approver"),
@@ -835,6 +1014,7 @@ export async function buildDemoBookContext(
       courier,
       dispatcher,
       partner,
+      partnerFinance,
       finance,
       support,
       claimsApprover,

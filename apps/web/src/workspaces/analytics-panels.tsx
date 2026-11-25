@@ -16,8 +16,10 @@ import {
 import { api, dt, money } from "../api";
 import { DELIVERY_OUTCOME_LABELS, formatError, GARMENT_STATUS_LABELS, stateLabel, TIER_LABELS } from "../labels";
 import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
 import { Meter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
+import { useUrlState } from "../hooks/useUrlState";
 
 /**
  * Panels for the three money/volume questions the product could not answer before:
@@ -158,9 +160,12 @@ type FinanceAnalyticsDto = {
 export function FinanceMoneyPanel({
   notify,
   onPendingRefundsChange,
+  refreshToken,
 }: {
   notify: NotifyFn;
   onPendingRefundsChange?: (pendingRefundKopeks: number) => void;
+  /** A refresh request. The panel refetches instead of remounting, so its state survives. */
+  refreshToken?: number;
 }) {
   const [data, setData] = useState<FinanceAnalyticsDto | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -179,7 +184,7 @@ export function FinanceMoneyPanel({
     } finally {
       setBusy(false);
     }
-  }, [notify, onPendingRefundsChange]);
+  }, [notify, onPendingRefundsChange, refreshToken]);
 
   useEffect(() => {
     void load();
@@ -193,17 +198,17 @@ export function FinanceMoneyPanel({
   const maxMonth = Math.max(1, ...data.monthly.map(month => Math.max(month.invoicedKopeks, month.netCollectedKopeks)));
 
   return (
-    <section className="panel" aria-labelledby="finance-money-heading">
+    <section className="panel content-auto" aria-labelledby="finance-money-heading">
       <div className="panel-head">
-        <h3 id="finance-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
           <Wallet size={18} aria-hidden="true" />
           <span>Денежный контур: дебиторка и кредиторка</span>
-        </h3>
+        </h2>
         <ReloadButton onClick={() => void load()} busy={busy} />
       </div>
 
-      <h4 className="section-title">Дебиторка клиентов</h4>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+      <h3 className="section-title">Дебиторка клиентов</h3>
+      <div className="stats-grid">
         <Metric label="Выставлено счетов" value={money(r.invoicedKopeks)} hint={`${r.invoiceCount} счетов`} />
         <Metric label="Собрано" value={money(r.netCollectedKopeks)} tone="good" />
         <Metric label="К оплате" value={money(r.receivableKopeks)} tone={r.receivableKopeks > 0 ? "warn" : "default"} />
@@ -241,7 +246,7 @@ export function FinanceMoneyPanel({
 
       {r.topDebtors.length > 0 && (
         <>
-          <h4 className="section-title">Кто должен</h4>
+          <h3 className="section-title">Кто должен</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -269,7 +274,7 @@ export function FinanceMoneyPanel({
 
       {r.openInvoices.length > 0 && (
         <>
-          <h4 className="section-title">Счета клиентов</h4>
+          <h3 className="section-title">Счета клиентов</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -301,8 +306,8 @@ export function FinanceMoneyPanel({
         </>
       )}
 
-      <h4 className="section-title" style={{ marginBlockStart: 18 }}>Кредиторка прачечных</h4>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+      <h3 className="section-title" style={{ marginBlockStart: 18 }}>Кредиторка прачечных</h3>
+      <div className="stats-grid">
         <Metric label="Начислено" value={money(p.accruedKopeks)} />
         <Metric label="Выставлено счетов" value={money(p.invoicedKopeks)} />
         <Metric label="Не выставлено" value={money(p.estimatedKopeks)} hint="Ожидает формирования акта" />
@@ -342,8 +347,8 @@ export function FinanceMoneyPanel({
         </div>
       )}
 
-      <h4 className="section-title" style={{ marginBlockStart: 18 }}>Вклад и деньги под риском</h4>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+      <h3 className="section-title" style={{ marginBlockStart: 18 }}>Вклад и деньги под риском</h3>
+      <div className="stats-grid">
         <Metric label="Собрано" value={money(data.margin.netCollectedKopeks)} />
         <Metric label="Себестоимость прачечной" value={money(data.margin.partnerCogsKopeks)} />
         <Metric
@@ -360,7 +365,7 @@ export function FinanceMoneyPanel({
 
       {data.monthly.length > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Помесячно</h4>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Помесячно</h3>
           <div className="data-list">
             {data.monthly.map(month => (
               <div className="data-row" key={month.month}>
@@ -368,7 +373,7 @@ export function FinanceMoneyPanel({
                 <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
                   <span className="muted">выставлено {money(month.invoicedKopeks)}</span>
                   <span className="muted">собрано {money(month.netCollectedKopeks)}</span>
-                  <span style={{ inlineSize: 120 }}>
+                  <span style={{ inlineSize: "min(120px, 100%)" }}>
                     <Meter
                       value={month.netCollectedKopeks}
                       max={maxMonth}
@@ -455,16 +460,16 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
   const t = data.totals;
 
   return (
-    <section className="panel" aria-labelledby="customer-money-heading">
+    <section className="panel content-auto" aria-labelledby="customer-money-heading">
       <div className="panel-head">
-        <h3 id="customer-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="customer-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
           <Scale size={18} aria-hidden="true" />
           <span>Мои расходы</span>
-        </h3>
+        </h2>
         <ReloadButton onClick={() => void load()} busy={busy} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+      <div className="stats-grid">
         <Metric label="Всего заказов" value={String(t.orderCount)} />
         <Metric label="Выставлено счетов" value={money(t.chargedKopeks)} />
         <Metric label="Оплачено" value={money(t.netPaidKopeks)} tone="good" />
@@ -487,7 +492,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
 
       {data.byTier.length > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>По тарифам</h4>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>По тарифам</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -513,7 +518,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
 
       {data.byService.length > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>По услугам</h4>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>По услугам</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -543,7 +548,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
 
       {data.orders.length > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>История платежей</h4>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>История платежей</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -608,8 +613,10 @@ type ItemMixDto = {
 
 const KG = (grams: number) => `${(grams / 1000).toFixed(2)} кг`;
 
-export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
-  const [days, setDays] = useState(90);
+export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refreshToken?: number }) {
+  const [daysValue, setDaysValue] = useUrlState<string>("itemMixDays", "90", { push: false });
+  const days = Number(daysValue) || 90;
+  const setDays = (next: number) => setDaysValue(String(next));
   const [data, setData] = useState<ItemMixDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -625,7 +632,7 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
     } finally {
       setBusy(false);
     }
-  }, [days, notify]);
+  }, [days, notify, refreshToken]);
 
   useEffect(() => {
     void load();
@@ -638,12 +645,12 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
   const maxDaily = Math.max(1, ...data.daily.map(day => day.receivedGrams));
 
   return (
-    <section className="panel" aria-labelledby="item-mix-heading">
+    <section className="panel content-auto" aria-labelledby="item-mix-heading">
       <div className="panel-head">
-        <h3 id="item-mix-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="item-mix-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
           <Shirt size={18} aria-hidden="true" />
           <span>Что приняли: вещи и вес</span>
-        </h3>
+        </h2>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <label className="muted" htmlFor="item-mix-window">Период</label>
           <select
@@ -661,13 +668,13 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
         </div>
       </div>
 
-      <div className="alert-banner" role="status" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      <div className="alert-banner" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
         <span>{data.note}</span>
       </div>
 
-      <h4 className="section-title" style={{ marginBlockStart: 16 }}>Вес: сколько сдали против сколько посчитали</h4>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+      <h3 className="section-title" style={{ marginBlockStart: 16 }}>Вес: сколько сдали против сколько посчитали</h3>
+      <div className="stats-grid">
         <Metric label="Посчитано в заказе" value={KG(w.quotedGrams)} />
         <Metric label="Принято на весах" value={KG(w.receivedGrams)} />
         <Metric
@@ -683,8 +690,8 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
 
       {data.tierSplit.protected.itemCount > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Поштучно (тариф «Защищённый»)</h4>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Поштучно (тариф «Защищённый»)</h3>
+          <div className="stats-grid">
             <Metric label="Заказов с описью" value={String(data.tierSplit.protected.orderCount)} />
             <Metric label="Вещей по описи" value={String(data.tierSplit.protected.itemCount)} />
           </div>
@@ -715,12 +722,12 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
 
       {data.garmentStatus.length > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Статус вещей</h4>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Статус вещей</h3>
           <div className="button-row">
             {data.garmentStatus.map(row => (
-              <span className="pill" key={row.status}>
+              <Badge key={row.status}>
                 {stateLabel(GARMENT_STATUS_LABELS, row.status)}: <span className="mono">{row.count}</span>
-              </span>
+              </Badge>
             ))}
           </div>
         </>
@@ -728,7 +735,7 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
 
       {data.daily.length > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>Приёмка по дням</h4>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Приёмка по дням</h3>
           <div className="data-list">
             {data.daily.slice(-14).map(day => (
               <div className="data-row" key={day.date}>
@@ -737,7 +744,7 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
                   <span className="muted">заказов: {day.orderCount}</span>
                   <span className="muted">вещей: {day.itemCount}</span>
                   <span className="muted">вес: {KG(day.receivedGrams)}</span>
-                  <span style={{ inlineSize: 120 }}>
+                  <span style={{ inlineSize: "min(120px, 100%)" }}>
                     <Meter
                       value={day.receivedGrams}
                       max={maxDaily}
@@ -753,10 +760,10 @@ export function ItemMixPanel({ notify }: { notify: NotifyFn }) {
 
       {data.topVariance.length > 0 && (
         <>
-          <h4 className="section-title" style={{ marginBlockStart: 18 }}>
+          <h3 className="section-title" style={{ marginBlockStart: 18 }}>
             <BarChart3 size={16} aria-hidden="true" style={{ verticalAlign: "-3px", marginInlineEnd: 6 }} />
             Заказы с наибольшим расхождением веса
-          </h4>
+          </h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -805,8 +812,10 @@ type ChronometryDto = {
 /** A duration in hours. An empty stage shows a dash, not a zero: nothing was measured. */
 const HOURS = (value: number, samples: number) => (samples === 0 ? "—" : `${value.toFixed(1)} ч`);
 
-export function ChronometryPanel({ notify }: { notify: NotifyFn }) {
-  const [days, setDays] = useState(90);
+export function ChronometryPanel({ notify, refreshToken }: { notify: NotifyFn; refreshToken?: number }) {
+  const [daysValue, setDaysValue] = useUrlState<string>("chronometryDays", "90", { push: false });
+  const days = Number(daysValue) || 90;
+  const setDays = (next: number) => setDaysValue(String(next));
   const [data, setData] = useState<ChronometryDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -822,7 +831,7 @@ export function ChronometryPanel({ notify }: { notify: NotifyFn }) {
     } finally {
       setBusy(false);
     }
-  }, [days, notify]);
+  }, [days, notify, refreshToken]);
 
   useEffect(() => {
     void load();
@@ -832,12 +841,12 @@ export function ChronometryPanel({ notify }: { notify: NotifyFn }) {
   if (!data) return <Loading error={error} />;
 
   return (
-    <section className="panel" aria-labelledby="chronometry-heading">
+    <section className="panel content-auto" aria-labelledby="chronometry-heading">
       <div className="panel-head">
-        <h3 id="chronometry-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="chronometry-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
           <Clock size={18} aria-hidden="true" />
           <span>Сколько идёт заказ</span>
-        </h3>
+        </h2>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <label className="muted" htmlFor="chronometry-window">Период</label>
           <select
@@ -855,12 +864,12 @@ export function ChronometryPanel({ notify }: { notify: NotifyFn }) {
         </div>
       </div>
 
-      <div className="alert-banner" role="status" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      <div className="alert-banner" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
         <span>{data.note}</span>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBlockStart: 14 }}>
+      <div className="stats-grid" style={{ marginBlockStart: 14 }}>
         <Metric label="Полный цикл, медиана" value={HOURS(data.cycle.p50Hours, data.cycle.samples)} />
         <Metric
           label="Полный цикл, хвост"
@@ -871,7 +880,7 @@ export function ChronometryPanel({ notify }: { notify: NotifyFn }) {
         <Metric label="Заказов в выборке" value={String(data.ordersAnalyzed)} />
       </div>
 
-      <h4 className="section-title" style={{ marginBlockStart: 18 }}>Этапы: медиана и хвост</h4>
+      <h3 className="section-title" style={{ marginBlockStart: 18 }}>Этапы: медиана и хвост</h3>
       <div className="table-wrap">
         <table className="clean-table">
           <thead>
@@ -909,16 +918,21 @@ type ChurnDto = {
     customerId: string;
     displayName: string;
     phone: string | null;
+    phoneMasked: boolean;
     failedAttempts: number;
     lastOutcome: string;
     lastAttemptAt: string;
     orderCount: number;
   }>;
+  /** True when every phone in the list is masked — the UI says so out loud. */
+  phoneMasked: boolean;
   note: string;
 };
 
-export function ChurnPanel({ notify }: { notify: NotifyFn }) {
-  const [days, setDays] = useState(90);
+export function ChurnPanel({ notify, refreshToken }: { notify: NotifyFn; refreshToken?: number }) {
+  const [daysValue, setDaysValue] = useUrlState<string>("churnDays", "90", { push: false });
+  const days = Number(daysValue) || 90;
+  const setDays = (next: number) => setDaysValue(String(next));
   const [data, setData] = useState<ChurnDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -934,7 +948,7 @@ export function ChurnPanel({ notify }: { notify: NotifyFn }) {
     } finally {
       setBusy(false);
     }
-  }, [days, notify]);
+  }, [days, notify, refreshToken]);
 
   useEffect(() => {
     void load();
@@ -944,12 +958,12 @@ export function ChurnPanel({ notify }: { notify: NotifyFn }) {
   if (!data) return <Loading error={error} />;
 
   return (
-    <section className="panel" aria-labelledby="churn-heading">
+    <section className="panel content-auto" aria-labelledby="churn-heading">
       <div className="panel-head">
-        <h3 id="churn-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="churn-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
           <UserRoundX size={18} aria-hidden="true" />
           <span>Кто скоро уйдёт</span>
-        </h3>
+        </h2>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <label className="muted" htmlFor="churn-window">Период</label>
           <select
@@ -967,12 +981,19 @@ export function ChurnPanel({ notify }: { notify: NotifyFn }) {
         </div>
       </div>
 
-      <div className="alert-banner" role="status" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      <div className="alert-banner" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
         <span>{data.note}</span>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBlockStart: 14 }}>
+      {data.phoneMasked ? (
+        <p className="muted" style={{ marginBlockStart: 10 }}>
+          Телефоны клиентов замаскированы: вашей роли не нужно звонить им по этому списку. Факт
+          просмотра записан в журнал аудита.
+        </p>
+      ) : null}
+
+      <div className="stats-grid" style={{ marginBlockStart: 14 }}>
         <Metric label="Клиентов в зоне риска" value={String(data.atRisk.length)} tone={data.atRisk.length > 0 ? "warn" : "default"} />
         <Metric label="Порог неудачных доставок" value={String(data.threshold)} />
       </div>
@@ -987,7 +1008,7 @@ export function ChurnPanel({ notify }: { notify: NotifyFn }) {
             <thead>
               <tr>
                 <th>Клиент</th>
-                <th>Телефон</th>
+                <th>Телефон{data.phoneMasked ? " (замаскирован)" : ""}</th>
                 <th>Неудачных доставок</th>
                 <th>Последняя причина</th>
                 <th>Когда</th>

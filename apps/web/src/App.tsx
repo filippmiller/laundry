@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MotionConfig } from "motion/react";
 import { api } from "./api";
 import {
@@ -36,6 +36,10 @@ function App() {
   const [pendingLogout, setPendingLogout] = useState<boolean>(() => hasPendingLogout());
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [logoutRetrying, setLogoutRetrying] = useState(false);
+  // The server states whether the isolated preview is enabled and whether it enforces an access
+  // key. The landing page used to guess it from the presence of demo data, so the key field never
+  // appeared on a deployment that accepted any key.
+  const [previewConfig, setPreviewConfig] = useState({ previewEnabled: false, requiresPreviewKey: false });
 
   async function attemptServerLogout(): Promise<boolean> {
     setLogoutRetrying(true);
@@ -60,11 +64,30 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    // The demo seed is idempotent, but calling it on every page load wrote to the database on
+    // every visit of the public preview. It is now asked for once, and a failure is reported
+    // instead of silently swallowing the error and hiding the demo tab.
     api<DemoConfig>("/dev/seed", { method: "POST", body: {} })
       .then(config => {
         if (!cancelled) setDemo(config);
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (cancelled) return;
+        setNotice({
+          kind: "error",
+          text: "Демо-стенд недоступен: данные витрины не загрузились. Попробуйте позже.",
+        });
+      });
+
+    api<{ previewEnabled: boolean; requiresPreviewKey: boolean }>("/preview/config")
+      .then(config => {
+        if (!cancelled) setPreviewConfig(config);
+      })
+      .catch(() => {
+        // Without the server's answer the key field stays hidden: showing it on a deployment that
+        // does not enforce a key would be the very false promise this change removes.
+        if (!cancelled) setPreviewConfig({ previewEnabled: false, requiresPreviewKey: false });
+      });
 
     async function bootstrapSession() {
       const result = await bootstrapSessionWithPendingLogout<Me>({ request: api });
@@ -122,11 +145,87 @@ function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, [me]);
 
+  // The scroll position belongs to the workspace: a user who leaves the finance cabinet for the
+  // dispatcher and comes back expects to land where they were. The native browser restoration
+  // cannot help — the workspace content is fetched after the document is painted, so at
+  // restoration time the document is still short.
+  //
+  // The offsets live in `history.state` and not only in a React ref: a history entry survives a
+  // reload, so the position is restored after a reload as well (P2-03, P2-04).
+  const scrollOffsetsRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = (window.history.state as { scrollOffsets?: Record<string, number> } | null)?.scrollOffsets;
+    if (stored) scrollOffsetsRef.current = { ...stored };
+  }, []);
+
+  // The current offset is written into the history entry while the user scrolls, so that a reload
+  // or a Back navigation finds it again.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let frame = 0;
+    function onScroll() {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        if (!activeWorkspace) return;
+        scrollOffsetsRef.current[activeWorkspace] = window.scrollY;
+        const state = (window.history.state ?? {}) as Record<string, unknown>;
+        window.history.replaceState(
+          { ...state, scrollOffsets: { ...scrollOffsetsRef.current } },
+          "",
+        );
+      });
+    }
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [activeWorkspace]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("scrollRestoration" in window.history)) return;
+    window.history.scrollRestoration = "manual";
+    return () => {
+      window.history.scrollRestoration = "auto";
+    };
+  }, []);
+
+  // After a reload the stored offset is restored explicitly: the workspace content arrives after
+  // the first paint, so the document is still short when the browser would have restored it.
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    const target = scrollOffsetsRef.current[activeWorkspace];
+    if (typeof target !== "number" || target <= 0) return;
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      const tallEnough = document.documentElement.scrollHeight >= target + 120;
+      if (!tallEnough && attempts < 25) return;
+      window.clearInterval(timer);
+      window.scrollTo({ top: target, behavior: "auto" });
+    }, 120);
+    return () => window.clearInterval(timer);
+  }, [activeWorkspace]);
+
   function selectWorkspace(key: WorkspaceKey) {
+    // Remember where the current workspace was before leaving it.
+    if (activeWorkspace) {
+      scrollOffsetsRef.current[activeWorkspace] = window.scrollY;
+    }
     setActiveWorkspace(key);
     const nextHash = `#/${key}`;
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
+    }
+    // Restore the offset of the workspace we are coming back to.
+    const target = scrollOffsetsRef.current[key];
+    if (typeof target === "number" && target > 0) {
+      requestAnimationFrame(() => window.scrollTo({ top: target, behavior: "auto" }));
+    } else {
+      window.scrollTo({ top: 0, behavior: "auto" });
     }
   }
 
@@ -201,7 +300,12 @@ function App() {
         ) : !me ? (
           <AuthLanding
             demo={demo}
-            previewConfig={{ previewEnabled: Boolean(demo), requiresPreviewKey: false }}
+            previewConfig={{
+              // The demo tab exists whenever the demo seed is reachable; the access-key field
+              // exists only when the server says a key is actually enforced.
+              previewEnabled: Boolean(demo) || previewConfig.previewEnabled,
+              requiresPreviewKey: previewConfig.requiresPreviewKey,
+            }}
             onAuthenticated={handleAuthenticated}
             notify={setNotice}
           />

@@ -88,6 +88,7 @@ export const EVENT_LABELS: Record<string, string> = {
   "shift.completed": "Смена курьера завершена",
   "support.opened": "Обращение в поддержку открыто",
   "support.closed": "Обращение в поддержку закрыто",
+  "support.reopened": "Обращение в поддержку переоткрыто",
   "claim.reopened": "Претензия переоткрыта",
   "claim.compensation_proposed": "Предложена компенсация по претензии",
   "claim.compensation_approved": "Компенсация по претензии одобрена",
@@ -202,6 +203,8 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<string, string> = {
   "admin.session_revoked": "Сессия отозвана",
   "review.hidden": "Отзыв скрыт",
   "auth.preview_unlocked": "Предпросмотр открыт",
+  "privacy.churn_read": "Прочитан список клиентов на грани оттока",
+  "privacy.order_search": "Выполнен поиск по заказам",
 };
 
 /** Domain resources an audit event can point at (the aggregate type). */
@@ -223,6 +226,8 @@ export const RESOURCE_TYPE_LABELS: Record<string, string> = {
   membership: "Участник",
   session: "Сессия",
   review: "Отзыв",
+  churn_signal: "Сигнал оттока",
+  order_search: "Поиск по заказам",
 };
 
 /** Audit resource type, always in Russian — never a raw Latin aggregate type. */
@@ -252,6 +257,8 @@ export const NOTIFICATION_LABELS: Record<string, string> = {
   return_unprocessed: "Вещи готовятся к возврату без обработки",
   qc_passed: "Контроль качества пройден, готовим доставку",
   qc_rewash: "Выявлено замечание на ОТК — отправлено на доработку",
+  support_closed: "Обращение в поддержку закрыто",
+  support_reopened: "Обращение в поддержку переоткрыто — ответьте клиенту",
 };
 
 export const CLAIM_STATE_LABELS: Record<string, string> = {

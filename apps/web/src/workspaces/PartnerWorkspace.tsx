@@ -43,6 +43,10 @@ import { Reveal, Stagger } from "../components/ui/Reveal";
 import { StatGrid, StatTile } from "../components/ui/StatTile";
 import { TabPanel, Tabs, type TabItem } from "../components/ui/Tabs";
 import { ItemMixPanel } from "./analytics-panels";
+import { ChronometryPanel } from "./analytics-panels";
+import { PartnerMoneyPanel } from "./partner-money-panels";
+import { ExpectedReceiptsPanel } from "./ops-panels";
+import { useUrlState } from "../hooks/useUrlState";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -303,7 +307,7 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
-  const [queueFilter, setQueueFilter] = useState<QueueFilter>("all");
+  const [queueFilter, setQueueFilter] = useUrlState<QueueFilter>("partnerQueue", "all");
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
   // Stage 1: Receiving drafts & broken seal modal
@@ -845,6 +849,15 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
 
       {/* What we actually received: items by category and weight against the quote */}
       <ItemMixPanel notify={notify} />
+
+      {/* Manifests handed over by the courier and still waiting for our receipt */}
+      <ExpectedReceiptsPanel notify={notify} />
+
+      {/* The partner's own money: accrued, payable, contested, paid */}
+      <PartnerMoneyPanel notify={notify} />
+
+      {/* How long the cycle takes — the partner role is allowed to see the timing */}
+      <ChronometryPanel notify={notify} />
 
       {/* Queue + selected order workbench */}
       <div className="workspace-side-col">
