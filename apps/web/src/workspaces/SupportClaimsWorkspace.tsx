@@ -1169,8 +1169,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
             />
             <CardBody>
               <form
-                className="row row--tight"
-                style={{ marginBlockEnd: 12 }}
+                className="row row--tight u-mb-12px"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const next = threadsSearch.trim();
@@ -1206,7 +1205,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
               </form>
 
               {threadsLoadError && (
-                <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+                <div className="alert-banner u-mb-12px" role="alert">
                   <AlertTriangle size={16} aria-hidden="true" />
                   <span>Не удалось загрузить обращения: {threadsLoadError}</span>
                 </div>
@@ -1258,7 +1257,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                     })}
                   </div>
                   {threadsHasMore && (
-                    <div className="button-row" style={{ marginBlockStart: 12 }}>
+                    <div className="button-row u-mt-12px">
                       <Button
                         variant="secondary"
                         size="sm"
@@ -1443,8 +1442,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
             />
             <CardBody>
               <form
-                className="row row--tight"
-                style={{ marginBlockEnd: 12 }}
+                className="row row--tight u-mb-12px"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const next = claimsSearch.trim();
@@ -1480,7 +1478,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
               </form>
 
               {claimsLoadError && (
-                <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+                <div className="alert-banner u-mb-12px" role="alert">
                   <AlertTriangle size={16} aria-hidden="true" />
                   <span>Не удалось загрузить претензии: {claimsLoadError}</span>
                 </div>
@@ -1528,7 +1526,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                     })}
                   </Stagger>
                   {claimsHasMore && (
-                    <div className="button-row" style={{ marginBlockStart: 12 }}>
+                    <div className="button-row u-mt-12px">
                       <Button
                         variant="secondary"
                         size="sm"
@@ -2027,16 +2025,14 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         {evidencePreview && (
           <div className="stack">
             {evidencePreview.mimeType.startsWith("image/") ? (
-              <img
+              <img className="u-mw-100 u-mh-65vh u-of-contain u-brr-8px"
                 src={evidencePreview.blobUrl}
                 alt={evidencePreview.label}
-                style={{ maxWidth: "100%", maxHeight: "65vh", objectFit: "contain", borderRadius: 8 }}
               />
             ) : evidencePreview.mimeType === "application/pdf" ? (
-              <iframe
+              <iframe className="u-w-100 u-h-65vh u-bd-1px-solid-var-border-hairline u-brr-8px"
                 src={evidencePreview.blobUrl}
                 title={evidencePreview.label}
-                style={{ width: "100%", height: "65vh", border: "1px solid var(--border-hairline)", borderRadius: 8 }}
               />
             ) : (
               <p className="muted">

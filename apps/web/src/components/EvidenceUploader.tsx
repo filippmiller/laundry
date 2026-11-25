@@ -605,7 +605,7 @@ export function EvidenceUploader({
         }`}
         actions={
           <div className="button-row">
-            <input
+            <input className="u-hidden"
               ref={fileInputRef}
               id={inputId}
               type="file"
@@ -613,9 +613,8 @@ export function EvidenceUploader({
               multiple
               disabled={uploading || !ownerId}
               onChange={e => void handleFilesSelected(e)}
-              style={{ display: "none" }}
             />
-            <input
+            <input className="u-hidden"
               ref={cameraInputRef}
               id={`${inputId}-camera`}
               type="file"
@@ -623,7 +622,6 @@ export function EvidenceUploader({
               capture="environment"
               disabled={uploading || !ownerId}
               onChange={e => void handleFilesSelected(e)}
-              style={{ display: "none" }}
             />
             <Button
               type="button"

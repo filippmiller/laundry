@@ -1511,7 +1511,7 @@ export function CourierWorkspace({
                 </div>
                 {/* The button is disabled until the customer confirms the handover — say so next to
                     it instead of leaving a grey button with no explanation (MA-28). */}
-                <p className="muted" id="intake-dual-confirm-hint" style={{ marginBlockStart: 8 }}>
+                <p className="muted u-mt-8px" id="intake-dual-confirm-hint">
                   {dualConfirmed
                     ? "Подтверждение получено — можно фиксировать приёмку."
                     : "Отметьте подтверждение передачи и описи — без него приёмку зафиксировать нельзя."}

@@ -22,19 +22,21 @@ export function QrCodeBadge({ value, label = "QR-код заказа", size = 12
 
   if (!src) {
     return (
-      <div style={{ inlineSize: size, blockSize: size, display: "grid", placeItems: "center", background: "#fff", border: "1px solid var(--border-hairline)", borderRadius: 8 }}>
+      <div
+        className="u-grid u-pi-center u-bg-fff u-bd-1px-solid-var-border-hairline u-brr-8px"
+        style={{ inlineSize: size, blockSize: size }}
+      >
         <span className="muted mono">QR</span>
       </div>
     );
   }
 
   return (
-    <img
+    <img className="u-block u-brr-8px u-bd-1px-solid-var-border-hairline u-bg-fff"
       src={src}
       alt={label}
       width={size}
       height={size}
-      style={{ display: "block", borderRadius: 8, border: "1px solid var(--border-hairline)", background: "#fff" }}
     />
   );
 }

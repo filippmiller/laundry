@@ -118,11 +118,11 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
   // one and then find the tenant that is already there.
   return db.transaction(async tx => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext('laundry:seed-demo'))`);
-    return seedDemoInTransaction(tx, options);
+    return seedDemoInTransaction(tx);
   });
 }
 
-async function seedDemoInTransaction(db: DbLike, options?: { previewAuthorized?: boolean }) {
+async function seedDemoInTransaction(db: DbLike) {
   const [existing] = await db.select().from(organizations).where(eq(organizations.name, DEMO_NAME)).limit(1);
   if (existing) return seedBookForExistingTenant(db, existing.id);
 

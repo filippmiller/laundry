@@ -276,7 +276,7 @@ function App() {
       >
         {pendingLogout && logoutError ? (
           <div className="alert-banner" role="alert" data-testid="pending-logout-banner">
-            <div style={{ flex: 1 }}>
+            <div className="u-flex-1">
               <strong>Выход не завершён</strong>
               <div>
                 Не удалось отозвать сессию на сервере ({logoutError}). Повторите выход, чтобы завершить сессию.

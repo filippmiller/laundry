@@ -329,50 +329,50 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
           </div>
         </div>
 
-        <p className="muted" style={{ marginBlockEnd: 18, lineHeight: 1.55 }}>
+        <p className="muted u-mb-18px u-lh-1-55">
           Единый контур приёмки у подъезда, контроля сохранности с пломбами и доставки обратно в
           удобное дворовое окно — от повседневной стирки до деликатной химчистки.
         </p>
 
-        <div className="grid-two" style={{ marginBlockEnd: 16 }}>
+        <div className="grid-two u-mb-16px">
           <div className="panel-muted">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBlockEnd: 6 }}>
+            <div className="u-flex u-ai-center u-gap-8px u-mb-6px">
               <PackageCheck size={18} aria-hidden="true" />
               <strong>Эконом</strong>
             </div>
-            <p className="muted" style={{ margin: 0, lineHeight: 1.45 }}>
+            <p className="muted u-m-0px u-lh-1-45">
               Мешок с пломбой по весу. Быстрое оформление у двери без поштучной описи — подходит для
               повседневного белья и домашнего текстиля.
             </p>
           </div>
 
           <div className="panel-muted">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBlockEnd: 6 }}>
+            <div className="u-flex u-ai-center u-gap-8px u-mb-6px">
               <ShieldCheck size={18} aria-hidden="true" />
               <strong>Защищённый</strong>
             </div>
-            <p className="muted" style={{ margin: 0, lineHeight: 1.45 }}>
+            <p className="muted u-m-0px u-lh-1-45">
               Поштучная опись каждой вещи, фотофиксация состояния на входе и выходе, объявленная
               ценность и прозрачное согласование доплат.
             </p>
           </div>
         </div>
 
-        <div className="panel-muted" style={{ marginBlockEnd: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBlockEnd: 6 }}>
+        <div className="panel-muted u-mb-16px">
+          <div className="u-flex u-ai-center u-gap-8px u-mb-6px">
             <CalendarClock size={18} aria-hidden="true" />
             <strong>Общие дворовые окна или выезд вне расписания</strong>
           </div>
-          <p className="muted" style={{ margin: 0, lineHeight: 1.5 }}>
+          <p className="muted u-m-0px u-lh-1-5">
             Плановые общие окна забора и доставки по вашему дому — <strong>бесплатно</strong> за
             счёт объединения рейсов. Если нужно приехать в индивидуальное время вне графика дома,
             доступен отдельный стоп за <strong>+500 ₽</strong>.
           </p>
         </div>
 
-        <div className="panel-muted" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-          <Info size={18} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }} />
-          <p className="muted" style={{ margin: 0, lineHeight: 1.45 }}>
+        <div className="panel-muted u-flex u-gap-10px u-ai-flex-start">
+          <Info size={18} aria-hidden="true" className="u-fs-0 u-mt-2px" />
+          <p className="muted u-m-0px u-lh-1-45">
             <strong>Демо-режим:</strong> тарифы, SMS-коды и платёжные провайдеры в этом стенде
             являются тестовыми нефискальными заглушками; реальные списания и отправка СМС не
             выполняются.
@@ -411,16 +411,16 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
             aria-labelledby={`${baseId}-tab-demo`}
           >
             <div className="panel-head">
-              <h2 className="section-title" style={{ margin: 0, fontSize: "1.2rem" }}>
+              <h2 className="section-title u-m-0px u-fsz-1-2rem">
                 Вход в демо
               </h2>
               <Badge tone="ok">Тестовый стенд</Badge>
             </div>
 
             {previewConfig.requiresPreviewKey && (
-              <div className="panel-muted" style={{ marginBlockEnd: 16 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBlockEnd: 8, flexWrap: "wrap" }}>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+              <div className="panel-muted u-mb-16px">
+                <div className="u-flex u-ai-center u-jc-space-between u-gap-8px u-mb-8px u-fw-wrap">
+                  <span className="u-inline-flex u-ai-center u-gap-6px u-fwt-600">
                     <KeyRound size={16} aria-hidden="true" />
                     Требуется ключ предпросмотра
                   </span>
@@ -430,8 +430,8 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                     </Badge>
                   )}
                 </div>
-                <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
-                  <div style={{ ...FIELD_STYLE, flex: "1 1 200px" }}>
+                <div className="u-flex u-gap-10px u-ai-end u-fw-wrap">
+                  <div className="u-flex-1-1-200px">
                     <label htmlFor={previewKeyId}>Ключ демо-доступа</label>
                     <input
                       id={previewKeyId}
@@ -505,8 +505,8 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
             </form>
 
             {demo?.demoUsers && demo.demoUsers.length > 0 && (
-              <div style={{ marginBlockStart: 22 }}>
-                <h3 className="section-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="u-mt-22px">
+                <h3 className="section-title u-flex u-ai-center u-gap-8px">
                   <UserCheck size={17} aria-hidden="true" />
                   Быстрый вход по роли
                 </h3>
@@ -515,25 +515,19 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
                     <button
                       key={`${u.role}-${u.phone}`}
                       type="button"
-                      className="ghost"
+                      className="ghost u-jc-space-between u-ta-left u-pbl-10px u-h-auto"
                       disabled={demoBusy}
                       onClick={() => handlePersonaLogin(u.phone, u.role)}
-                      style={{
-                        justifyContent: "space-between",
-                        textAlign: "left",
-                        paddingBlock: 10,
-                        height: "auto",
-                      }}
                     >
-                      <span style={{ display: "grid", gap: 2 }}>
+                      <span className="u-grid u-gap-2px">
                         <span>{stateLabel(ROLE_LABELS, u.role)}</span>
                         {u.displayName && (
-                          <span className="muted" style={{ fontSize: "0.8rem", fontWeight: 400 }}>
+                          <span className="muted u-fsz-0-8rem u-fwt-400">
                             {u.displayName}
                           </span>
                         )}
                       </span>
-                      <span className="mono muted" style={{ fontSize: "0.8125rem", fontWeight: 500 }}>
+                      <span className="mono muted u-fsz-0-8125rem u-fwt-500">
                         {u.phone}
                       </span>
                     </button>
@@ -551,13 +545,13 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
             aria-labelledby={`${baseId}-tab-otp`}
           >
             <div className="panel-head">
-              <h2 className="section-title" style={{ margin: 0, fontSize: "1.2rem" }}>
+              <h2 className="section-title u-m-0px u-fsz-1-2rem">
                 Вход по телефону (OTP)
               </h2>
               <Badge icon={<Phone size={14} aria-hidden="true" />}>Одноразовый код</Badge>
             </div>
 
-            <form onSubmit={handleOtpRequest} style={{ ...FORM_STACK_STYLE, marginBlockEnd: 18 }}>
+            <form className="u-mb-18px" onSubmit={handleOtpRequest}>
               {!demo?.organizationId && (
                 <div style={FIELD_STYLE}>
                   <label htmlFor={otpOrgInputId}>Идентификатор организации</label>
@@ -597,7 +591,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
             </form>
 
             {devCodeHint && (
-              <div className="panel-muted" style={{ marginBlockEnd: 16 }}>
+              <div className="panel-muted u-mb-16px">
                 <span className="muted">Тестовый код подтверждения (devCode): </span>
                 <strong className="mono">{devCodeHint}</strong>
               </div>
@@ -636,7 +630,7 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
             aria-labelledby={`${baseId}-tab-track`}
           >
             <div className="panel-head">
-              <h2 className="section-title" style={{ margin: 0, fontSize: "1.2rem" }}>
+              <h2 className="section-title u-m-0px u-fsz-1-2rem">
                 Отследить заказ
               </h2>
               <Badge icon={<Truck size={14} aria-hidden="true" />}>Без входа</Badge>
@@ -699,14 +693,14 @@ export function AuthLanding({ demo, previewConfig, onAuthenticated, notify }: Pr
             </form>
 
             {trackResult && (
-              <div className="panel-muted" style={{ marginBlockStart: 18, display: "grid", gap: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <span className="mono" style={{ fontWeight: 700 }}>
+              <div className="panel-muted u-mt-18px u-grid u-gap-8px">
+                <div className="u-flex u-jc-space-between u-ai-center u-gap-10px u-fw-wrap">
+                  <span className="mono u-fwt-700">
                     {trackResult.publicNumber ?? trackNumber.trim()}
                   </span>
                   <Badge tone="info">{stateLabel(ORDER_STATE_LABELS, trackResult.state)}</Badge>
                 </div>
-                <div className="muted" style={{ fontSize: "0.875rem" }}>
+                <div className="muted u-fsz-0-875rem">
                   Обновлено: <span className="mono">{dt(trackResult.updatedAt)}</span>
                 </div>
               </div>

@@ -167,7 +167,7 @@ export function FiscalReceiptsPanel({
         <EmptyState title="Регистраций нет" text="Ни один счёт не отправлен на фискальную регистрацию." />
       ) : (
         <>
-          <p className="muted" style={{ marginBlockEnd: 10 }}>
+          <p className="muted u-mb-10px">
             Это состояние демо-адаптера, а не кассовый чек: основания для вычета по 54-ФЗ оно не даёт.
           </p>
           <div className="table-wrap">

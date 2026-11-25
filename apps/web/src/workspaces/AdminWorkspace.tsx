@@ -727,7 +727,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
           }
         />
 
-        <form className="row row--tight" style={{ marginBlockEnd: 12 }} onSubmit={(e) => void handleMembersSearchSubmit(e)}>
+        <form className="row row--tight u-mb-12px" onSubmit={(e) => void handleMembersSearchSubmit(e)}>
           <Input
             aria-label="Поиск участников по телефону, имени или партнёру"
             type="text"
@@ -761,7 +761,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
         </form>
 
         {membersLoadError && (
-          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+          <div className="alert-banner u-mb-12px" role="alert">
             <AlertTriangle size={16} aria-hidden="true" />
             <span>Не удалось загрузить список участников: {membersLoadError}</span>
           </div>
@@ -785,7 +785,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
               caption="Участники платформы, их роли и статус доступа"
             />
             {membersHasMore && (
-              <div className="button-row" style={{ marginBlockStart: 12 }}>
+              <div className="button-row u-mt-12px">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -907,7 +907,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
         />
 
         {signalsLoadError && (
-          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+          <div className="alert-banner u-mb-12px" role="alert">
             <AlertTriangle size={16} aria-hidden="true" />
             <span>Не удалось загрузить сигналы антифрода: {signalsLoadError}</span>
           </div>
@@ -944,7 +944,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
         />
 
         {auditLoadError && (
-          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+          <div className="alert-banner u-mb-12px" role="alert">
             <AlertTriangle size={16} aria-hidden="true" />
             <span>Не удалось загрузить журнал аудита: {auditLoadError}</span>
           </div>

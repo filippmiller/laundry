@@ -805,7 +805,7 @@ export function FinanceWorkspace({
 
       {/* 1. Финансовая сверка и дрифт */}
       <section className="panel" aria-labelledby="finance-reconciliation-heading">
-        <h2 id="finance-reconciliation-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-reconciliation-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <Scale size={18} aria-hidden="true" />
           <span>Финансовая сверка и дрифт</span>
         </h2>
@@ -823,14 +823,14 @@ export function FinanceWorkspace({
 
         {driftCount > 0 && (
           <div className="notice error" role="alert">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, marginBlockEnd: 6 }}>
+            <div className="u-flex u-ai-center u-gap-8px u-fwt-700 u-mb-6px">
               <AlertTriangle size={16} aria-hidden="true" />
               <span>Обнаружено расхождение сверки платежей</span>
             </div>
-            <div className="muted" style={{ marginBlockEnd: 6 }}>
+            <div className="muted u-mb-6px">
               Затронутые платёжные операции:
             </div>
-            <ul style={{ margin: 0, paddingInlineStart: 18 }}>
+            <ul className="u-m-0px u-pis-18px">
               {drift.map((item, idx) => {
                 const intentId = item.paymentIntentId ?? item.id ?? `drift-${idx + 1}`;
                 const details: string[] = [];
@@ -853,7 +853,7 @@ export function FinanceWorkspace({
       {/* 2. Счета клиентов, оплаты, возвраты и чарджбэки */}
       <section className="panel" aria-labelledby="finance-invoices-intents-heading">
         <div className="panel-head">
-          <h2 id="finance-invoices-intents-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <h2 id="finance-invoices-intents-heading" className="panel-title u-m-0px u-flex u-ai-center u-gap-8px">
             <Receipt size={18} aria-hidden="true" />
             <span>Счета клиентов, оплаты, возвраты и чарджбэки</span>
         </h2>
@@ -872,11 +872,11 @@ export function FinanceWorkspace({
           </Button>
         </div>
 
-        <h3 style={{ marginBlock: "8px 10px" }}>Счета клиентов</h3>
+        <h3 className="u-mbl-8px-10px">Счета клиентов</h3>
         {invoices.length === 0 ? (
           <p className="muted">Счета клиентов отсутствуют.</p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -897,7 +897,7 @@ export function FinanceWorkspace({
                       </Badge>
                     </td>
                     <td>
-                      <div className="button-row" style={{ marginBlock: 0 }}>
+                      <div className="button-row u-mbl-0px">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -923,19 +923,18 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h3 style={{ marginBlock: "8px 10px" }}>
+        <h3 className="u-mbl-8px-10px">
           Оспариваемые платежи и чарджбэки ({chargebacksBucket.totalCount})
         </h3>
-        <form
+        <form className="u-flex u-fw-wrap u-gap-8px u-ai-end u-mb-12px"
           onSubmit={e => {
             e.preventDefault();
             const nextQ = chargebackQuery.trim();
             const currentState = getEffectiveChargebackFilter(getChargebacksController().getSnapshot()).state;
             void loadChargebacks(nextQ, currentState);
           }}
-          style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "end", marginBlockEnd: 12 }}
         >
-          <div className="field" style={{ flex: "1 1 240px" }}>
+          <div className="field u-flex-1-1-240px">
             <label htmlFor={chargebackSearchId}>Поиск чарджбэков</label>
             <input
               id={chargebackSearchId}
@@ -946,7 +945,7 @@ export function FinanceWorkspace({
               placeholder="ID платежа, номер заказа или провайдер…"
             />
           </div>
-          <div className="field" style={{ flex: "0 1 200px" }}>
+          <div className="field u-flex-0-1-200px">
             <label htmlFor={chargebackStateId}>Статус</label>
             <select
               id={chargebackStateId}
@@ -963,7 +962,7 @@ export function FinanceWorkspace({
               <option value="chargeback_lost">Чарджбэк проигран</option>
             </select>
           </div>
-          <div className="button-row" style={{ marginBlock: 0 }}>
+          <div className="button-row u-mbl-0px">
             <Button
               type="submit"
               variant="ghost"
@@ -990,22 +989,11 @@ export function FinanceWorkspace({
           </div>
         </form>
         {chargebacksError && (
-          <div
+          <div className="u-flex u-fw-wrap u-ai-center u-jc-space-between u-gap-8px u-p-8px-12px u-mb-12px u-brr-8px u-bd-1px-solid-var-status-danger-border"
             role="alert"
             data-testid="chargebacks-error-banner"
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-              padding: "8px 12px",
-              marginBlockEnd: 12,
-              borderRadius: 8,
-              border: "1px solid var(--status-danger-border)",
-            }}
           >
-            <span className="muted" style={{ color: "var(--status-danger-ink)" }}>
+            <span className="muted u-c-var-status-danger-ink">
               Не удалось загрузить чарджбэки: {chargebacksError}
             </span>
             <Button
@@ -1020,7 +1008,7 @@ export function FinanceWorkspace({
           </div>
         )}
         {chargebacks.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>
+          <p className="muted u-mb-18px">
             {chargebacksLoading
               ? "Загрузка чарджбэков…"
               : chargebacksError
@@ -1030,7 +1018,7 @@ export function FinanceWorkspace({
                   : "Активных чарджбэков нет."}
           </p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1058,7 +1046,7 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {chargebacksBucket.hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 10 }}>
+              <div className="button-row u-mt-10px">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1074,7 +1062,7 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h3 style={{ marginBlock: "8px 10px" }}>Платёжные операции</h3>
+        <h3 className="u-mbl-8px-10px">Платёжные операции</h3>
         {intents.length === 0 ? (
           <p className="muted">Платёжные операции отсутствуют.</p>
         ) : (
@@ -1097,7 +1085,7 @@ export function FinanceWorkspace({
                     <td>{stateLabel(PAYMENT_STATE_LABELS, intent.state)}</td>
                     <td>{providerLabel(intent.provider)}</td>
                     <td>
-                      <div className="button-row" style={{ marginBlock: 0 }}>
+                      <div className="button-row u-mbl-0px">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -1123,7 +1111,7 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {intentsMeta?.hasMore && (
-              <p className="muted" style={{ marginBlockStart: 8 }}>
+              <p className="muted u-mt-8px">
                 Показаны последние {intents.length} из {intentsMeta.total}.
               </p>
             )}
@@ -1133,7 +1121,7 @@ export function FinanceWorkspace({
 
       {/* 3. Компенсации по претензиям */}
       <section className="panel" aria-labelledby="finance-compensations-heading">
-        <h2 id="finance-compensations-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-compensations-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <Scale size={18} aria-hidden="true" />
           <span>Компенсации по претензиям</span>
         </h2>
@@ -1172,7 +1160,7 @@ export function FinanceWorkspace({
                         </Badge>
                       </td>
                       <td>
-                        <div className="button-row" style={{ marginBlock: 0 }}>
+                        <div className="button-row u-mbl-0px">
                           {comp.state === "proposed" && (
                             <>
                               <Button
@@ -1219,13 +1207,13 @@ export function FinanceWorkspace({
 
       {/* 4. Партнёрские расчёты и фискальный реестр */}
       <section className="panel" aria-labelledby="finance-partners-fiscal-heading">
-        <h2 id="finance-partners-fiscal-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-partners-fiscal-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <Building2 size={18} aria-hidden="true" />
           <span>Партнёрские расчёты и фискальный реестр</span>
         </h2>
 
-        <form onSubmit={e => void createPartnerInvoice(e)} style={{ display: "grid", gap: 12, marginBlockEnd: 18 }}>
-          <div className="grid-two" style={{ alignItems: "end" }}>
+        <form className="u-grid u-gap-12px u-mb-18px" onSubmit={e => void createPartnerInvoice(e)}>
+          <div className="grid-two u-ai-end">
             <div className="field">
               {partners.length > 0 ? (
                 <>
@@ -1258,7 +1246,7 @@ export function FinanceWorkspace({
               )}
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div className="u-grid u-gtc-1fr-1fr u-gap-10px">
               <div className="field">
                 <label htmlFor={periodStartId}>Начало периода</label>
                 <input
@@ -1282,7 +1270,7 @@ export function FinanceWorkspace({
             </div>
           </div>
 
-          <div className="button-row" style={{ marginBlock: 0 }}>
+          <div className="button-row u-mbl-0px">
             <Button
               type="submit"
               variant="primary"
@@ -1302,11 +1290,11 @@ export function FinanceWorkspace({
           </div>
         </form>
 
-        <h3 style={{ marginBlock: "8px 10px" }}>Акты и счета партнёров</h3>
+        <h3 className="u-mbl-8px-10px">Акты и счета партнёров</h3>
         {partnerInvoices.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>Акты партнёров отсутствуют.</p>
+          <p className="muted u-mb-18px">Акты партнёров отсутствуют.</p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1343,9 +1331,9 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h3 style={{ marginBlock: "8px 10px" }}>Выплаты партнёрам</h3>
-        <form onSubmit={e => void createPartnerPayout(e)} style={{ display: "grid", gap: 12, marginBlockEnd: 18 }}>
-          <div className="grid-three" style={{ alignItems: "end" }}>
+        <h3 className="u-mbl-8px-10px">Выплаты партнёрам</h3>
+        <form className="u-grid u-gap-12px u-mb-18px" onSubmit={e => void createPartnerPayout(e)}>
+          <div className="grid-three u-ai-end">
             <div className="field">
               {partners.length > 0 ? (
                 <>
@@ -1405,7 +1393,7 @@ export function FinanceWorkspace({
               />
             </div>
           </div>
-          <div className="button-row" style={{ marginBlock: 0 }}>
+          <div className="button-row u-mbl-0px">
             <Button
               type="submit"
               variant="primary"
@@ -1420,7 +1408,7 @@ export function FinanceWorkspace({
           </div>
         </form>
 
-        <div className="button-row" style={{ marginBlock: "0 10px" }}>
+        <div className="button-row u-mbl-0-10px">
           <Button
             variant={payoutTab === "active" ? "primary" : "ghost"}
             size="sm"
@@ -1438,11 +1426,11 @@ export function FinanceWorkspace({
         </div>
 
         {visiblePayoutBucket.items.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>
+          <p className="muted u-mb-18px">
             {payoutTab === "active" ? "Запланированных выплат в очереди нет." : "Завершённых выплат пока нет."}
           </p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1490,7 +1478,7 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {visiblePayoutBucket.hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 10 }}>
+              <div className="button-row u-mt-10px">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1504,8 +1492,8 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h3 style={{ marginBlock: "8px 10px" }}>Кредит-ноты партнёров</h3>
-        <div className="button-row" style={{ marginBlock: "0 10px" }}>
+        <h3 className="u-mbl-8px-10px">Кредит-ноты партнёров</h3>
+        <div className="button-row u-mbl-0-10px">
           <Button
             variant={creditNoteTab === "active" ? "primary" : "ghost"}
             size="sm"
@@ -1522,11 +1510,11 @@ export function FinanceWorkspace({
           </Button>
         </div>
         {visibleCreditNoteBucket.items.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>
+          <p className="muted u-mb-18px">
             {creditNoteTab === "active" ? "Черновиков кредит-нот в очереди нет." : "Завершённых кредит-нот пока нет."}
           </p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1574,7 +1562,7 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {visibleCreditNoteBucket.hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 10 }}>
+              <div className="button-row u-mt-10px">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1588,7 +1576,7 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h3 style={{ marginBlock: "8px 10px" }}>Фискальный реестр (чеки)</h3>
+        <h3 className="u-mbl-8px-10px">Фискальный реестр (чеки)</h3>
         {fiscalReceipts.length === 0 ? (
           <p className="muted">Фискальные чеки отсутствуют.</p>
         ) : (
@@ -1619,7 +1607,7 @@ export function FinanceWorkspace({
 
       {/* 5. Закрытие доставленных заказов */}
       <section className="panel" aria-labelledby="finance-close-orders-heading">
-        <h2 id="finance-close-orders-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-close-orders-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <PackageCheck size={18} aria-hidden="true" />
           <span>Закрытие доставленных заказов</span>
         </h2>
@@ -1674,7 +1662,7 @@ export function FinanceWorkspace({
         onClose={() => setRefundTarget(null)}
       >
         {refundTarget && (
-          <form onSubmit={e => void submitRefund(e)} style={{ display: "grid", gap: 12 }}>
+          <form className="u-grid u-gap-12px" onSubmit={e => void submitRefund(e)}>
             <div className="muted">
               Платёж: <span className="mono">{refundTarget.id}</span> (доступно{" "}
               <span className="mono">{money(refundTarget.amountKopeks)}</span>)
@@ -1705,7 +1693,7 @@ export function FinanceWorkspace({
                 placeholder="Укажите основание для возврата средств"
               />
             </div>
-            <div className="button-row" style={{ marginBlock: 0 }}>
+            <div className="button-row u-mbl-0px">
               <Button
                 type="submit"
                 variant="primary"
@@ -1729,7 +1717,7 @@ export function FinanceWorkspace({
         onClose={() => setChargebackTarget(null)}
       >
         {chargebackTarget && (
-          <form onSubmit={e => void submitChargeback(e)} style={{ display: "grid", gap: 12 }}>
+          <form className="u-grid u-gap-12px" onSubmit={e => void submitChargeback(e)}>
             <div className="muted">
               Платёж: <span className="mono">{chargebackTarget.id}</span> ({" "}
               <span className="mono">{money(chargebackTarget.amountKopeks)}</span>)
@@ -1746,7 +1734,7 @@ export function FinanceWorkspace({
                 placeholder="Опишите основание диспута или чарджбэка"
               />
             </div>
-            <div className="button-row" style={{ marginBlock: 0 }}>
+            <div className="button-row u-mbl-0px">
               <Button
                 type="submit"
                 variant="primary"

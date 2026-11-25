@@ -200,7 +200,7 @@ export function FinanceMoneyPanel({
   return (
     <section className="panel content-auto" aria-labelledby="finance-money-heading">
       <div className="panel-head">
-        <h2 id="finance-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-money-heading" className="panel-title u-m-0px u-flex u-ai-center u-gap-8px">
           <Wallet size={18} aria-hidden="true" />
           <span>Денежный контур: дебиторка и кредиторка</span>
         </h2>
@@ -222,7 +222,7 @@ export function FinanceMoneyPanel({
       </div>
 
       {r.aging.some(bucket => bucket.invoiceCount > 0) && (
-        <div className="table-wrap" style={{ marginBlockStart: 14 }}>
+        <div className="table-wrap u-mt-14px">
           <table className="clean-table">
             <thead>
               <tr>
@@ -306,7 +306,7 @@ export function FinanceMoneyPanel({
         </>
       )}
 
-      <h3 className="section-title" style={{ marginBlockStart: 18 }}>Кредиторка прачечных</h3>
+      <h3 className="section-title u-mt-18px">Кредиторка прачечных</h3>
       <div className="stats-grid">
         <Metric label="Начислено" value={money(p.accruedKopeks)} />
         <Metric label="Выставлено счетов" value={money(p.invoicedKopeks)} />
@@ -321,7 +321,7 @@ export function FinanceMoneyPanel({
       </div>
 
       {p.partners.length > 0 && (
-        <div className="table-wrap" style={{ marginBlockStart: 14 }}>
+        <div className="table-wrap u-mt-14px">
           <table className="clean-table">
             <thead>
               <tr>
@@ -347,7 +347,7 @@ export function FinanceMoneyPanel({
         </div>
       )}
 
-      <h3 className="section-title" style={{ marginBlockStart: 18 }}>Вклад и деньги под риском</h3>
+      <h3 className="section-title u-mt-18px">Вклад и деньги под риском</h3>
       <div className="stats-grid">
         <Metric label="Собрано" value={money(data.margin.netCollectedKopeks)} />
         <Metric label="Себестоимость прачечной" value={money(data.margin.partnerCogsKopeks)} />
@@ -361,19 +361,19 @@ export function FinanceMoneyPanel({
         <Metric label="Компенсации к выплате" value={money(data.exposure.compensationsApprovedKopeks)} />
         <Metric label="Оспорено платежами" value={money(data.exposure.chargebackAtRiskKopeks)} />
       </div>
-      <p className="muted" style={{ marginBlockStart: 8 }}>{data.margin.note}</p>
+      <p className="muted u-mt-8px">{data.margin.note}</p>
 
       {data.monthly.length > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Помесячно</h3>
+          <h3 className="section-title u-mt-18px">Помесячно</h3>
           <div className="data-list">
             {data.monthly.map(month => (
               <div className="data-row" key={month.month}>
                 <span className="mono">{month.month}</span>
-                <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="u-flex u-gap-14px u-ai-center u-fw-wrap">
                   <span className="muted">выставлено {money(month.invoicedKopeks)}</span>
                   <span className="muted">собрано {money(month.netCollectedKopeks)}</span>
-                  <span style={{ inlineSize: "min(120px, 100%)" }}>
+                  <span className="u-isz-min-120px-100">
                     <Meter
                       value={month.netCollectedKopeks}
                       max={maxMonth}
@@ -462,7 +462,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
   return (
     <section className="panel content-auto" aria-labelledby="customer-money-heading">
       <div className="panel-head">
-        <h2 id="customer-money-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="customer-money-heading" className="panel-title u-m-0px u-flex u-ai-center u-gap-8px">
           <Scale size={18} aria-hidden="true" />
           <span>Мои расходы</span>
         </h2>
@@ -492,7 +492,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
 
       {data.byTier.length > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>По тарифам</h3>
+          <h3 className="section-title u-mt-18px">По тарифам</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -518,7 +518,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
 
       {data.byService.length > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>По услугам</h3>
+          <h3 className="section-title u-mt-18px">По услугам</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -548,7 +548,7 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
 
       {data.orders.length > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>История платежей</h3>
+          <h3 className="section-title u-mt-18px">История платежей</h3>
           <div className="table-wrap">
             <table className="clean-table">
               <thead>
@@ -647,17 +647,16 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
   return (
     <section className="panel content-auto" aria-labelledby="item-mix-heading">
       <div className="panel-head">
-        <h2 id="item-mix-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="item-mix-heading" className="panel-title u-m-0px u-flex u-ai-center u-gap-8px">
           <Shirt size={18} aria-hidden="true" />
           <span>Что приняли: вещи и вес</span>
         </h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div className="u-flex u-ai-center u-gap-10px u-fw-wrap">
           <label className="muted" htmlFor="item-mix-window">Период</label>
-          <select
+          <select className="u-mbs-44px"
             id="item-mix-window"
             value={days}
             onChange={event => setDays(Number(event.target.value))}
-            style={{ minBlockSize: 44 }}
           >
             <option value={30}>30 дней</option>
             <option value={90}>90 дней</option>
@@ -668,12 +667,12 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
         </div>
       </div>
 
-      <div className="alert-banner" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-        <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
+      <div className="alert-banner u-flex u-ai-flex-start u-gap-10px">
+        <AlertTriangle size={18} aria-hidden="true" className="u-fs-0 u-mt-2px" />
         <span>{data.note}</span>
       </div>
 
-      <h3 className="section-title" style={{ marginBlockStart: 16 }}>Вес: сколько сдали против сколько посчитали</h3>
+      <h3 className="section-title u-mt-16px">Вес: сколько сдали против сколько посчитали</h3>
       <div className="stats-grid">
         <Metric label="Посчитано в заказе" value={KG(w.quotedGrams)} />
         <Metric label="Принято на весах" value={KG(w.receivedGrams)} />
@@ -690,12 +689,12 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
 
       {data.tierSplit.protected.itemCount > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Поштучно (тариф «Защищённый»)</h3>
+          <h3 className="section-title u-mt-18px">Поштучно (тариф «Защищённый»)</h3>
           <div className="stats-grid">
             <Metric label="Заказов с описью" value={String(data.tierSplit.protected.orderCount)} />
             <Metric label="Вещей по описи" value={String(data.tierSplit.protected.itemCount)} />
           </div>
-          <div className="table-wrap" style={{ marginBlockStart: 12 }}>
+          <div className="table-wrap u-mt-12px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -722,7 +721,7 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
 
       {data.garmentStatus.length > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Статус вещей</h3>
+          <h3 className="section-title u-mt-18px">Статус вещей</h3>
           <div className="button-row">
             {data.garmentStatus.map(row => (
               <Badge key={row.status}>
@@ -735,16 +734,16 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
 
       {data.daily.length > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>Приёмка по дням</h3>
+          <h3 className="section-title u-mt-18px">Приёмка по дням</h3>
           <div className="data-list">
             {data.daily.slice(-14).map(day => (
               <div className="data-row" key={day.date}>
                 <span className="mono">{day.date}</span>
-                <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="u-flex u-gap-14px u-ai-center u-fw-wrap">
                   <span className="muted">заказов: {day.orderCount}</span>
                   <span className="muted">вещей: {day.itemCount}</span>
                   <span className="muted">вес: {KG(day.receivedGrams)}</span>
-                  <span style={{ inlineSize: "min(120px, 100%)" }}>
+                  <span className="u-isz-min-120px-100">
                     <Meter
                       value={day.receivedGrams}
                       max={maxDaily}
@@ -760,8 +759,8 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
 
       {data.topVariance.length > 0 && (
         <>
-          <h3 className="section-title" style={{ marginBlockStart: 18 }}>
-            <BarChart3 size={16} aria-hidden="true" style={{ verticalAlign: "-3px", marginInlineEnd: 6 }} />
+          <h3 className="section-title u-mt-18px">
+            <BarChart3 size={16} aria-hidden="true" className="u-va-3px u-mie-6px" />
             Заказы с наибольшим расхождением веса
           </h3>
           <div className="table-wrap">
@@ -781,7 +780,7 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
                     <td className="mono">{row.publicNumber}</td>
                     <td className="mono">{KG(row.quotedGrams)}</td>
                     <td className="mono">{KG(row.receivedGrams)}</td>
-                    <td className="mono" style={{ color: row.deltaGrams > 0 ? "var(--status-warn-ink)" : "inherit" }}>
+                    <td className={row.deltaGrams > 0 ? "mono u-c-warn" : "mono"}>
                       {row.deltaGrams > 0 ? <ArrowUpRight size={13} aria-hidden="true" /> : <ArrowDownRight size={13} aria-hidden="true" />}
                       {" "}{row.deltaGrams > 0 ? "+" : ""}{KG(row.deltaGrams)}
                     </td>
@@ -843,17 +842,16 @@ export function ChronometryPanel({ notify, refreshToken }: { notify: NotifyFn; r
   return (
     <section className="panel content-auto" aria-labelledby="chronometry-heading">
       <div className="panel-head">
-        <h2 id="chronometry-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="chronometry-heading" className="panel-title u-m-0px u-flex u-ai-center u-gap-8px">
           <Clock size={18} aria-hidden="true" />
           <span>Сколько идёт заказ</span>
         </h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div className="u-flex u-ai-center u-gap-10px u-fw-wrap">
           <label className="muted" htmlFor="chronometry-window">Период</label>
-          <select
+          <select className="u-mbs-44px"
             id="chronometry-window"
             value={days}
             onChange={event => setDays(Number(event.target.value))}
-            style={{ minBlockSize: 44 }}
           >
             <option value={30}>30 дней</option>
             <option value={90}>90 дней</option>
@@ -864,12 +862,12 @@ export function ChronometryPanel({ notify, refreshToken }: { notify: NotifyFn; r
         </div>
       </div>
 
-      <div className="alert-banner" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-        <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
+      <div className="alert-banner u-flex u-ai-flex-start u-gap-10px">
+        <AlertTriangle size={18} aria-hidden="true" className="u-fs-0 u-mt-2px" />
         <span>{data.note}</span>
       </div>
 
-      <div className="stats-grid" style={{ marginBlockStart: 14 }}>
+      <div className="stats-grid u-mt-14px">
         <Metric label="Полный цикл, медиана" value={HOURS(data.cycle.p50Hours, data.cycle.samples)} />
         <Metric
           label="Полный цикл, хвост"
@@ -880,7 +878,7 @@ export function ChronometryPanel({ notify, refreshToken }: { notify: NotifyFn; r
         <Metric label="Заказов в выборке" value={String(data.ordersAnalyzed)} />
       </div>
 
-      <h3 className="section-title" style={{ marginBlockStart: 18 }}>Этапы: медиана и хвост</h3>
+      <h3 className="section-title u-mt-18px">Этапы: медиана и хвост</h3>
       <div className="table-wrap">
         <table className="clean-table">
           <thead>
@@ -960,17 +958,16 @@ export function ChurnPanel({ notify, refreshToken }: { notify: NotifyFn; refresh
   return (
     <section className="panel content-auto" aria-labelledby="churn-heading">
       <div className="panel-head">
-        <h2 id="churn-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="churn-heading" className="panel-title u-m-0px u-flex u-ai-center u-gap-8px">
           <UserRoundX size={18} aria-hidden="true" />
           <span>Кто скоро уйдёт</span>
         </h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div className="u-flex u-ai-center u-gap-10px u-fw-wrap">
           <label className="muted" htmlFor="churn-window">Период</label>
-          <select
+          <select className="u-mbs-44px"
             id="churn-window"
             value={days}
             onChange={event => setDays(Number(event.target.value))}
-            style={{ minBlockSize: 44 }}
           >
             <option value={30}>30 дней</option>
             <option value={90}>90 дней</option>
@@ -981,29 +978,29 @@ export function ChurnPanel({ notify, refreshToken }: { notify: NotifyFn; refresh
         </div>
       </div>
 
-      <div className="alert-banner" style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-        <AlertTriangle size={18} aria-hidden="true" style={{ flexShrink: 0, marginBlockStart: 2 }} />
+      <div className="alert-banner u-flex u-ai-flex-start u-gap-10px">
+        <AlertTriangle size={18} aria-hidden="true" className="u-fs-0 u-mt-2px" />
         <span>{data.note}</span>
       </div>
 
       {data.phoneMasked ? (
-        <p className="muted" style={{ marginBlockStart: 10 }}>
+        <p className="muted u-mt-10px">
           Телефоны клиентов замаскированы: вашей роли не нужно звонить им по этому списку. Факт
           просмотра записан в журнал аудита.
         </p>
       ) : null}
 
-      <div className="stats-grid" style={{ marginBlockStart: 14 }}>
+      <div className="stats-grid u-mt-14px">
         <Metric label="Клиентов в зоне риска" value={String(data.atRisk.length)} tone={data.atRisk.length > 0 ? "warn" : "default"} />
         <Metric label="Порог неудачных доставок" value={String(data.threshold)} />
       </div>
 
       {data.atRisk.length === 0 ? (
-        <p className="muted" style={{ marginBlockStart: 14 }}>
+        <p className="muted u-mt-14px">
           За период ни у кого доставка не сорвалась дважды.
         </p>
       ) : (
-        <div className="table-wrap" style={{ marginBlockStart: 14 }}>
+        <div className="table-wrap u-mt-14px">
           <table className="clean-table">
             <thead>
               <tr>

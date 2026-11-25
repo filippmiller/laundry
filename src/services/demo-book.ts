@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
-import type { Db, DbLike } from "../db/client.js";
+import type { DbLike } from "../db/client.js";
 import type { Principal, Role } from "../core/context.js";
 import {
   courierShifts, customerAddresses, memberships, membershipRoles, orderLines, partnerCreditNotes, partnerDisputes,

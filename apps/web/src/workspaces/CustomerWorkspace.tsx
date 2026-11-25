@@ -1081,7 +1081,7 @@ function NewOrderTab({
   const isBusy = busy !== null;
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="u-grid u-gap-16px">
       <section className="panel">
         <CardHeader
           title="Новый заказ"
@@ -1262,7 +1262,7 @@ function NewOrderTab({
         </div>
 
         {tier === "protected" ? (
-          <div style={{ marginBlockStart: 16 }}>
+          <div className="u-mt-16px">
             <GarmentPicker
               value={declared}
               onChange={setDeclared}
@@ -1271,7 +1271,7 @@ function NewOrderTab({
             />
           </div>
         ) : (
-          <div className="notice info" style={{ marginBlockStart: 16 }}>
+          <div className="notice info u-mt-16px">
             <span className="notice__body">
               <Info size={16} aria-hidden="true" />
               <span>
@@ -1283,7 +1283,7 @@ function NewOrderTab({
         )}
 
         {windowsError && (
-          <div className="notice error" style={{ marginBlockStart: 12 }}>
+          <div className="notice error u-mt-12px">
             <span>Не удалось загрузить окна забора и доставки: {windowsError}</span>
           </div>
         )}
@@ -1351,7 +1351,7 @@ function NewOrderTab({
         </div>
         {/* A disabled button that explains nothing is a dead end: the customer has to be told
             which step is missing (MA-28). The hint is linked to the two disabled controls. */}
-        <p className="muted" id={`${uid}-order-step-hint`} style={{ marginBlockStart: 8 }}>
+        <p className="muted u-mt-8px" id={`${uid}-order-step-hint`}>
           {!quote
             ? "Сначала рассчитайте стоимость — без расчёта забронировать слоты нельзя."
             : quoteStale
@@ -1363,7 +1363,7 @@ function NewOrderTab({
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Расчёт</h3>
+        <h3 className="panel-title u-mb-10px">Расчёт</h3>
         {!quote && (          <EmptyState
             icon={<Banknote size={20} aria-hidden="true" />}
             title="Расчёта пока нет"
@@ -1426,7 +1426,7 @@ function NewOrderTab({
               <span>Итого по расчёту</span>
               <strong className="mono">{money(quote.totalKopeks)}</strong>
             </div>
-            <p className="muted" style={{ marginBlockStart: 8 }}>
+            <p className="muted u-mt-8px">
               Тариф версии <span className="mono">{quote.tariffVersionId}</span> · расчёт действителен до{" "}
               <span className="mono">{dt(quote.expiresAt)}</span>
               {quoteExpired ? " · срок действия истёк, запросите новый расчёт" : ""}
@@ -1461,7 +1461,7 @@ function NewOrderTab({
       {order && (
         <section className="panel">
           <div className="panel-head">
-            <h3 className="panel-title" style={{ margin: 0 }}>
+            <h3 className="panel-title u-m-0px">
               Заказ <span className="mono">{order.publicNumber}</span>
             </h3>
             <Badge tone={orderStateTone(order.lifecycleState)}>
@@ -1489,7 +1489,7 @@ function NewOrderTab({
             </button>
           </div>
 
-          <p className="muted" style={{ marginBlockStart: 8 }}>
+          <p className="muted u-mt-8px">
             Платёж выполняет демо-провайдер «fake»: реальных списаний не происходит, фискальный чек не выдаётся.
           </p>
 
@@ -1520,7 +1520,7 @@ function NewOrderTab({
                 </div>
               )}
               {finance.refunds.length > 0 && (
-                <div className="data-list" style={{ marginBlockStart: 8 }}>
+                <div className="data-list u-mt-8px">
                   {finance.refunds.map((refund) => (
                     <div className="data-row" key={refund.id}>
                       <span>Возврат · {stateLabel(REFUND_STATE_LABELS, refund.state)} · {refund.reason}</span>
@@ -1530,7 +1530,7 @@ function NewOrderTab({
                 </div>
               )}
               {finance.fiscalReceipts.length > 0 && (
-                <p className="muted" style={{ marginBlockStart: 8 }}>
+                <p className="muted u-mt-8px">
                   Состояние фискальной регистрации:{" "}
                   {finance.fiscalReceipts.map((receipt) => stateLabel(FISCAL_STATE_LABELS, receipt.state)).join(", ")}. {FISCAL_ADAPTER_NOTE}
                 </p>
@@ -1972,14 +1972,13 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
         )}
 
         {orders && orders.length > 0 && (
-          <div style={{ display: "grid", gap: 10 }}>
+          <div className="u-grid u-gap-10px">
             {orders.map((order) => (
               <button
                 key={order.id}
                 type="button"
-                className={order.id === selectedId ? "data-row selected" : "data-row"}
+                className={`${order.id === selectedId ? "data-row selected" : "data-row"} u-ta-left u-cur-pointer`}
                 onClick={() => setSelectedId(order.id)}
-                style={{ textAlign: "left", cursor: "pointer" }}
               >
                 <span>
                   <span className="mono">{order.publicNumber}</span>
@@ -2003,7 +2002,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
         <>
           <section className="panel" ref={detailPanelRef}>
             <div className="panel-head">
-              <h3 className="panel-title" tabIndex={-1} style={{ margin: 0 }}>
+              <h3 className="panel-title u-m-0px" tabIndex={-1}>
                 Заказ <span className="mono">{detail.publicNumber}</span>
               </h3>
               <Badge tone={orderStateTone(detail.lifecycleState)}>
@@ -2087,7 +2086,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
               </button>
             </div>
 
-            <div className="field" style={{ marginBlockStart: 14 }}>
+            <div className="field u-mt-14px">
               <label htmlFor={`${uid}-cancel-reason`}>Причина отмены заказа</label>
               <input
                 id={`${uid}-cancel-reason`}
@@ -2117,7 +2116,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           </section>
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Состав заказа</h3>
+            <h3 className="panel-title u-mb-10px">Состав заказа</h3>
             {detail.garments.length === 0 ? (
               <p className="muted">Поштучный учёт вещей по этому заказу не ведётся (эконом-тариф).</p>
             ) : (
@@ -2217,7 +2216,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           </section>
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Финансы заказа</h3>
+            <h3 className="panel-title u-mb-10px">Финансы заказа</h3>
             {!finance && <p className="muted">Финансовые данные по заказу недоступны.</p>}
             {finance && (
               <>
@@ -2258,7 +2257,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 ) : (
                   <p className="muted">Возвратов по заказу не зафиксировано.</p>
                 )}
-                <p className="muted" style={{ marginBlockStart: 8 }}>
+                <p className="muted u-mt-8px">
                   Провайдер: {providerLabel(finance.providerMode)}. {FISCAL_ADAPTER_NOTE}
                 </p>
               </>
@@ -2266,7 +2265,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           </section>
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Претензии</h3>
+            <h3 className="panel-title u-mb-10px">Претензии</h3>
             {orderClaims.length === 0 ? (
               <p className="muted">Претензий по этому заказу пока нет.</p>
             ) : (
@@ -2283,12 +2282,12 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 ))}
               </div>
             )}
-            <p className="muted" style={{ marginBlockStart: 8 }}>
+            <p className="muted u-mt-8px">
               Согласование компенсации по претензии не означает фактический возврат средств: возвраты
               показываются отдельными операциями в разделе «Финансы заказа».
             </p>
 
-            <div className="grid-two" style={{ marginBlockStart: 12 }}>
+            <div className="grid-two u-mt-12px">
               <div className="field">
                 <label htmlFor={`${uid}-claim-type`}>Тип претензии</label>
                 <select id={`${uid}-claim-type`} value={claimType} onChange={(event) => setClaimType(event.target.value)}>
@@ -2331,7 +2330,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
               </fieldset>
             )}
 
-            <div style={{ marginBlockStart: 12 }}>
+            <div className="u-mt-12px">
               <EvidenceUploader
                 ownerType="order"
                 ownerId={detail.id}
@@ -2354,7 +2353,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             </div>
 
             {currentClaimEvidence.uploadingCount > 0 && (
-              <p className="muted" role="status" style={{ marginBlockStart: 8 }}>
+              <p className="muted u-mt-8px" role="status">
                 Дождитесь завершения загрузки файлов…
               </p>
             )}
@@ -2374,7 +2373,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
 
           {canReview && (
             <section className="panel">
-              <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Отзыв</h3>
+              <h3 className="panel-title u-mb-10px">Отзыв</h3>
               <div className="grid-two">
                 <div className="field">
                   <label htmlFor={`${uid}-rating`}>Оценка</label>
@@ -2403,7 +2402,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           )}
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>История заказа</h3>
+            <h3 className="panel-title u-mb-10px">История заказа</h3>
             {timeline.length === 0 ? (
               <p className="muted">Событий по заказу пока нет.</p>
             ) : (
@@ -2648,7 +2647,7 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Добавить адрес</h3>
+        <h3 className="panel-title u-mb-10px">Добавить адрес</h3>
         <div className="grid-two">
           <div className="field">
             <label htmlFor={`${uid}-address-building`}>Дом</label>
@@ -2693,8 +2692,8 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 8 }}>Мои персональные данные (152-ФЗ)</h3>
-        <p className="muted" style={{ marginBlockEnd: 12 }}>
+        <h3 className="panel-title u-mb-8px">Мои персональные данные (152-ФЗ)</h3>
+        <p className="muted u-mb-12px">
           Выгрузка ваших персональных данных (профиль, адреса, заказы, претензии, уведомления) в формате JSON.
         </p>
         <div className="button-row">
@@ -2872,7 +2871,7 @@ function NotificationsTab({
               })}
             </div>
             {hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 12 }}>
+              <div className="button-row u-mt-12px">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -3166,8 +3165,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
               <button
                 key={thread.id}
                 type="button"
-                className={thread.id === activeThreadId ? "data-row selected" : "data-row"}
-                style={{ textAlign: "left", cursor: "pointer" }}
+                className={`${thread.id === activeThreadId ? "data-row selected" : "data-row"} u-ta-left u-cur-pointer`}
                 onClick={() => setActiveThreadId(thread.id)}
               >
                 <span>
@@ -3183,7 +3181,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
           </div>
         )}
         {threads && threadsHasMore && threadsNextCursor && (
-          <div className="button-row" style={{ marginBlockStart: 10 }}>
+          <div className="button-row u-mt-10px">
             <Button
               variant="ghost"
               size="sm"
@@ -3203,13 +3201,13 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       {threadDetail && (
         <section className="panel" ref={threadDetailPanelRef}>
           <div className="panel-head">
-            <h3 className="panel-title" tabIndex={-1} style={{ margin: 0 }}>{threadDetail.thread.subject}</h3>
+            <h3 className="panel-title u-m-0px" tabIndex={-1}>{threadDetail.thread.subject}</h3>
             <Badge tone={threadDetail.thread.state === "open" ? "warn" : "ok"}>
               {threadDetail.thread.state === "open" ? "Открыто" : "Закрыто"}
             </Badge>
           </div>
           {threadDetail.hasEarlier && threadDetail.earlierCursor && (
-            <div className="button-row" style={{ marginBlockEnd: 10 }}>
+            <div className="button-row u-mb-10px">
               <Button
                 variant="secondary"
                 size="sm"
@@ -3238,7 +3236,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
           )}
           {threadDetail.thread.state === "open" && (
             <>
-              <div className="field" style={{ marginBlockStart: 12 }}>
+              <div className="field u-mt-12px">
                 <label htmlFor={`${uid}-reply`}>Ваш ответ</label>
                 <textarea id={`${uid}-reply`} value={reply} onChange={(event) => setReply(event.target.value)} />
               </div>
@@ -3254,7 +3252,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       )}
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Новое обращение</h3>
+        <h3 className="panel-title u-mb-10px">Новое обращение</h3>
         <div className="field">
           <label htmlFor={`${uid}-thread-order`}>Заказ</label>
           <select id={`${uid}-thread-order`} value={orderId} onChange={(event) => setOrderId(event.target.value)}>
@@ -3290,7 +3288,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Отзывы о сервисе</h3>
+        <h3 className="panel-title u-mb-10px">Отзывы о сервисе</h3>
         {reviews.length === 0 ? (
           <EmptyState
           icon={<MessageSquare size={20} aria-hidden="true" />}
@@ -3323,7 +3321,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
             ))}
           </div>
         )}
-        <p className="muted" style={{ marginBlockStart: 8 }}>
+        <p className="muted u-mt-8px">
           Свой отзыв о заказе можно оставить во вкладке «Мои заказы» — после доставки или закрытия заказа.
         </p>
       </section>

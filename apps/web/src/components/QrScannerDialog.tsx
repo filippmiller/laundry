@@ -150,11 +150,11 @@ export function QrScannerDialog({
         onClose();
       }}
     >
-      <p className="muted" style={{ marginBlockEnd: 12 }}>
+      <p className="muted u-mb-12px">
         Наведите камеру на QR-код квитанции, мешка или пломбы либо введите идентификатор вручную.
       </p>
 
-      <div className="button-row" style={{ marginBlockEnd: 14 }}>
+      <div className="button-row u-mb-14px">
         <button
           type="button"
           className="secondary"
@@ -166,7 +166,7 @@ export function QrScannerDialog({
       </div>
 
       {cameraActive && (
-        <div style={{ marginBlockEnd: 14 }}>
+        <div className="u-mb-14px">
           <video ref={videoRef} className="video-preview" muted playsInline />
         </div>
       )}
@@ -177,7 +177,7 @@ export function QrScannerDialog({
 
       <div className="field">
         <label htmlFor={inputId}>
-          <Keyboard size={14} aria-hidden="true" style={{ verticalAlign: "text-bottom", marginInlineEnd: 6 }} />
+          <Keyboard size={14} aria-hidden="true" className="u-va-text-bottom u-mie-6px" />
           Ручной ввод кода (пломба, мешок или строка LND1:...)
         </label>
         <input
