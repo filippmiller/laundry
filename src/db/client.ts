@@ -31,10 +31,13 @@ export function createDb(connectionString: string, options: { max?: number } = {
  * Drizzle keeps the client it was constructed with as `$client`; the public type does not
  * mention it, but the value is there and it is the only way to reach the pool from a handle.
  * A transaction has no pool of its own and reports none.
+ *
+ * The check is duck-typed on purpose: `instanceof` would fail if the pool came from another
+ * copy of `pg`, and the lock would then be skipped without a word.
  */
 export function poolOf(db: Db): Pool | undefined {
-  const client = (db as unknown as { $client?: unknown }).$client;
-  return client instanceof Pool ? client : undefined;
+  const client = (db as unknown as { $client?: unknown }).$client as Pool | undefined;
+  return typeof client?.connect === "function" ? client : undefined;
 }
 
 export function requireDatabaseUrl(name = "DATABASE_URL") {
