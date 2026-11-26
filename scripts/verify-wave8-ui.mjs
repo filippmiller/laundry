@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 const APP = process.env.APP_URL ?? "http://localhost:5173";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const EVIDENCE_DIR = resolve(REPO_ROOT, "docs/evidence/wave8");
+const EVIDENCE_DIR = resolve(REPO_ROOT, process.env.VERIFY_EVIDENCE_DIR ?? "docs/evidence/wave8");
 
 const results = [];
 

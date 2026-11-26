@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 
 const BASE = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:3000";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const EVIDENCE_DIR = resolve(REPO_ROOT, "docs/evidence/wave8");
+const EVIDENCE_DIR = resolve(REPO_ROOT, process.env.VERIFY_EVIDENCE_DIR ?? "docs/evidence/wave8");
 
 const PERSONAS = {
   customer: "+79990000001",
