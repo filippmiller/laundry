@@ -173,3 +173,57 @@ export function evidenceRemovableIds(
     .filter(row => row.canRemove)
     .map(row => row.id);
 }
+
+/**
+ * The photos the server accepted, kept per owner.
+ *
+ * A courier can open the next order while an upload of the previous one is still running. The row
+ * that says "sent" belongs to the order the photo was attached to: without the owner in the key
+ * it lands under the next order for a few seconds and names a file the courier never sent there.
+ * The registry therefore keeps one list per owner, and a completion only ever touches its own.
+ */
+export type OwnerScopedPhotos<T> = Record<string, T[]>;
+
+/** The photos that were accepted for one owner; other owners are invisible here. */
+export function sentPhotosFor<T>(sent: OwnerScopedPhotos<T>, ownerKey: string): T[] {
+  return sent[ownerKey] ?? [];
+}
+
+/**
+ * Records the photos the server accepted for one owner.
+ *
+ * A photo that is already listed is replaced, so a repeated completion cannot show it twice.
+ */
+export function recordSentPhotos<T extends { id: string }>(
+  sent: OwnerScopedPhotos<T>,
+  ownerKey: string,
+  items: readonly T[],
+): OwnerScopedPhotos<T> {
+  if (!items.length) return sent;
+  const ids = new Set(items.map(item => item.id));
+  const previous = sent[ownerKey] ?? [];
+  return {
+    ...sent,
+    [ownerKey]: [...previous.filter(item => !ids.has(item.id)), ...items],
+  };
+}
+
+/**
+ * Forgets the photos that left the screen again.
+ *
+ * Only the list of the named owner is touched: a late timer of the previous order must not clear
+ * the row of the order that is open now.
+ */
+export function forgetSentPhotos<T extends { id: string }>(
+  sent: OwnerScopedPhotos<T>,
+  ownerKey: string,
+  ids: Iterable<string>,
+): OwnerScopedPhotos<T> {
+  const drop = new Set(ids);
+  const previous = sent[ownerKey];
+  if (!previous?.length) return sent;
+  return {
+    ...sent,
+    [ownerKey]: previous.filter(item => !drop.has(item.id)),
+  };
+}

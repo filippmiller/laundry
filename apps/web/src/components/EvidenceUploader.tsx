@@ -27,7 +27,11 @@ import {
   evidencePendingIds,
   evidenceRemovableIds,
   evidenceRetryIds,
+  forgetSentPhotos,
+  recordSentPhotos,
+  sentPhotosFor,
   type EvidenceQueueRow,
+  type OwnerScopedPhotos,
 } from "./evidence-queue-state";
 
 export type EvidenceOwnerType = "order" | "claim" | "custody_event";
@@ -99,15 +103,21 @@ type EvidenceQueueView = {
   items: QueuedEvidence[];
   /** The records whose upload is running right now. */
   inFlightIds: string[];
-  /** The records the server accepted a moment ago; they leave the queue right after. */
-  sentItems: QueuedEvidence[];
+  /**
+   * The records the server accepted a moment ago; they leave the queue right after.
+   *
+   * They are kept per owner: the courier may open the next order while the upload of the
+   * previous one is still running, and the row that says "sent" belongs to the order the photo
+   * was attached to — not to the one that happens to be open when the answer arrives.
+   */
+  sentByOwner: OwnerScopedPhotos<QueuedEvidence>;
 };
 
 const EMPTY_QUEUE_VIEW: EvidenceQueueView = {
   ownerKey: "",
   items: [],
   inFlightIds: [],
-  sentItems: [],
+  sentByOwner: {},
 };
 
 function formatFileSize(bytes: number): string {
@@ -228,7 +238,7 @@ export function EvidenceUploader({
     ownerKey: currentOwnerKey,
     items: [],
     inFlightIds: [],
-    sentItems: [],
+    sentByOwner: {},
   });
 
   useEffect(() => {
@@ -442,17 +452,26 @@ export function EvidenceUploader({
     }
   }, [ownerType, ownerId, currentOwnerKey]);
 
-  /** Keeps the accepted photos on screen for a moment, so the courier sees them leave the queue. */
-  const markQueueSent = useCallback((items: QueuedEvidence[]) => {
+  /**
+   * Keeps the accepted photos on screen for a moment, so the courier sees them leave the queue.
+   *
+   * The owner is part of the call on purpose: the upload of the previous order may finish after
+   * the courier opened the next one, and its row belongs to the previous order. Writing it into
+   * a shared list would show "Отправлено" under an order the photo was never attached to.
+   */
+  const markQueueSent = useCallback((ownerKey: string, items: QueuedEvidence[]) => {
     if (!items.length) return;
     const ids = new Set(items.map(item => item.id));
     setQueueView(prev => ({
       ...prev,
-      sentItems: [...prev.sentItems.filter(item => !ids.has(item.id)), ...items],
+      sentByOwner: recordSentPhotos(prev.sentByOwner, ownerKey, items),
     }));
     if (typeof window === "undefined") return;
     window.setTimeout(() => {
-      setQueueView(prev => ({ ...prev, sentItems: prev.sentItems.filter(item => !ids.has(item.id)) }));
+      setQueueView(prev => ({
+        ...prev,
+        sentByOwner: forgetSentPhotos(prev.sentByOwner, ownerKey, ids),
+      }));
     }, SENT_VISIBLE_MS);
   }, []);
 
@@ -460,6 +479,10 @@ export function EvidenceUploader({
   const flushQueuedEvidence = useCallback(async () => {
     if (!evidenceQueueAvailable() || !ownerType || !ownerId) return;
     if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    // The owner the queue belongs to is captured before the first await: the courier may open the
+    // next order while the upload runs, and the answer then belongs to the order it was started
+    // for.
+    const flushOwnerKey = evidenceOwnerKey(ownerType, ownerId);
     let rows: QueuedEvidence[] = [];
     try {
       rows = await queuedEvidence(ownerType, ownerId);
@@ -499,7 +522,7 @@ export function EvidenceUploader({
     }
     if (uploaded.length) {
       await removeQueuedEvidence(uploaded.map(row => row.id)).catch(() => undefined);
-      markQueueSent(uploaded);
+      markQueueSent(flushOwnerKey, uploaded);
       await refreshQueue();
       await loadAssets({ reportErrorToast: true }).catch(() => undefined);
       notify({
@@ -532,14 +555,16 @@ export function EvidenceUploader({
   const queueRows = useMemo(() => {
     const byId = new Map<string, QueuedEvidence>();
     for (const item of queue.items) byId.set(item.id, item);
-    // A photo the server accepted wins over the same photo still waiting in the queue.
-    for (const item of queue.sentItems) byId.set(item.id, item);
+    // The accepted photos are read per owner: the row of the previous order must not show up
+    // under the order that is open now.
+    const sentItems = sentPhotosFor(queueView.sentByOwner, currentOwnerKey);
+    for (const item of sentItems) byId.set(item.id, item);
     return deriveEvidenceQueueRows(
       [...byId.values()],
       queue.inFlightIds,
-      queue.sentItems.map(item => item.id),
+      sentItems.map(item => item.id),
     );
-  }, [queue.items, queue.sentItems, queue.inFlightIds]);
+  }, [queue.items, queue.inFlightIds, queueView.sentByOwner, currentOwnerKey]);
 
   /** Sends one photo of the queue again and tells the courier what came of it. */
   const retryQueuedEvidence = async (row: EvidenceQueueRow) => {
@@ -558,7 +583,7 @@ export function EvidenceUploader({
         record.ownerId,
       );
       await removeQueuedEvidence([record.id]).catch(() => undefined);
-      markQueueSent([record]);
+      markQueueSent(targetOwnerKey, [record]);
       await refreshQueue();
       await loadAssets({ reportErrorToast: true }).catch(() => undefined);
       if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
@@ -580,7 +605,10 @@ export function EvidenceUploader({
     const targetOwnerKey = currentOwnerKey;
     try {
       await removeQueuedEvidence([row.id]);
-      setQueueView(prev => ({ ...prev, sentItems: prev.sentItems.filter(item => item.id !== row.id) }));
+      setQueueView(prev => ({
+        ...prev,
+        sentByOwner: forgetSentPhotos(prev.sentByOwner, targetOwnerKey, [row.id]),
+      }));
       await refreshQueue();
       if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
       notify({ kind: "ok", text: `Файл «${row.fileName}» удалён из очереди.` });
