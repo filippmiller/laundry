@@ -183,6 +183,7 @@ function codeIdentity() {
  * became ready — so the receipt and the responses belong together.
  */
 let spawnedStand = null;
+let spawnedChild = null;
 
 /**
  * Picks a free TCP port.
@@ -261,8 +262,30 @@ async function spawnStand() {
       // The process is already gone — nothing to stop.
     }
   };
+  spawnedChild = child;
   process.on("exit", stop);
   return spawnedStand;
+}
+
+/**
+ * Stops the server the verification started.
+ *
+ * The pipes of the child keep the event loop of the parent alive, so the parent would wait for a
+ * server that only exists for the checks. The child is stopped and its pipes are closed before
+ * the script leaves.
+ */
+function stopStand() {
+  if (!spawnedChild) return;
+  const child = spawnedChild;
+  spawnedChild = null;
+  try {
+    child.kill();
+  } catch {
+    // The process is already gone.
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
 }
 
 /** Waits for the readiness probe of the spawned server and returns when it answers. */
@@ -812,11 +835,14 @@ async function main() {
   if (failed.length) {
     console.log("FAILED:");
     for (const item of failed) console.log(` - ${item.id} ${item.name} (${item.detail})`);
-    process.exitCode = 1;
   }
+  stopStand();
+  // The script leaves with an explicit code: the server it started must not keep it alive.
+  process.exit(failed.length ? 1 : 0);
 }
 
 main().catch(err => {
   console.error("verification crashed:", err);
+  stopStand();
   process.exitCode = 1;
 });

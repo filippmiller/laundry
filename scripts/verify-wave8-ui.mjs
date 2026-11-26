@@ -66,6 +66,25 @@ function createGate() {
   };
 }
 
+/**
+ * Waits for the gate, but not forever.
+ *
+ * A check that waits for a request that never comes would hang the whole acceptance. The wait
+ * has a limit, and the check reports the timeout as a failure of the scenario instead of
+ * blocking the run.
+ */
+async function waitForHit(gate, what, timeoutMs = 20_000) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`the ${what} did not happen within ${timeoutMs} ms`)), timeoutMs);
+  });
+  try {
+    await Promise.race([gate.hit, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Signs a persona in and returns the browser context that carries its session cookie. */
 async function loginAs(context, role) {
   const seed = await context.request.post(`${APP}/api/v1/dev/seed`, { data: {} });
@@ -86,7 +105,19 @@ async function loginAs(context, role) {
 
 /** Opens the workspace of the rail by its title. */
 async function openWorkspace(page, title) {
-  await page.locator(".rail__item", { hasText: title }).first().click();
+  const item = page.locator(".rail__item", { hasText: title }).first();
+  await item.waitFor({ state: "visible", timeout: 30_000 });
+  await item.click();
+  // The workspace is loaded lazily: the tab bar of the new workspace appears a moment later.
+  await page.waitForTimeout(800);
+}
+
+/** Opens the tab of a workspace by its name — the workspace opens on its first tab. */
+async function openTab(page, title) {
+  const tab = page.locator("button", { hasText: title }).first();
+  await tab.waitFor({ state: "visible", timeout: 30_000 });
+  await tab.click();
+  await page.waitForTimeout(400);
 }
 
 /** Waits until the reply box of the support workspace is on the screen. */
@@ -113,9 +144,18 @@ async function main() {
   try {
     // --- the support workspace: the send acknowledgement must not eat a newer answer ----------
     const apiContext = await browser.newContext();
-    const customer = await loginAs(apiContext, "customer");
+    await loginAs(apiContext, "customer");
     const marker = `Волна 8 ${new Date().toISOString()}`;
-    const threadRes = await apiContext.request.post(`${APP}/api/v1/support/threads`, {
+
+    const supportContext = await browser.newContext();
+    await loginAs(supportContext, "customer_support");
+    const page = await supportContext.newPage();
+
+    // The thread is opened by the operator: the list of the support workspace is scoped to the
+    // cases the operator takes part in, and the draft belongs to its author anyway.
+    const threadRes = await supportContext.request.post(`${APP}/api/v1/support/threads`, {
+      // Every mutation of this API is idempotency-keyed.
+      headers: { "idempotency-key": `verify-wave8-ui-${Date.now()}` },
       data: { subject: marker, body: "Обращение для приёмки волны 8: гонка отправки и сохранения." },
     });
     if (!threadRes.ok()) {
@@ -128,19 +168,16 @@ async function main() {
     }
     const thread = await threadRes.json();
     const threadId = thread.threadId ?? thread.id;
+    page.__threadId = threadId;
     pass(
       "LND-R5-UI-0",
       "the fixture thread exists",
-      `thread ${String(threadId).slice(0, 8)} of ${customer.user.displayName ?? customer.user.role}`,
+      `thread ${String(threadId).slice(0, 8)} of the support operator`,
     );
-
-    const supportContext = await browser.newContext();
-    await loginAs(supportContext, "customer_support");
-    const page = await supportContext.newPage();
-    page.__threadId = threadId;
 
     await page.goto(APP, { waitUntil: "domcontentloaded" });
     await openWorkspace(page, "Поддержка");
+    await openTab(page, "Обращения клиентов");
     await page.getByRole("button", { name: new RegExp(marker.slice(0, 18)) }).first().click();
     await replyBox(page).waitFor({ state: "visible", timeout: 20_000 });
 
@@ -160,7 +197,7 @@ async function main() {
     const newerText = `Ответ B, набранный во время отправки ${new Date().toISOString()}`;
     await replyBox(page).fill(sentText);
     await page.getByRole("button", { name: /Отправить/ }).click();
-    await sendGate.hit;
+    await waitForHit(sendGate, "message POST");
     await replyBox(page).fill(newerText);
     sendGate.release();
     // The button reads "Отправка..." while the message is on its way and "Отправить" afterwards.
@@ -192,6 +229,7 @@ async function main() {
     // After a reload the newer answer must come back: the draft really is on the server.
     await page.reload({ waitUntil: "domcontentloaded" });
     await openWorkspace(page, "Поддержка");
+    await openTab(page, "Обращения клиентов");
     await page.getByRole("button", { name: new RegExp(marker.slice(0, 18)) }).first().click();
     await replyBox(page).waitFor({ state: "visible", timeout: 20_000 });
     await page.waitForTimeout(1_200);
@@ -223,7 +261,7 @@ async function main() {
       await route.continue();
     });
     await replyBox(page).fill(`Черновик для очистки ${new Date().toISOString()}`);
-    await putGate.hit;
+    await waitForHit(putGate, "autosave PUT");
     await replyBox(page).fill("");
     putGate.release();
     await page.waitForTimeout(2_000);
@@ -260,11 +298,10 @@ async function main() {
     await loginAs(financeContext, "platform_finance");
     const financePage = await financeContext.newPage();
     await financePage.goto(APP, { waitUntil: "domcontentloaded" });
-    await openWorkspace(financePage, "Финансы");
 
-    const disputeFilter = financePage.getByLabel("Статус спора").first();
-    await disputeFilter.waitFor({ state: "visible", timeout: 30_000 });
-
+    // The route is armed BEFORE the workspace opens: the first page of the list — the one of the
+    // filter "all", which carries no state parameter — is held until the operator has switched to
+    // another filter. Only then is the late answer allowed to arrive.
     const listGate = createGate();
     let heldFirst = false;
     await financePage.route("**/api/v1/finance/partner-disputes**", async route => {
@@ -277,10 +314,14 @@ async function main() {
       await route.continue();
     });
 
+    await openWorkspace(financePage, "Финансы");
+    const disputeFilter = financePage.getByLabel("Статус спора").first();
+    await disputeFilter.waitFor({ state: "visible", timeout: 30_000 });
+
     // The first page of the "all" filter is held; meanwhile the operator switches to "open".
+    await waitForHit(listGate, "dispute list request");
     await disputeFilter.selectOption("open");
-    await listGate.hit;
-    await financePage.waitForTimeout(500);
+    await financePage.waitForTimeout(1_500);
     listGate.release();
     await financePage.waitForTimeout(2_000);
 
@@ -290,30 +331,45 @@ async function main() {
       .first()
       .innerText()
       .catch(() => "");
-    const openBadges = await financePage
+    const rows = financePage
       .locator("table", { hasText: "Споры по начислениям партнёров" })
-      .locator("tbody tr")
-      .count()
-      .catch(() => 0);
+      .locator("tbody tr");
+    const rowCount = await rows.count().catch(() => 0);
+    let closedRows = 0;
+    for (let index = 0; index < rowCount; index += 1) {
+      const text = await rows.nth(index).innerText().catch(() => "");
+      if (text.includes("Закрыт")) closedRows += 1;
+    }
+    // The server is asked what the "open" filter holds — the screen has to show exactly that.
+    const serverOpen = await financePage.request.get(`${APP}/api/v1/finance/partner-disputes?state=open&limit=1`);
+    const serverOpenPayload = await serverOpen.json();
+    const serverOpenTotal = serverOpenPayload?.totalCount ?? null;
     await financePage.unroute("**/api/v1/finance/partner-disputes**");
 
+    const shownTotal = /из (\d+)/.exec(countText)?.[1] ?? null;
     if (selectedFilter !== "open") {
       fail(
         "LND-R5-UI-4",
         "a late answer of the old filter does not replace the new list",
         `the filter select reads "${selectedFilter}"`,
       );
-    } else if (countText && !/Показано 0 из /.test(countText) && openBadges === 0 && /из 0$/.test(countText.trim())) {
+    } else if (closedRows > 0) {
       fail(
         "LND-R5-UI-4",
         "a late answer of the old filter does not replace the new list",
-        `the filter is "open", but the list shows "${countText}"`,
+        `the filter is "open", but ${closedRows} of ${rowCount} rows are closed disputes — the late answer of the "all" filter won`,
+      );
+    } else if (serverOpenTotal !== null && shownTotal !== null && Number(shownTotal) !== serverOpenTotal) {
+      fail(
+        "LND-R5-UI-4",
+        "a late answer of the old filter does not replace the new list",
+        `the screen shows "${countText}" while the server answers ${serverOpenTotal} for the "open" filter`,
       );
     } else {
       pass(
         "LND-R5-UI-4",
         "a late answer of the old filter does not replace the new list",
-        `the answer of the "all" filter was held and released after the switch to "open"; the select reads "${selectedFilter}" and the list reads "${countText}"`,
+        `the answer of the "all" filter was held and released after the switch to "open"; the select reads "${selectedFilter}", the screen shows "${countText}" and the server answers ${serverOpenTotal} for the same filter, ${rowCount} row(s), none of them closed`,
       );
     }
 
