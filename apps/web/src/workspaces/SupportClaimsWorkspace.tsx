@@ -390,6 +390,9 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const claimReqRef = useRef(0);
   const threadsListReqRef = useRef(0);
   const claimsListReqRef = useRef(0);
+  // The thread the operator looks at right now. The refresh that follows a sent message must not
+  // pull the selection back to that thread when another one was opened in the meantime.
+  const selectedThreadIdRef = useRef<string | null>(null);
 
   /**
    * The reply draft is saved on the server by a plain state machine
@@ -417,6 +420,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     savedBody: "",
     error: null,
     errorScope: null,
+    revision: 0,
   });
 
   useEffect(() => {
@@ -561,6 +565,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     async (threadId: string) => {
       const reqId = ++threadReqRef.current;
       setSelectedThreadId(threadId);
+      selectedThreadIdRef.current = threadId;
       setThreadDetail(null);
       setLoadingThreadDetail(true);
       // The draft of the thread is loaded next to the thread itself: the reply box shows it as
@@ -821,25 +826,35 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     e.preventDefault();
     if (!threadDetail || threadDetail.thread.id !== selectedThreadId) return;
     const targetThreadId = threadDetail.thread.id;
-    const trimmed = replyText.trim();
+    const draftController = getDraftController();
+    // The reply box stays editable while the message is on its way. The revision pins the exact
+    // text that is sent, so the confirmation of the message cannot clear a text that was typed
+    // in the meantime.
+    const draftSnapshot = draftController.getSnapshot();
+    const sourceText =
+      draftSnapshot.threadId === targetThreadId ? draftSnapshot.body : replyText;
+    const trimmed = sourceText.trim();
     if (!trimmed) {
       notify({ kind: "error", text: "Введите текст ответа" });
       return;
     }
+    const capturedRevision = draftSnapshot.revision;
     setSendingReply(true);
     try {
       await api(`/support/threads/${targetThreadId}/messages`, {
         method: "POST",
         body: { body: trimmed },
       });
-      // The sent answer is no longer a draft: drop it on the server before the thread is read
-      // again, otherwise the reload would bring the very text that was just sent back.
-      getDraftController().markSent(targetThreadId);
-      await api(`/support/threads/${targetThreadId}/draft`, { method: "DELETE" }).catch(() => {
-        // The message is already sent: a failed draft cleanup is not worth a second error.
-      });
+      // The sent answer is no longer a draft: the controller drops it on the server, but only
+      // the revision that was really sent — a newer text stays in the box and is saved.
+      draftController.markSent(targetThreadId, capturedRevision);
       notify({ kind: "ok", text: "Сообщение отправлено клиенту" });
-      await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
+      await loadThreads();
+      // The operator may have opened another thread while the message was on its way: the
+      // refresh must not take the selection away from it.
+      if (selectedThreadIdRef.current === targetThreadId) {
+        await loadThreadDetail(targetThreadId);
+      }
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -870,8 +885,11 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         return next;
       });
       // A closed thread has no answer left to write: the draft goes with it.
-      getDraftController().markSent(targetThreadId);
-      await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
+      getDraftController().discardDraft(targetThreadId);
+      await loadThreads();
+      if (selectedThreadIdRef.current === targetThreadId) {
+        await loadThreadDetail(targetThreadId);
+      }
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {

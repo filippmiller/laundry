@@ -17,6 +17,12 @@
  * - A DELETE is only sent when the operator cleared a text the client knows the server holds.
  * - A locally typed answer always wins over the stored one, so a late draft response never
  *   overwrites the work of the operator.
+ * - Only one write per thread runs at a time, and every write is followed by a reconciliation:
+ *   the text of the box is compared with the confirmed state of the server, so a change that
+ *   happened during the write is written away instead of being left behind as a "dirty" box
+ *   without a pending save.
+ * - The confirmation of a sent message only clears the revision that was really sent. Text the
+ *   operator typed while the message was on its way stays in the box and is saved.
  */
 
 export type SupportDraftStatus = "loading" | "clean" | "dirty" | "saving" | "saved" | "error";
@@ -33,6 +39,8 @@ export type SupportDraftSnapshot = {
   error: string | null;
   /** Which step failed: the load of the stored draft or the write of the current one. */
   errorScope: "load" | "save" | null;
+  /** The revision of the text in the reply box. Every keystroke raises it by one. */
+  revision: number;
 };
 
 export type SupportDraftApiFn = (
@@ -54,8 +62,22 @@ export type SupportDraftController = {
   setBody: (body: string) => void;
   /** Repeats the failed step of the active thread: the draft load or the draft write. */
   retry: () => Promise<void>;
-  /** Drops the draft of a thread whose answer was just sent. */
-  markSent: (threadId: string) => void;
+  /**
+   * Reports that the answer of exactly `sentRevision` was sent.
+   *
+   * Only that revision may be cleared: a text the operator typed while the message was on its way
+   * belongs to them and stays in the box. The server must not keep the sent answer as a draft
+   * any more, but that cleanup waits for a running write — a late PUT would bring the sent answer
+   * back.
+   */
+  markSent: (threadId: string, sentRevision: number) => void;
+  /**
+   * Drops the draft of a thread that does not need it any more — the thread was closed.
+   *
+   * The content of the box goes away regardless of the revisions: there is nobody left who would
+   * answer it.
+   */
+  discardDraft: (threadId: string) => void;
   dispose: () => void;
 };
 
@@ -79,6 +101,12 @@ type ThreadRecord = {
   saving: boolean;
   /** A write was requested while another one was still running. */
   saveQueued: boolean;
+  /** The revision of the text in the reply box. Every keystroke raises it by one. */
+  revision: number;
+  /** The server must not keep this draft any more — it was sent, or the thread was closed. */
+  dropDraft: boolean;
+  /** The write that failed last, so it is not repeated in a loop. */
+  failedAction: "put" | "delete" | null;
 };
 
 const DEFAULT_DEBOUNCE_MS = 800;
@@ -116,6 +144,7 @@ export function createSupportDraftController(opts: {
     savedBody: "",
     error: null,
     errorScope: null,
+    revision: 0,
   };
 
   const emit = () => {
@@ -128,6 +157,7 @@ export function createSupportDraftController(opts: {
           savedBody: record.savedBody,
           error: record.error,
           errorScope: record.errorScope,
+          revision: record.revision,
         }
       : {
           threadId: null,
@@ -136,6 +166,7 @@ export function createSupportDraftController(opts: {
           savedBody: "",
           error: null,
           errorScope: null,
+          revision: 0,
         };
     if (
       next.threadId === snapshot.threadId &&
@@ -143,7 +174,8 @@ export function createSupportDraftController(opts: {
       next.body === snapshot.body &&
       next.savedBody === snapshot.savedBody &&
       next.error === snapshot.error &&
-      next.errorScope === snapshot.errorScope
+      next.errorScope === snapshot.errorScope &&
+      next.revision === snapshot.revision
     ) {
       return;
     }
@@ -167,6 +199,9 @@ export function createSupportDraftController(opts: {
       timer: null,
       saving: false,
       saveQueued: false,
+      revision: 0,
+      dropDraft: false,
+      failedAction: null,
     };
     records.set(threadId, record);
     return record;
@@ -184,6 +219,11 @@ export function createSupportDraftController(opts: {
    */
   const pendingAction = (record: ThreadRecord): "put" | "delete" | null => {
     const trimmed = record.body.trim();
+    if (record.dropDraft && record.serverKnown && record.savedBody !== "") {
+      // The server must not keep the sent answer. The newer text of the box replaces it in the
+      // write that follows this removal.
+      return "delete";
+    }
     if (trimmed) return trimmed === record.savedBody ? null : "put";
     // An empty box only asks for a DELETE when the client knows that the server holds a draft.
     // After a failed load the server state is unknown, so nothing is deleted.
@@ -193,6 +233,7 @@ export function createSupportDraftController(opts: {
   const computeStatus = (record: ThreadRecord): SupportDraftStatus => {
     if (!record.loadSettled) return "loading";
     if (record.error) return "error";
+    if (record.saving) return "saving";
     const trimmed = record.body.trim();
     if (!trimmed) return record.savedBody === "" ? "clean" : "dirty";
     return trimmed === record.savedBody ? "saved" : "dirty";
@@ -207,10 +248,48 @@ export function createSupportDraftController(opts: {
     }, debounceMs);
   };
 
+  /**
+   * Compares the confirmed state of the server with the text of the box and writes the difference
+   * away.
+   *
+   * A write resolves into a new confirmed state, but the box may have changed in the meantime:
+   * without this comparison a cleared box would stay "dirty" with no pending save, and a text
+   * typed during the write would never reach the server.
+   */
+  const reconcile = (record: ThreadRecord) => {
+    if (disposed) return;
+    // The queued write is answered by this comparison: the box itself says what is missing.
+    record.saveQueued = false;
+    const action = pendingAction(record);
+    if (!action) {
+      // The server holds what the box holds: a pending timer would only repeat the same write.
+      clearTimer(record);
+      record.status = computeStatus(record);
+      emit();
+      return;
+    }
+    if (record.error && action === record.failedAction) {
+      // The very write that is needed now already failed: the operator decides whether it is
+      // tried again, an endless loop would only repeat the failure.
+      record.status = "error";
+      emit();
+      return;
+    }
+    // The difference is known to be wrong, so it must not wait for the debounce.
+    clearTimer(record);
+    void performSave(record);
+  };
+
   const performSave = async (record: ThreadRecord): Promise<void> => {
     if (disposed) return;
     if (record.saving) {
+      // Only one write per thread may run at a time: a second one waits for the first.
       record.saveQueued = true;
+      return;
+    }
+    if (!record.loadSettled) {
+      // The stored draft of the thread is still on its way: nothing is written before it is
+      // known, so a DELETE can never destroy a draft the operator never saw.
       return;
     }
     const action = pendingAction(record);
@@ -233,12 +312,19 @@ export function createSupportDraftController(opts: {
           body: { body: trimmed },
         });
         record.savedBody = trimmed;
+        if (trimmed) {
+          // The server holds the text of the box now: it replaced the draft it may have held,
+          // so there is nothing left to drop.
+          record.dropDraft = false;
+        }
       } else {
         await opts.api(`/support/threads/${record.threadId}/draft`, { method: "DELETE" });
         record.savedBody = "";
       }
       record.serverKnown = true;
       record.error = null;
+      record.errorScope = null;
+      record.failedAction = null;
     } catch (err) {
       // The text stays unsaved on purpose: the operator sees that it is not on the server and
       // can send it again.
@@ -248,17 +334,35 @@ export function createSupportDraftController(opts: {
       record.saving = false;
       // The queued write belongs to the failed attempt: the retry of the operator decides again.
       record.saveQueued = false;
+      // The write that failed is remembered: it must not be repeated in a loop, but a write of
+      // another kind — the removal of a draft the server still holds — is still needed.
+      record.failedAction = action;
       emit();
       opts.onError?.(record.error);
+      // The failed write leaves the server in an unknown state: the difference between the box
+      // and the confirmed state is looked at once more.
+      reconcile(record);
       return;
     }
     record.saving = false;
     record.status = computeStatus(record);
     emit();
-    if (record.saveQueued) {
-      record.saveQueued = false;
-      if (pendingAction(record)) void performSave(record);
+    // The box may have changed while the write was running: the confirmed state of the server is
+    // compared with the box again.
+    reconcile(record);
+  };
+
+  /**
+   * Asks for the write the current state needs. It goes out at once — the state is already known
+   * to be wrong — but never in parallel: a running write has to finish first, otherwise a late
+   * PUT would undo the cleanup that follows it.
+   */
+  const requestWrite = (record: ThreadRecord) => {
+    if (record.saving) {
+      record.saveQueued = true;
+      return;
     }
+    void performSave(record);
   };
 
   const openThread = async (threadId: string): Promise<void> => {
@@ -266,8 +370,11 @@ export function createSupportDraftController(opts: {
     const record = ensureRecord(threadId);
     activeThreadId = threadId;
     clearTimer(record);
+    // A running write keeps the confirmed state of the server: forgetting it here would make the
+    // client issue a write that contradicts what the server has already accepted.
+    const writeRunning = record.saving;
     record.loadSettled = false;
-    record.serverKnown = false;
+    if (!writeRunning) record.serverKnown = false;
     record.status = "loading";
     record.error = null;
     record.errorScope = null;
@@ -294,15 +401,27 @@ export function createSupportDraftController(opts: {
     if (disposed) return;
 
     record.loadSettled = true;
-    record.serverKnown = true;
-    record.savedBody = stored.trim();
+    if (!record.saving) {
+      // The load tells what the server holds right now. A running write keeps its own
+      // confirmation instead: overwriting it would contradict what the server already accepted.
+      record.serverKnown = true;
+      record.savedBody = stored.trim();
+    }
     // A locally typed answer wins over the stored one: a late response never overwrites the work
-    // of the operator.
-    if (!record.edited) record.body = stored;
+    // of the operator. The stored text of a dropped draft is stale — it is the answer that was
+    // already sent — and must not come back into the box.
+    if (!record.dropDraft && !record.edited) record.body = stored;
     record.error = null;
     record.errorScope = null;
-    if (pendingAction(record)) scheduleSave(record);
-    else clearTimer(record);
+    if (record.dropDraft) {
+      // The server must not keep the sent answer: the cleanup goes out at once instead of
+      // waiting for the debounce.
+      requestWrite(record);
+    } else if (pendingAction(record)) {
+      scheduleSave(record);
+    } else {
+      clearTimer(record);
+    }
     record.status = computeStatus(record);
     emit();
   };
@@ -312,9 +431,16 @@ export function createSupportDraftController(opts: {
     const record = activeThreadId ? records.get(activeThreadId) : undefined;
     if (!record) return;
     record.body = body;
+    // Every keystroke raises the revision: it tells later which exact text was sent, so the
+    // confirmation of an older text cannot clear a newer one.
+    record.revision += 1;
     record.edited = true;
     record.error = null;
     record.errorScope = null;
+    if (body.trim()) {
+      // The new text replaces the draft the server may still hold.
+      record.dropDraft = false;
+    }
     if (!record.loadSettled) {
       // The stored draft is still on its way: nothing is written before it is known, so a DELETE
       // can never destroy a draft the operator never saw.
@@ -341,18 +467,47 @@ export function createSupportDraftController(opts: {
     await performSave(record);
   };
 
-  const markSent = (threadId: string) => {
+  const markSent = (threadId: string, sentRevision: number) => {
+    const record = records.get(threadId);
+    if (!record) return;
+    if (!Number.isFinite(sentRevision)) {
+      // Without a revision the controller cannot tell which text was sent, so it keeps the
+      // content of the box: destroying the work of the operator is worse than a stale draft.
+      if (pendingAction(record)) scheduleSave(record);
+      return;
+    }
+    if (sentRevision !== record.revision) {
+      // The operator typed something newer while the message was on its way: the newer text
+      // stays in the box and replaces the sent answer on the server. The pending autosave timer
+      // must survive — it is what saves the newer text.
+      if (pendingAction(record) && record.timer === null) scheduleSave(record);
+      return;
+    }
+    // The box still holds the answer that was just sent: it must not survive as a draft.
+    clearTimer(record);
+    record.body = "";
+    record.edited = false;
+    record.dropDraft = true;
+    record.error = null;
+    record.errorScope = null;
+    record.status = computeStatus(record);
+    emit();
+    // The cleanup must not wait for the debounce, but it must not overtake a running write.
+    requestWrite(record);
+  };
+
+  const discardDraft = (threadId: string) => {
     const record = records.get(threadId);
     if (!record) return;
     clearTimer(record);
     record.body = "";
     record.edited = false;
-    record.saving = false;
-    record.saveQueued = false;
-    record.status = "clean";
+    record.dropDraft = true;
     record.error = null;
     record.errorScope = null;
+    record.status = computeStatus(record);
     emit();
+    requestWrite(record);
   };
 
   const dispose = () => {
@@ -374,6 +529,7 @@ export function createSupportDraftController(opts: {
     setBody,
     retry,
     markSent,
+    discardDraft,
     dispose,
   };
 }
