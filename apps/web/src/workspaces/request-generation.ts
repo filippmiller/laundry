@@ -20,6 +20,8 @@ export type RequestToken = {
   kind: "fresh" | "append";
   /** The generation the request belongs to. */
   generation: number;
+  /** The instance that issued the token. A token of another instance is never current. */
+  owner: number;
   /** The number of the request inside its generation. */
   sequence: number;
 };
@@ -35,20 +37,27 @@ export type RequestGeneration = {
   invalidate: () => void;
 };
 
+/** A number that tells one instance of the generation apart from another. */
+let generationOwners = 0;
+
 export function createRequestGeneration(): RequestGeneration {
   let generation = 0;
   let sequence = 0;
+  // The owner makes the tokens of two instances incomparable: a token of an instance that was
+  // replaced can never be current, even if the numbers of the two generations happen to match.
+  const owner = (generationOwners += 1);
   return {
     beginFresh: () => {
       generation += 1;
       sequence = 0;
-      return { kind: "fresh", generation, sequence };
+      return { kind: "fresh", generation, owner, sequence };
     },
     beginAppend: () => {
       sequence += 1;
-      return { kind: "append", generation, sequence };
+      return { kind: "append", generation, owner, sequence };
     },
     isCurrent: token => {
+      if (token.owner !== owner) return false;
       if (token.generation !== generation) return false;
       // A fresh request owns the whole generation; an append owns only the last page it
       // fetched, so a second load-more supersedes the first one.

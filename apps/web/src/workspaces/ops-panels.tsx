@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Card, CardBody, CardHeader, DataTable, type DataTableColumn, EmptyState, Skeleton, Textarea } from "../components/ui";
 import { CheckCircle2 } from "lucide-react";
 import { api, dt } from "../api";
@@ -12,6 +12,10 @@ import {
   stateLabel,
 } from "../labels";
 import { type EscalationCapabilities } from "./escalation-capabilities";
+import {
+  createRequestGeneration,
+  type RequestGeneration,
+} from "./request-generation";
 
 /**
  * The escalation capabilities of the session.
@@ -61,21 +65,30 @@ export function PickupQueuePanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // The panel holds one current value of the server: a late answer of an older request must not
+  // replace it (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    const token = generation.beginFresh();
     setLoading(true);
     setError(null);
     try {
       const data = await api<PickupQueueRow[]>("/dispatch/pickup-queue");
+      if (!generation.isCurrent(token)) return;
       setRows(data ?? []);
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       setRows(null);
       const message = err instanceof Error ? err.message : "Не удалось загрузить очередь забора";
       setError(message);
       notify({ kind: "error", text: message });
     } finally {
-      setLoading(false);
+      if (generation.isCurrent(token)) setLoading(false);
     }
-  }, [notify]);
+  }, [notify, generation]);
 
   useEffect(() => {
     void load();
@@ -152,19 +165,34 @@ export function FiscalReceiptsPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // A refresh can start while the previous one is still running. The late answer of the older
+  // request must not replace the rows of the newer one, so every request belongs to a
+  // generation: the generation module decides which answer may write.
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    // A fresh load opens a new generation and closes every request that is still running.
+    const token = generation.beginFresh();
     setLoading(true);
     setError(null);
     try {
       const data = await api<FiscalReceiptRow[]>("/finance/fiscal-receipts");
+      // A late answer of an older request must not replace the rows of the current one.
+      if (!generation.isCurrent(token)) return;
       setRows(data ?? []);
     } catch (err) {
+      // A stale error must not be shown, must not clear the rows of the running request and
+      // must not switch off its spinner.
+      if (!generation.isCurrent(token)) return;
       setRows(null);
       setError(err instanceof Error ? err.message : "Не удалось загрузить состояние фискальной регистрации");
     } finally {
-      setLoading(false);
+      // Only the request that owns the panel may switch the spinner off.
+      if (generation.isCurrent(token)) setLoading(false);
     }
-  }, []);
+  }, [generation]);
 
   useEffect(() => {
     void load();
@@ -259,19 +287,28 @@ export function ExpectedReceiptsPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // The panel holds one current value of the server: a late answer of an older request must not
+  // replace it (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    const token = generation.beginFresh();
     setLoading(true);
     setError(null);
     try {
       const data = await api<ExpectedReceiptRow[]>("/partner/expected-receipts");
+      if (!generation.isCurrent(token)) return;
       setRows(data ?? []);
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       setRows(null);
       setError(err instanceof Error ? err.message : "Не удалось загрузить ожидаемые приёмки");
     } finally {
-      setLoading(false);
+      if (generation.isCurrent(token)) setLoading(false);
     }
-  }, []);
+  }, [generation]);
 
   useEffect(() => {
     void load();
@@ -410,18 +447,32 @@ export function StuckOrdersPanel({
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [resolution, setResolution] = useState("");
 
+  // The panel holds one current state of the server. A refresh can start while the previous one
+  // is still running, and the late answer of the older request must not replace the queues of
+  // the newer one. Every request therefore belongs to a generation.
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    // A fresh load opens a new generation and closes every request that is still running.
+    const token = generation.beginFresh();
     setLoading(true);
     setError(null);
     try {
       const result = await api<StuckOrdersResponse>("/ops/stuck-orders?minutes=30");
+      // A late answer of an older request must not replace the current queues.
+      if (!generation.isCurrent(token)) return;
       setData(result);
     } catch (err) {
+      // A stale error must not be shown and must not switch off the spinner of the running request.
+      if (!generation.isCurrent(token)) return;
       setError(formatError(err));
     } finally {
-      setLoading(false);
+      // Only the request that owns the panel may switch the spinner off.
+      if (generation.isCurrent(token)) setLoading(false);
     }
-  }, []);
+  }, [generation]);
 
   useEffect(() => {
     void load();

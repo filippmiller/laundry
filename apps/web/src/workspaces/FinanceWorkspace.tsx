@@ -45,6 +45,10 @@ import {
 import { FinanceMoneyPanel } from "./analytics-panels";
 import { FinanceDisputesPanel } from "./partner-money-panels";
 import { notifyPartnerMoneyChanged, subscribeToPartnerMoneyRefresh } from "./partner-money-refresh";
+import {
+  createRequestGeneration,
+  type RequestGeneration,
+} from "./request-generation";
 import { escalationCapabilities, FiscalReceiptsPanel, StuckOrdersPanel } from "./ops-panels";
 import { useUrlState } from "../hooks/useUrlState";
 
@@ -222,6 +226,11 @@ export function FinanceWorkspace({
    * for the same figures a second time.
    */
   const financeLoadedRef = useRef(false);
+  // The generation of the reloads of the workspace: a late answer of an older reload must not
+  // replace the fresh numbers (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
   const [pendingRefundKopeks, setPendingRefundKopeks] = useState(0);
 
   const [printDoc, setPrintDoc] = useState<{ kind: DocumentKind; id: string } | null>(null);
@@ -359,6 +368,10 @@ export function FinanceWorkspace({
   );
 
   const loadFinance = useCallback(async () => {
+    // Every reload belongs to a generation: the workspace can be reloaded while a previous reload
+    // is still running (the money bus, the refresh token and the panel of the workspace all ask
+    // for it), and a late answer of an older reload must not replace the fresh numbers.
+    const token = generation.beginFresh();
     setLoading(true);
     try {
       const [ov, rec, dr] = await Promise.all([
@@ -367,6 +380,7 @@ export function FinanceWorkspace({
         api<DriftItem[] | { items?: DriftItem[] }>("/finance/payment-drift"),
         refreshChargebacks(),
       ]);
+      if (!generation.isCurrent(token)) return;
       // The panels below fetch their own numbers with the refresh token. The token must change
       // only when the numbers really changed: on the first load the panels have just fetched with
       // the token they were mounted with, and a new token would ask the server for the very same
@@ -407,11 +421,12 @@ export function FinanceWorkspace({
         setDrift([]);
       }
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setLoading(false);
+      if (generation.isCurrent(token)) setLoading(false);
     }
-  }, [refreshChargebacks, notify]);
+  }, [refreshChargebacks, notify, generation]);
 
   useEffect(() => {
     void loadFinance();
@@ -640,8 +655,8 @@ export function FinanceWorkspace({
       notify({ kind: "ok", text: "Выплата партнёру запланирована (ожидает одобрения второго финансиста)" });
       setPayoutAmountRub("");
       setPayoutReference("");
-      await loadFinance();
-      // A scheduled payout reserves money: the partner's balance must show it right away.
+      // The bus reloads the workspace and the partner panel. The workspace must not reload itself
+      // here as well: two requests for the very same numbers, and the second one can arrive first.
       notifyPartnerMoneyChanged();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -658,8 +673,7 @@ export function FinanceWorkspace({
         body: {},
       });
       notify({ kind: "ok", text: "Выплата партнёру одобрена" });
-      await loadFinance();
-      // The approved payout leaves the reserved sum and becomes paid money.
+      // The bus reloads the workspace and the partner panel — once, not twice.
       notifyPartnerMoneyChanged();
     } catch (err) {
       if (
@@ -686,8 +700,7 @@ export function FinanceWorkspace({
         body: {},
       });
       notify({ kind: "ok", text: "Кредит-нота одобрена" });
-      await loadFinance();
-      // An approved credit note lowers the payable amount.
+      // The bus reloads the workspace and the partner panel — once, not twice.
       notifyPartnerMoneyChanged();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });

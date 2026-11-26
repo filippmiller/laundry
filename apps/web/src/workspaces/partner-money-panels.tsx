@@ -546,7 +546,14 @@ export function PartnerMoneyPanel({ notify: _notify }: { notify: NotifyFn }) {
 
   const disputes = useDisputeList("/partner/disputes", "partnerDisputeState");
 
+  // The panel holds one current value of the server: a late answer of an older request must not
+  // replace it (see the request generation module). The list of disputes has its own generation.
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    const token = generation.beginFresh();
     setLoading(true);
     setError(null);
     try {
@@ -558,6 +565,7 @@ export function PartnerMoneyPanel({ notify: _notify }: { notify: NotifyFn }) {
         // paged, so the count cannot be read off it.
         api<Paged<PartnerDisputeItem>>("/partner/disputes?state=open&limit=100"),
       ]);
+      if (!generation.isCurrent(token)) return;
       setAccruals(accrualRes);
       setPayouts(payoutRes.items ?? []);
       setPayoutTotal(payoutRes.totalCount ?? null);
@@ -570,11 +578,12 @@ export function PartnerMoneyPanel({ notify: _notify }: { notify: NotifyFn }) {
           (openDisputeRes.items ?? []).filter(item => item.state === "open").length,
       );
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       setError(err instanceof Error ? err.message : "Не удалось загрузить данные");
     } finally {
-      setLoading(false);
+      if (generation.isCurrent(token)) setLoading(false);
     }
-  }, []);
+  }, [generation]);
 
   useEffect(() => {
     void load();

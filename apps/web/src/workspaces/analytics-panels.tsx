@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -20,6 +20,10 @@ import { Badge } from "../components/ui/Badge";
 import { Meter } from "../components/ui/Meter";
 import { StatTile } from "../components/ui/StatTile";
 import { useUrlState } from "../hooks/useUrlState";
+import {
+  createRequestGeneration,
+  type RequestGeneration,
+} from "./request-generation";
 
 /**
  * Panels for the three money/volume questions the product could not answer before:
@@ -179,20 +183,36 @@ export function FinanceMoneyPanel({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The panel holds one current value of the server. Two refreshes in a row can race on a slow
+  // network: the answer of the first one arrives after the second one and would put an outdated
+  // sum on the screen. Every request therefore belongs to a generation — the generation module
+  // decides which answer may write, the panel only renders what it is told. The generation is
+  // created once and is never closed by a render, so a re-render cannot kill a running request.
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    // A fresh load opens a new generation and closes every request that is still running.
+    const token = generation.beginFresh();
     setBusy(true);
     setError(null);
     try {
       const analytics = await api<FinanceAnalyticsDto>("/finance/analytics");
+      // A late answer of an older request must not replace the current numbers.
+      if (!generation.isCurrent(token)) return;
       setData(analytics);
       onPendingRefundsChange?.(analytics.receivables.pendingRefundKopeks ?? 0);
     } catch (err) {
+      // A stale error must not be shown and must not switch off the spinner of the running request.
+      if (!generation.isCurrent(token)) return;
       setError(formatError(err));
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusy(false);
+      // Only the request that owns the panel may switch the spinner off.
+      if (generation.isCurrent(token)) setBusy(false);
     }
-  }, [notify, onPendingRefundsChange, refreshToken]);
+  }, [notify, onPendingRefundsChange, refreshToken, generation]);
 
   useEffect(() => {
     void load();
@@ -445,18 +465,28 @@ export function CustomerMoneyPanel({ notify }: { notify: NotifyFn }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The panel holds one current value of the server: a late answer of an older request must not
+  // replace it (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    const token = generation.beginFresh();
     setBusy(true);
     setError(null);
     try {
-      setData(await api<CustomerFinanceDto>("/customer/finance"));
+      const next = await api<CustomerFinanceDto>("/customer/finance");
+      if (!generation.isCurrent(token)) return;
+      setData(next);
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       setError(formatError(err));
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusy(false);
+      if (generation.isCurrent(token)) setBusy(false);
     }
-  }, [notify]);
+  }, [notify, generation]);
 
   useEffect(() => {
     void load();
@@ -629,18 +659,28 @@ export function ItemMixPanel({ notify, refreshToken }: { notify: NotifyFn; refre
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The panel holds one current value of the server: a late answer of an older request must not
+  // replace it (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    const token = generation.beginFresh();
     setBusy(true);
     setError(null);
     try {
-      setData(await api<ItemMixDto>(`/ops/item-mix?days=${days}`));
+      const next = await api<ItemMixDto>(`/ops/item-mix?days=${days}`);
+      if (!generation.isCurrent(token)) return;
+      setData(next);
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       setError(formatError(err));
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusy(false);
+      if (generation.isCurrent(token)) setBusy(false);
     }
-  }, [days, notify, refreshToken]);
+  }, [days, notify, refreshToken, generation]);
 
   useEffect(() => {
     void load();
@@ -827,18 +867,28 @@ export function ChronometryPanel({ notify, refreshToken }: { notify: NotifyFn; r
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The panel holds one current value of the server: a late answer of an older request must not
+  // replace it (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    const token = generation.beginFresh();
     setBusy(true);
     setError(null);
     try {
-      setData(await api<ChronometryDto>(`/ops/chronometry?days=${days}`));
+      const next = await api<ChronometryDto>(`/ops/chronometry?days=${days}`);
+      if (!generation.isCurrent(token)) return;
+      setData(next);
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       setError(formatError(err));
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusy(false);
+      if (generation.isCurrent(token)) setBusy(false);
     }
-  }, [days, notify, refreshToken]);
+  }, [days, notify, refreshToken, generation]);
 
   useEffect(() => {
     void load();
@@ -943,18 +993,28 @@ export function ChurnPanel({ notify, refreshToken }: { notify: NotifyFn; refresh
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The panel holds one current value of the server: a late answer of an older request must not
+  // replace it (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
   const load = useCallback(async () => {
+    const token = generation.beginFresh();
     setBusy(true);
     setError(null);
     try {
-      setData(await api<ChurnDto>(`/ops/churn?days=${days}`));
+      const next = await api<ChurnDto>(`/ops/churn?days=${days}`);
+      if (!generation.isCurrent(token)) return;
+      setData(next);
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       setError(formatError(err));
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusy(false);
+      if (generation.isCurrent(token)) setBusy(false);
     }
-  }, [days, notify, refreshToken]);
+  }, [days, notify, refreshToken, generation]);
 
   useEffect(() => {
     void load();
