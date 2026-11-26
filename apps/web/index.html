@@ -27,6 +27,17 @@
       />
     </noscript>
     <title>Чисто — дворовая прачечная и химчистка</title>
+    <script>
+      /*
+        The browser restores the scroll position of the previous page on its own — at a moment of
+        its choosing, without a scroll event and without asking anyone. With `scroll-behavior:
+        smooth` in the stylesheet it glides there and overwrites the place the reader has already
+        scrolled to. The app restores the remembered position itself (P2-03, P2-04), because the
+        content of the workspace only arrives after the first paint, so the native restoration is
+        switched off here — in the head, before the browser can perform it.
+      */
+      if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+    </script>
   </head>
   <body>
     <div id="root"></div>

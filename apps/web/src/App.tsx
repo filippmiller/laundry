@@ -10,6 +10,7 @@ import {
 } from "./auth-logout";
 import "./styles.css";
 import { DemoConfig, Me, Notice } from "./types";
+import { SCROLL_RESTORE_ATTEMPTS, decideScrollRestore } from "./scroll-restoration";
 import { Shell } from "./components/Shell";
 import { Router } from "./components/Router";
 import { Button } from "./components/ui";
@@ -195,6 +196,10 @@ function App() {
 
   // After a reload the stored offset is restored explicitly: the workspace content arrives after
   // the first paint, so the document is still short when the browser would have restored it.
+  //
+  // Two rules keep the restoration from stealing the place the reader has chosen: the document
+  // has to be tall enough to hold the offset, and a reader who has already scrolled somewhere else
+  // keeps their position (see `decideScrollRestore`).
   useEffect(() => {
     if (!activeWorkspace) return;
     const target = scrollOffsetsRef.current[activeWorkspace];
@@ -202,10 +207,21 @@ function App() {
     let attempts = 0;
     const timer = window.setInterval(() => {
       attempts += 1;
-      const tallEnough = document.documentElement.scrollHeight >= target + 120;
-      if (!tallEnough && attempts < 25) return;
+      const decision = decideScrollRestore({
+        target,
+        currentScrollY: window.scrollY,
+        documentHeight: document.documentElement.scrollHeight,
+        attemptsLeft: SCROLL_RESTORE_ATTEMPTS - attempts,
+      });
+      if (decision === "wait") return;
       window.clearInterval(timer);
-      window.scrollTo({ top: target, behavior: "auto" });
+      if (decision === "restore") {
+        // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, so `auto` would glide
+        // to the remembered position — and the glide keeps running over a position the reader has
+        // already chosen. One jump at a known moment is easier to reason about than an animation
+        // that competes with the reader.
+        window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
+      }
     }, 120);
     return () => window.clearInterval(timer);
   }, [activeWorkspace]);
