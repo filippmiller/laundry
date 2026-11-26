@@ -342,6 +342,51 @@ async function readAnchor(page, missingReason = "the anchor element left the pag
 }
 
 /**
+ * Reads where the sticky bars are.
+ *
+ * The topbar and the tab strip have to stay pinned to the top of the viewport
+ * while the page is scrolled — and they have to stay pinned while the drawer is
+ * open: they are the way out of the menu, and a menu that takes the navigation
+ * away with the content is a menu the user cannot leave (M-3).
+ *
+ * A bar that is not pinned does not move either — it has left the viewport
+ * together with the content. So the check is not "the bar did not move", it is
+ * "the bar is at the top of the viewport".
+ */
+async function readSticky(page) {
+  return page.evaluate(() => {
+    const rectOf = selector => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return { top: Math.round(rect.top), bottom: Math.round(rect.bottom) };
+    };
+    return { topbar: rectOf(".topbar"), tabBar: rectOf(".tab-bar") };
+  });
+}
+
+/**
+ * Decides whether the sticky bars are still pinned while the drawer is open.
+ *
+ * The topbar has to sit at the top of the viewport, and the tab strip right
+ * below it. A workspace without a tab strip has nothing to check.
+ *
+ * The tolerance is a few pixels: the sticky offset of the tab strip is a token
+ * (`--topbar-height`), while the real height of the topbar also contains the
+ * safe-area inset — the two differ by a few pixels, and that difference is not
+ * a movement of the page.
+ */
+function judgeSticky(sticky) {
+  const topbar = sticky?.topbar ?? null;
+  const tabBar = sticky?.tabBar ?? null;
+  const topbarPinned = topbar ? Math.abs(topbar.top) <= 2 : null;
+  const tabBarPinned = tabBar
+    ? topbar && tabBar.top >= 0 && Math.abs(tabBar.top - topbar.bottom) <= 8
+    : null;
+  return { topbarPinned, tabBarPinned };
+}
+
+/**
  * Opens the mobile drawer and measures what it does to the page behind it.
  *
  * The reading position of the page has to survive the drawer (MA-08): the page
@@ -378,6 +423,7 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   // of a remembered position) belongs to the page, not to the drawer.
   const anchorBefore = await pickAnchor(page);
   const scrollAtClick = await page.evaluate(() => window.scrollY);
+  const stickyBefore = await readSticky(page);
   const sampleMark = await page.evaluate(() => window.__samples.length);
   // The window of the measurement starts HERE, before the click: the jump the
   // opening of the drawer causes belongs to the drawer, so it has to be inside
@@ -385,7 +431,18 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   // after the drawer is open would drop exactly the moves that matter.
   await setPhase(page, "opening");
   const openingMark = await page.evaluate(() => window.__phaseMark);
-  await toggle.click();
+  // The menu is opened the way a person opens it: with the mouse, on the
+  // coordinates of the button. `locator.click()` scrolls the button into view
+  // first, and that scroll belongs to the driver, not to the page — measured as
+  // a movement of the page, it looks like a jump of the drawer.
+  const toggleBox = await toggle.boundingBox();
+  if (!toggleBox) {
+    throw new Error(`the menu button has no box at ${tag} — the drawer cannot be measured`);
+  }
+  await page.mouse.click(
+    Math.round(toggleBox.x + toggleBox.width / 2),
+    Math.round(toggleBox.y + toggleBox.height / 2),
+  );
   await waitForRailState(page, "true");
   await setPhase(page, "open");
   await waitForSettledPage(page, 600);
@@ -394,6 +451,14 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   drawer.scrollAtClick = scrollAtClick;
   drawer.anchorBefore = anchorBefore.ok ? { top: anchorBefore.top, height: anchorBefore.height } : null;
   drawer.anchorMissing = !anchorBefore.ok;
+
+  // The sticky bars have to be pinned to the top of the viewport while the
+  // drawer is open — they are the way out of the menu.
+  const stickyOpen = await readSticky(page);
+  drawer.stickyBefore = stickyBefore;
+  drawer.stickyOpen = stickyOpen;
+  drawer.topbarPinned = judgeSticky(stickyOpen).topbarPinned;
+  drawer.tabBarPinned = judgeSticky(stickyOpen).tabBarPinned;
 
   const anchorOpen = await readAnchor(page, "the anchor element disappeared while the drawer was open");
   drawer.anchorOpen = anchorOpen.ok ? { top: anchorOpen.top, height: anchorOpen.height } : null;
@@ -556,6 +621,9 @@ async function run() {
             ? `\n  drawer: brandHit=${drawer.brandHit} coveredByTopbar=${drawer.brandHitCoveredByTopbar} atClick=${drawer.scrollAtClick} anchorBefore=${JSON.stringify(drawer.anchorBefore)} anchorOpen=${JSON.stringify(drawer.anchorOpen)} anchorClosed=${JSON.stringify(drawer.anchorClosed)} afterWheel=${drawer.scrollBehind} railOpenAfterClose=${drawer.railOpenAfterClose}`
             : "\n  drawer: not available at this width (persistent rail)",
           drawer
+            ? `\n  sticky: topbar=${JSON.stringify(drawer.stickyBefore?.topbar ?? null)} -> ${JSON.stringify(drawer.stickyOpen?.topbar ?? null)} pinned=${drawer.topbarPinned} tabBar=${JSON.stringify(drawer.stickyBefore?.tabBar ?? null)} -> ${JSON.stringify(drawer.stickyOpen?.tabBar ?? null)} pinned=${drawer.tabBarPinned}`
+            : "",
+          drawer
             ? `\n  moves: ${JSON.stringify(drawer.movesByPhase ?? {})} whileOpen=${drawer.movesWhileOpen?.length ?? 0} whileClosing=${drawer.movesWhileClosing?.length ?? 0}`
             : "",
           drawer?.anchorProblems?.length
@@ -581,6 +649,8 @@ async function run() {
     if (r.drawer?.anchorMovedByWheel === true) failures.push(`${r.tag}: the page behind the drawer scrolls`);
     if (r.drawer?.anchorHeldWhileOpen === false) failures.push(`${r.tag}: the page behind the drawer jumps`);
     if (r.drawer?.anchorRestored === false) failures.push(`${r.tag}: the scroll position is not restored`);
+    if (r.drawer?.topbarPinned === false) failures.push(`${r.tag}: the topbar does not stay pinned while the drawer is open`);
+    if (r.drawer?.tabBarPinned === false) failures.push(`${r.tag}: the tab strip does not stay pinned while the drawer is open`);
     if (r.drawer && r.drawer.railOpenAfterClose !== "false") failures.push(`${r.tag}: the drawer did not close`);
     if (r.zoom === 2 && r.before.titleInfo?.clamped) failures.push(`${r.tag}: the topbar title is clamped`);
     // A witness that was not there is a failure of the combination: the probe
