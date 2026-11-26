@@ -17,13 +17,15 @@
  *
  * The report lands in docs/evidence/wave7/ as a JSON file and a Markdown summary.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const BASE = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:3000";
+let BASE = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:3000";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const EVIDENCE_DIR = resolve(REPO_ROOT, "docs/evidence/wave7");
 
@@ -139,16 +141,169 @@ async function allNotifications(cookie) {
   return items;
 }
 
-function commitSha() {
-  try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-  } catch {
-    return "unknown";
+/**
+ * The identity of the code that is on disk right now.
+ *
+ * A commit SHA alone does not prove what ran: the stand may have been started before the last
+ * edit, and the tree may carry uncommitted work. The receipt therefore names the commit, the tree
+ * it points at, whether the working tree is dirty, and a digest of the actual difference — so a
+ * reader can tell "the old code answered" from "the new code answered".
+ */
+function codeIdentity() {
+  const git = (args) => {
+    try {
+      return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim();
+    } catch {
+      return null;
+    }
+  };
+  const status = git(["status", "--porcelain"]) ?? "";
+  const changed = status.split(/\r?\n/).filter(Boolean);
+  const diff = git(["diff", "HEAD"]) ?? "";
+  const untracked = changed
+    .filter(line => line.startsWith("??"))
+    .map(line => line.slice(3).trim());
+  return {
+    codeSha: git(["rev-parse", "HEAD"]),
+    codeTree: git(["rev-parse", "HEAD^{tree}"]),
+    branch: git(["rev-parse", "--abbrev-ref", "HEAD"]),
+    dirty: changed.length > 0,
+    changedFiles: changed.map(line => line.slice(0, 2).trim() + " " + line.slice(3).trim()),
+    untrackedFiles: untracked,
+    diffSha256: createHash("sha256").update(diff, "utf8").digest("hex"),
+  };
+}
+
+/**
+ * Starts the API from the tree that is on disk and reports the identity of that very process.
+ *
+ * The recheck demanded the identity of the serving process: a stand that was started before the
+ * last edit answers with old code and still looks healthy. When VERIFY_SPAWN_API is set the
+ * verification brings its own server and writes down its pid, its start time and the moment it
+ * became ready — so the receipt and the responses belong together.
+ */
+let spawnedStand = null;
+
+/**
+ * Picks a free TCP port.
+ *
+ * The port of the request is only a wish: another project may be listening on it, and a server
+ * that cannot bind would make the verification talk to somebody else's process instead of its
+ * own. The port is therefore checked before the server starts.
+ */
+function findFreePort(preferred) {
+  return new Promise((resolvePort, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.on("error", () => {
+      // The preferred port is taken: the next free one is used and named in the receipt.
+      const fallback = createServer();
+      fallback.unref();
+      fallback.on("error", reject);
+      fallback.listen(0, "127.0.0.1", () => {
+        const { port } = fallback.address();
+        fallback.close(() => resolvePort(port));
+      });
+    });
+    probe.listen(preferred, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolvePort(port));
+    });
+  });
+}
+
+async function spawnStand() {
+  const databaseUrl = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("VERIFY_SPAWN_API needs DATABASE_URL — the database of the stand to check");
   }
+  const requestedPort = Number(process.env.VERIFY_API_PORT ?? 3107);
+  const port = await findFreePort(requestedPort);
+  const argv = ["node_modules/tsx/dist/cli.mjs", "src/api/server.ts"];
+  const startedAt = new Date();
+  const child = spawn(process.execPath, argv, {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATABASE_URL: databaseUrl,
+      NODE_ENV: process.env.NODE_ENV ?? "development",
+      WEB_ORIGIN: process.env.WEB_ORIGIN ?? "http://localhost:5173",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout?.on("data", chunk => {
+    output += String(chunk);
+  });
+  child.stderr?.on("data", chunk => {
+    output += String(chunk);
+  });
+  const baseUrl = `http://127.0.0.1:${port}`;
+  BASE = baseUrl;
+  const readyAt = await waitForReady(baseUrl, output);
+  spawnedStand = {
+    mode: "spawned-by-this-script",
+    pid: child.pid,
+    port,
+    requestedPort,
+    baseUrl,
+    argv: [process.execPath, ...argv],
+    cwd: REPO_ROOT,
+    startedAt: startedAt.toISOString(),
+    readyAt: readyAt.toISOString(),
+    log: output.slice(-4000),
+  };
+  const stop = () => {
+    try {
+      child.kill();
+    } catch {
+      // The process is already gone — nothing to stop.
+    }
+  };
+  process.on("exit", stop);
+  return spawnedStand;
+}
+
+/** Waits for the readiness probe of the spawned server and returns when it answers. */
+async function waitForReady(baseUrl, log) {
+  const deadline = Date.now() + 90_000;
+  let lastError = "no attempt";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/health/ready`);
+      if (res.status === 200) return new Date();
+      lastError = `status ${res.status}`;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise(done => setTimeout(done, 500));
+  }
+  throw new Error(`the spawned API did not become ready: ${lastError}\n${log.slice(-2000)}`);
+}
+
+/** The identity of a stand that was started by somebody else — as far as it can be observed. */
+async function externalStandIdentity() {
+  const health = await fetch(`${BASE}/api/v1/health`).catch(() => null);
+  const ready = await fetch(`${BASE}/api/v1/health/ready`).catch(() => null);
+  return {
+    mode: "external-stand",
+    baseUrl: BASE,
+    healthStatus: health?.status ?? null,
+    healthAt: new Date().toISOString(),
+    readyStatus: ready?.status ?? null,
+    note: "the process identity of an externally started stand cannot be proven from the outside — run with VERIFY_SPAWN_API=1 to let the script start the server it checks",
+  };
 }
 
 async function main() {
   const startedAt = new Date();
+  // The identity of the code and of the process that answers come first: a check that ran against
+  // an unknown build proves nothing about the build under review.
+  const code = codeIdentity();
+  const stand = process.env.VERIFY_SPAWN_API
+    ? await spawnStand()
+    : await externalStandIdentity();
   ORG = await resolveOrganization();
 
   // --- A. LND-R4-02: the disputes behind the first page are reachable ------------------------
@@ -180,25 +335,36 @@ async function main() {
   }
 
   // The cursor only proves something when a second page exists. The demo book seeds one open
-  // dispute, so a second one is opened through the very endpoint a partner uses — that is what
-  // makes "the disputes behind the first page" a real question.
-  let openTotal = typeof financeTotal === "number" ? financeTotal : financeItems.length;
-  let createdForCursor = null;
-  if (openTotal < 2) {
-    const accruals = await call(partner, "/partner/accruals");
-    const lines = (accruals.payload?.invoices ?? []).flatMap(invoice => invoice.lines ?? []);
+  // dispute, so more are opened through the very endpoint a partner uses — that is what makes
+  // "the disputes behind the first page" a real question.
+  //
+  // The recheck rejected the previous shortcut: a run that found only one dispute PASSED the
+  // cursor check without walking a single page. Now the run opens as many disputes as it needs,
+  // and a run that cannot reach a second page is SKIPPED with a stated reason instead of passing.
+  const ensureOpenDisputes = async (wanted) => {
+    const current = await call(finance, "/finance/partner-disputes?state=open&limit=100");
+    const have = Array.isArray(current.payload?.items) ? current.payload.items.length : 0;
+    if (have >= wanted) return { have, created: [] };
+    const created = [];
+    const accrualLines = await call(partner, "/partner/accruals");
+    const lines = (accrualLines.payload?.invoices ?? []).flatMap(invoice => invoice.lines ?? []);
     for (const line of lines) {
+      if (have + created.length >= wanted) break;
       if (line.status === "credited" || line.disputed) continue;
-      const created = await call(partner, `/finance/partner-invoice-lines/${line.id}/disputes`, {
+      const opened = await call(partner, `/finance/partner-invoice-lines/${line.id}/disputes`, {
         method: "POST",
-        body: { reason: "Волна 7: спор за строкой счёта, чтобы проверить постраничное чтение." },
+        body: {
+          reason: `Волна 8: спор ${created.length + 1} за строкой счёта, чтобы вторая страница была настоящей.`,
+        },
       });
-      if (created.status === 200 && created.payload?.disputeId) {
-        createdForCursor = created.payload.disputeId;
-        break;
-      }
+      if (opened.status === 200 && opened.payload?.disputeId) created.push(opened.payload.disputeId);
     }
-  }
+    return { have: have + created.length, created };
+  };
+
+  const wanted = 2;
+  const ensured = await ensureOpenDisputes(wanted);
+  const openTotal = ensured.have;
 
   const firstPage = await call(finance, "/finance/partner-disputes?state=open&limit=1");
   const firstItems = Array.isArray(firstPage.payload?.items) ? firstPage.payload.items : [];
@@ -211,17 +377,24 @@ async function main() {
       `first page status=${firstPage.status} items=${firstItems.length} totalCount=${JSON.stringify(firstTotal)} nextCursor=${nextCursor ? "present" : "absent"}`,
     );
   } else if (nextCursor) {
+    // The real transition: the cursor of the first page is handed back to the server and the
+    // second page must bring rows the first page did not bring.
     const secondPage = await call(
       finance,
       `/finance/partner-disputes?state=open&limit=1&cursor=${encodeURIComponent(nextCursor)}`,
     );
     const secondItems = Array.isArray(secondPage.payload?.items) ? secondPage.payload.items : [];
     const overlap = secondItems.filter(item => firstItems.some(first => first.id === item.id));
-    if (secondPage.status === 200 && secondItems.length > 0 && overlap.length === 0) {
+    if (
+      secondPage.status === 200
+      && secondItems.length > 0
+      && overlap.length === 0
+      && secondItems[0].id !== firstItems[0].id
+    ) {
       pass(
         "LND-R4-02-2",
         "dispute cursor reaches the second page",
-        `multi-page case: totalCount=${firstTotal} nextCursor present, the cursor returned ${secondItems.length} further row(s) with no overlap${createdForCursor ? " (a second open dispute was opened through the partner endpoint to make the second page real)" : ""}`,
+        `real transition: totalCount=${firstTotal}, the first page returned ${firstItems[0].id.slice(0, 8)}, its cursor returned ${secondItems.length} further row(s) (${secondItems[0].id.slice(0, 8)}) with no overlap${ensured.created.length ? ` — ${ensured.created.length} dispute(s) were opened through the partner endpoint to make the second page real` : ""}`,
       );
     } else {
       fail(
@@ -230,17 +403,17 @@ async function main() {
         `second page status=${secondPage.status} items=${secondItems.length} overlap=${overlap.length} body=${JSON.stringify(secondPage.payload).slice(0, 300)}`,
       );
     }
-  } else if (typeof firstTotal === "number" && firstTotal === firstItems.length) {
-    pass(
-      "LND-R4-02-2",
-      "dispute cursor reaches the second page",
-      `single-page case: the demo book holds ${firstTotal} open dispute(s), so there is no second page to walk (totalCount equals the number of returned items)`,
-    );
-  } else {
+  } else if (typeof firstTotal === "number" && firstTotal >= wanted) {
     fail(
       "LND-R4-02-2",
       "dispute cursor reaches the second page",
-      `no cursor although totalCount=${JSON.stringify(firstTotal)} > items=${firstItems.length}`,
+      `totalCount=${firstTotal} promises more rows than the first page, but the server sent no cursor`,
+    );
+  } else {
+    skip(
+      "LND-R4-02-2",
+      "dispute cursor reaches the second page",
+      `only ${openTotal} open dispute(s) are reachable in the demo book (totalCount=${firstTotal}) and the partner endpoints could not open more — the second page could not be walked, so nothing is claimed here`,
     );
   }
 
@@ -476,23 +649,26 @@ async function main() {
     const deleted = await call(support, `/support/threads/${threadId}/draft`, { method: "DELETE" });
     const afterDelete = await call(support, `/support/threads/${threadId}/draft`);
     const survived = readBack.status === 200 && readBack.payload?.body === draftBody;
-    const gone = afterDelete.status !== 200
-      ? true
-      : afterDelete.payload === null
+    // The expected final state is exact: the draft endpoint answers 200 with an empty body, because
+    // a missing draft is not an error. The recheck rejected "any status other than 200" as a proof
+    // — a 500 would have satisfied it — so the status AND the empty payload are asserted.
+    const gone = afterDelete.status === 200
+      && (afterDelete.payload === null
         || afterDelete.payload === undefined
-        || afterDelete.payload?.body === undefined
-        || afterDelete.payload?.body === null;
+        || (typeof afterDelete.payload === "object"
+          && afterDelete.payload.body === undefined
+          && afterDelete.payload.body === null));
     if (put.status === 200 && survived && deleted.status === 200 && gone) {
       pass(
         "LND-R4-01-1",
         "the server-side draft survives",
-        `PUT returned ${put.status}, GET read the same body back, DELETE returned ${deleted.status} and the draft is gone afterwards (GET status=${afterDelete.status}, payload=${JSON.stringify(afterDelete.payload)})`,
+        `PUT returned ${put.status}, GET read the same body back, DELETE returned ${deleted.status} and the draft is gone afterwards (GET status=${afterDelete.status}, payload=${JSON.stringify(afterDelete.payload)} — the expected empty state, not merely "not 200")`,
       );
     } else {
       fail(
         "LND-R4-01-1",
         "the server-side draft survives",
-        `put=${put.status} readBack=${readBack.status} body=${JSON.stringify(readBack.payload).slice(0, 160)} delete=${deleted.status} afterDelete=${afterDelete.status} payload=${JSON.stringify(afterDelete.payload).slice(0, 160)}`,
+        `put=${put.status} readBack=${readBack.status} body=${JSON.stringify(readBack.payload).slice(0, 160)} delete=${deleted.status} afterDelete=${afterDelete.status} payload=${JSON.stringify(afterDelete.payload).slice(0, 160)} (expected: GET 200 with an empty body)`,
       );
     }
   }
@@ -577,8 +753,17 @@ async function main() {
     generatedAt: startedAt.toISOString(),
     baseUrl: BASE,
     organizationId: ORG,
-    commitSha: commitSha(),
-    branch: "feat/audit-remediation-wave6",
+    // The code that was on disk when the checks ran. `codeSha` is the tested-code SHA; the commit
+    // that carries this receipt is named in the remediation report, because a document cannot
+    // contain its own SHA.
+    code: {
+      ...code,
+      evidenceCommit: null,
+      evidenceCommitNote: "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA",
+    },
+    // The process that answered the requests.
+    stand,
+    branch: code.branch,
     summary: {
       total: results.length,
       passed: passed.length,
@@ -599,9 +784,12 @@ async function main() {
   const markdown = [
     `# Wave 7 live verification (PR #4)`,
     ``,
-    `- Stand: \`${BASE}\``,
+    `- Stand: \`${BASE}\` (${stand.mode})`,
+    `- Code: \`${code.codeSha}\` tree \`${code.codeTree}\` on \`${code.branch}\``,
+    `- Working tree: ${code.dirty ? `DIRTY — ${code.changedFiles.length} path(s): ${code.changedFiles.join(", ")}` : "clean"}`,
+    `- Diff digest (sha256 of \`git diff HEAD\`): \`${code.diffSha256}\``,
+    `- Serving process: ${stand.mode === "spawned-by-this-script" ? `pid ${stand.pid}, started ${stand.startedAt}, ready ${stand.readyAt}, port ${stand.port}` : `externally started — ${stand.note}`}`,
     `- Organization: \`${ORG}\``,
-    `- Commit: \`${report.commitSha}\` (\`${report.branch}\`)`,
     `- Started at: \`${report.generatedAt}\``,
     `- Result: ${passed.length} passed, ${skipped.length} skipped, ${failed.length} failed (${results.length} checks)`,
     ``,
@@ -611,6 +799,9 @@ async function main() {
     ``,
     `The route/UI parity row is a STATIC scan of the sources — it is not a proof that a screen`,
     `reaches the route. Everything else was observed on the running stand.`,
+    ``,
+    `The commit that carries this receipt is named in the remediation report: a document cannot`,
+    `state its own SHA.`,
     ``,
   ].join("\n");
   writeFileSync(mdPath, markdown, "utf8");
