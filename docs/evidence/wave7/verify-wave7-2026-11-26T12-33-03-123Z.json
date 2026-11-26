@@ -1,0 +1,113 @@
+{
+  "generatedAt": "2026-11-26T12:33:03.123Z",
+  "baseUrl": "http://127.0.0.1:3125",
+  "organizationId": "cd20f403-a758-4584-856b-b3a68a8719fa",
+  "code": {
+    "codeSha": "87cefd2c69b3cd92fc1d7cf692f502ddade67659",
+    "codeTree": "408d5849fa67ba83377071c986b0d77b3f18e0cc",
+    "branch": "feat/audit-remediation-wave6",
+    "dirty": false,
+    "changedFiles": [],
+    "untrackedFiles": [],
+    "diffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evidenceCommit": null,
+    "evidenceCommitNote": "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA"
+  },
+  "stand": {
+    "mode": "spawned-by-this-script",
+    "pid": 36396,
+    "port": 3125,
+    "requestedPort": 3125,
+    "baseUrl": "http://127.0.0.1:3125",
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "node_modules/tsx/dist/cli.mjs",
+      "src/api/server.ts"
+    ],
+    "cwd": "C:\\dev\\laundry",
+    "startedAt": "2026-11-26T12:33:03.448Z",
+    "readyAt": "2026-11-26T12:33:06.114Z",
+    "log": ""
+  },
+  "branch": "feat/audit-remediation-wave6",
+  "summary": {
+    "total": 12,
+    "passed": 12,
+    "skipped": 0,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "id": "LND-R4-02-1",
+      "name": "finance open dispute list",
+      "status": "PASS",
+      "detail": "status=200 items=2 totalCount=2 every item is in the open state (1 open dispute(s) were opened through the partner endpoint first)"
+    },
+    {
+      "id": "LND-R4-02-2",
+      "name": "dispute cursor reaches the second page",
+      "status": "PASS",
+      "detail": "real transition: totalCount=2, the first page returned 82c6fc56, its cursor returned 1 further row(s) (98ee857a) with no overlap — 1 dispute(s) were opened through the partner endpoint to make the second page real"
+    },
+    {
+      "id": "LND-R4-02-3",
+      "name": "partner dispute list honours the query string",
+      "status": "PASS",
+      "detail": "status=200 ?state=open&limit=1 returned exactly 1 item, totalCount=2 (state=open)"
+    },
+    {
+      "id": "LND-R4-02-4",
+      "name": "resolving a dispute changes the open list",
+      "status": "PASS",
+      "detail": "dispute 82c6fc56 resolved (outcome=rejected), it left the open list and totalCount fell 2 → 1"
+    },
+    {
+      "id": "LND-R4-03-1",
+      "name": "partner balance is internally consistent",
+      "status": "PASS",
+      "detail": "accrued=8070000 disputed=192000 gross=7878000 paid=0 reserved=7926000 available=-48000 and available === gross - paid - reserved"
+    },
+    {
+      "id": "LND-R4-03-2",
+      "name": "lifetime accrual total matches the balance",
+      "status": "PASS",
+      "detail": "estimatedTotalKopeks=8070000 === balance.accruedKopeks=8070000 (the lifetime total, not a page)"
+    },
+    {
+      "id": "LND-R4-04-1",
+      "name": "two close/reopen cycles on a support thread",
+      "status": "PASS",
+      "detail": "thread 5c2c04f3 on order 796d8e5b: close → reopen → close → reopen (close=200 reopen=200, close=200 reopen=200), the thread belongs to the signed-in customer"
+    },
+    {
+      "id": "LND-R4-04-2",
+      "name": "customer is notified twice per transition",
+      "status": "PASS",
+      "detail": "thread 5c2c04f3: support_closed=2, support_reopened=2 in the customer's own feed (293 notifications read)"
+    },
+    {
+      "id": "LND-R4-04-3",
+      "name": "draining the outbox twice adds no duplicate",
+      "status": "PASS",
+      "detail": "two drains ({\"processed\":7,\"failed\":0}) left the counts at support_closed=2, support_reopened=2"
+    },
+    {
+      "id": "LND-R4-01-1",
+      "name": "the server-side draft survives",
+      "status": "PASS",
+      "detail": "PUT returned 200, GET read the same body back, DELETE returned 200 and the draft is gone afterwards (GET status=200, payload=null — the expected empty state, not merely \"not 200\")"
+    },
+    {
+      "id": "LND-R4-07-1",
+      "name": "worker health probe answers with the heartbeat",
+      "status": "PASS",
+      "detail": "without a heartbeat the probe exited 1 (default path: 1; \"worker-health: no heartbeat: the worker has not completed a cycle yet (heartbeat file missing or unreadable) (heartbeat \"), with a fresh heartbeat it exited 0 (\"worker-health: heartbeat ok: the last successful worker cycle is 0s old (limit 90s)\")"
+    },
+    {
+      "id": "STATIC-ROUTE-PARITY",
+      "name": "route/UI parity scan (STATIC, not proof of UI availability)",
+      "status": "PASS",
+      "detail": "ROUTES: 144 | CALL PATHS: 123 | HELPER PATHS: 2 | routes without a UI caller: 10 (/health/ready, /, /, /, /, /slots/holds, /ops/expire-holds, /ops/outbox/drain, /webhooks/payments/:provider, /finance/partner-disputes) | static scan of the sources, not a proof that a screen reaches the route — the web app reaches some of them through a variable (e.g. /finance/partner-disputes via useDisputeList), which the scan cannot see"
+    }
+  ]
+}
