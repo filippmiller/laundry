@@ -1,0 +1,107 @@
+{
+  "generatedAt": "2026-11-26T17:27:51.069Z",
+  "baseUrl": "http://127.0.0.1:3126",
+  "organizationId": "26f433d7-24c1-426b-b395-34ceac2fe617",
+  "code": {
+    "codeSha": "b1e3932aa5b71354a0ee7f77e6e9a019fa1df69f",
+    "codeTree": "2eabb13df39ee2a6aef3ab862127c1b5a8df8e4e",
+    "branch": "feat/audit-remediation-wave6",
+    "dirty": true,
+    "changedFiles": [
+      "M beads/issues.jsonl",
+      "M apps/web/src/components/Shell.tsx",
+      "M apps/web/src/styles/base.css",
+      "M apps/web/src/styles/layout.css",
+      "M scripts/verify-mobile-layout.mjs",
+      "?? apps/web/src/scroll-lock.ts",
+      "?? docs/evidence/wave7/verify-wave7-2026-11-26T17-27-45-210Z.json",
+      "?? docs/evidence/wave7/verify-wave7-2026-11-26T17-27-45-210Z.md",
+      "?? docs/reports/PR4_FINAL_VERDICT_2026-11-27.md",
+      "?? test/web/scroll-lock.test.ts"
+    ],
+    "diffSha256": "3ecdb14ddd251befbecfc62b2ab6facc4a3b43a042fb56ba5c3d43c68c0307b5",
+    "untrackedFiles": [
+      "apps/web/src/scroll-lock.ts",
+      "docs/evidence/wave7/verify-wave7-2026-11-26T17-27-45-210Z.json",
+      "docs/evidence/wave7/verify-wave7-2026-11-26T17-27-45-210Z.md",
+      "docs/reports/PR4_FINAL_VERDICT_2026-11-27.md",
+      "test/web/scroll-lock.test.ts"
+    ],
+    "untrackedSha256": "283eaae418a043e46010c931cf1075fcdc5dd65cc59d97ef62a68fbc613ea997",
+    "evidenceCommit": null,
+    "evidenceCommitNote": "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA"
+  },
+  "stand": {
+    "mode": "spawned-by-this-script",
+    "pid": 17064,
+    "port": 3126,
+    "requestedPort": 3126,
+    "baseUrl": "http://127.0.0.1:3126",
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "node_modules/tsx/dist/cli.mjs",
+      "src/api/server.ts"
+    ],
+    "cwd": "C:\\dev\\laundry",
+    "startedAt": "2026-11-26T17:27:51.456Z",
+    "readyAt": "2026-11-26T17:27:54.164Z",
+    "code": {
+      "codeSha": "b1e3932aa5b71354a0ee7f77e6e9a019fa1df69f",
+      "codeTree": "2eabb13df39ee2a6aef3ab862127c1b5a8df8e4e",
+      "branch": "feat/audit-remediation-wave6",
+      "dirty": true,
+      "diffSha256": "3ecdb14ddd251befbecfc62b2ab6facc4a3b43a042fb56ba5c3d43c68c0307b5"
+    },
+    "log": ""
+  },
+  "summary": {
+    "total": 7,
+    "passed": 7,
+    "skipped": 0,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "id": "LND-R5-06-1",
+      "name": "an open escalation stays reachable while its order moves on",
+      "status": "PASS",
+      "detail": "the order 76ca7944 is NOT in the idle queue (it was just created), but its open escalation is listed in the queue of open escalations with the reason \"Волна 8: проверка очереди открытых эскалаций 2026-11-26T17:27:54.981Z\""
+    },
+    {
+      "id": "LND-R5-06-3",
+      "name": "the escalation names a responsible person",
+      "status": "PASS",
+      "detail": "the escalation names \"Диспетчер Мария\" (the author is \"Диспетчер Мария\")"
+    },
+    {
+      "id": "LND-R5-07-1",
+      "name": "a finance-only operator cannot open an escalation",
+      "status": "PASS",
+      "detail": "the server answered 403 — the rights of the backend were not widened"
+    },
+    {
+      "id": "LND-R5-07-2",
+      "name": "a finance-only operator cannot close an escalation",
+      "status": "PASS",
+      "detail": "the server answered 403 — the rights of the backend were not widened"
+    },
+    {
+      "id": "LND-R5-06-2",
+      "name": "an escalation is closed explicitly with a reason",
+      "status": "PASS",
+      "detail": "the dispatcher closed the escalation with \"Волна 8: эскалация закрыта после проверки очереди.\" (status 200); it left the queue of open escalations"
+    },
+    {
+      "id": "LND-R5-05-1",
+      "name": "the privacy export states the coverage of its sessions section",
+      "status": "PASS",
+      "detail": "policy=all_own_sessions, states=[active, expired, revoked], total=37 (active 37, expired 0, revoked 0), items=37, complete=true"
+    },
+    {
+      "id": "LND-R5-05-2",
+      "name": "the export carries no internal credential",
+      "status": "PASS",
+      "detail": "no key of the payload looks like a token, a hash, a secret or a password; the session rows carry id, createdAt, expiresAt, revokedAt, state, current"
+    }
+  ]
+}
