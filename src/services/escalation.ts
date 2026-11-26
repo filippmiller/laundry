@@ -34,8 +34,37 @@ const ESCALATION_EVENT_TYPES = ["order.escalated", "order.escalation_resolved"] 
 export type StuckOrderEscalation = {
   id: string;
   reason: string;
+  /** The person who owns the jam — the author of the escalation unless it was handed over. */
   assigneeId: string | null;
+  /** The name of the responsible person. A null name means "nobody is named yet". */
+  assigneeName: string | null;
+  /** The dispatcher who noticed the jam and opened the escalation. */
   escalatedBy: string;
+  escalatedByName: string | null;
+  createdAt: string;
+};
+
+/**
+ * An open escalation of the tenant, together with the order it belongs to.
+ *
+ * The escalation outlives the movement of its order: once a factory is assigned the order
+ * leaves the idle queue, but the escalation stays open and still has to be closed explicitly.
+ * This projection is the queue of those escalations, so the closing path stays reachable
+ * whatever happened to the order since.
+ */
+export type OpenEscalation = {
+  id: string;
+  orderId: string;
+  publicNumber: string;
+  lifecycleState: string;
+  customerName: string | null;
+  partnerId: string | null;
+  partnerName: string | null;
+  reason: string;
+  assigneeId: string | null;
+  assigneeName: string | null;
+  escalatedBy: string;
+  escalatedByName: string | null;
   createdAt: string;
 };
 
@@ -67,13 +96,39 @@ function toDate(value: Date | string | null | undefined): Date | null {
 }
 
 /**
- * The order of a tenant that stopped moving.
+ * The display names of the people an escalation names — the responsible one and the author.
  *
- * "Last activity" is the newer of the order's creation and its newest domain event: every
- * transition of an order writes an event, so the newest event is the honest answer — the
- * creation time alone would report every order that ever moved as idle since the day it was
- * placed. A terminal order is never stuck, so delivered, closed and cancelled orders are left
- * out entirely.
+ * A name is only reported when the user row actually carries one: an empty display name is
+ * not a name, and the interface has to be able to say "nobody is named" honestly.
+ */
+async function loadPeopleNames(db: Db | Tx, ids: Array<string | null>) {
+  const wanted = [...new Set(ids.filter((id): id is string => Boolean(id)))];
+  if (!wanted.length) return new Map<string, string>();
+  const rows = await db.select({ id: users.id, displayName: users.displayName })
+    .from(users)
+    .where(inArray(users.id, wanted));
+  const names = new Map<string, string>();
+  for (const row of rows) {
+    const name = row.displayName?.trim();
+    if (name) names.set(row.id, name);
+  }
+  return names;
+}
+
+/**
+ * The order of a tenant that stopped moving, and the escalations that are still open.
+ *
+ * Two queues, because they answer two different questions:
+ *
+ * - `items` — the orders that stand still. "Last activity" is the newer of the order's creation
+ *   and its newest domain event: every transition of an order writes an event, so the newest
+ *   event is the honest answer — the creation time alone would report every order that ever
+ *   moved as idle since the day it was placed. A terminal order is never stuck, so delivered,
+ *   closed and cancelled orders are left out entirely.
+ * - `escalations` — every open escalation of the tenant, whatever happened to its order since.
+ *   The escalation is a record of a jam, not a property of an idle order: once a factory is
+ *   assigned the order leaves `items`, but the escalation stays open and still has to be closed
+ *   explicitly. Keeping the two queues apart is what makes that closing path reachable.
  */
 export async function listStuckOrders(
   db: Db,
@@ -83,6 +138,52 @@ export async function listStuckOrders(
   assertRole(principal, ...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance);
   const minutes = Math.min(Math.max(Math.trunc(input.minutes ?? DEFAULT_IDLE_MINUTES), 1), 24 * 60);
   const cutoff = new Date(Date.now() - minutes * 60_000);
+
+  // Every open escalation of the tenant. The queue is read before the idle queue, because it
+  // must not depend on it: a terminal or freshly moved order keeps its escalation visible.
+  const openEscalations = await db.select({
+    id: orderEscalations.id,
+    orderId: orderEscalations.orderId,
+    reason: orderEscalations.reason,
+    assigneeId: orderEscalations.assigneeId,
+    escalatedBy: orderEscalations.escalatedBy,
+    createdAt: orderEscalations.createdAt,
+    publicNumber: orders.publicNumber,
+    lifecycleState: orders.lifecycleState,
+    customerName: users.displayName,
+    assignedPartnerId: orders.assignedPartnerId,
+    partnerName: partners.name,
+  }).from(orderEscalations)
+    .innerJoin(orders, eq(orders.id, orderEscalations.orderId))
+    .leftJoin(users, eq(users.id, orders.customerId))
+    .leftJoin(partners, eq(partners.id, orders.assignedPartnerId))
+    .where(and(
+      eq(orderEscalations.organizationId, principal.organizationId),
+      eq(orderEscalations.state, "open"),
+      eq(orders.organizationId, principal.organizationId),
+    ))
+    .orderBy(desc(orderEscalations.createdAt));
+
+  const peopleNames = await loadPeopleNames(
+    db,
+    openEscalations.flatMap(row => [row.assigneeId, row.escalatedBy]),
+  );
+
+  const escalations: OpenEscalation[] = openEscalations.map(row => ({
+    id: row.id,
+    orderId: row.orderId,
+    publicNumber: row.publicNumber,
+    lifecycleState: row.lifecycleState,
+    customerName: row.customerName?.trim() ? row.customerName : null,
+    partnerId: row.assignedPartnerId ?? null,
+    partnerName: row.partnerName ?? null,
+    reason: row.reason,
+    assigneeId: row.assigneeId ?? null,
+    assigneeName: row.assigneeId ? peopleNames.get(row.assigneeId) ?? null : null,
+    escalatedBy: row.escalatedBy,
+    escalatedByName: peopleNames.get(row.escalatedBy) ?? null,
+    createdAt: (toDate(row.createdAt) ?? new Date(0)).toISOString(),
+  }));
 
   const candidates = await db.select({
     id: orders.id,
@@ -104,38 +205,25 @@ export async function listStuckOrders(
     ))
     .orderBy(desc(orders.createdAt));
 
-  if (!candidates.length) return { thresholdMinutes: minutes, items: [] as StuckOrder[] };
+  if (!candidates.length) return { thresholdMinutes: minutes, items: [] as StuckOrder[], escalations };
 
   const orderIds = candidates.map(row => row.id);
 
-  const [events, escalations] = await Promise.all([
-    db.select({ orderId: outboxEvents.aggregateId, at: max(outboxEvents.createdAt) })
-      .from(outboxEvents)
-      .where(and(
-        eq(outboxEvents.aggregateType, "order"),
-        eq(outboxEvents.organizationId, principal.organizationId),
-        inArray(outboxEvents.aggregateId, orderIds),
-        // An escalation is a report about the jam, not progress on the order. Counting it as
-        // activity would hide the very order the dispatcher escalated a minute ago.
-        notInArray(outboxEvents.eventType, [...ESCALATION_EVENT_TYPES]),
-      ))
-      .groupBy(outboxEvents.aggregateId),
-    db.select({
-      id: orderEscalations.id,
-      orderId: orderEscalations.orderId,
-      reason: orderEscalations.reason,
-      assigneeId: orderEscalations.assigneeId,
-      escalatedBy: orderEscalations.escalatedBy,
-      createdAt: orderEscalations.createdAt,
-    }).from(orderEscalations)
-      .where(and(
-        eq(orderEscalations.organizationId, principal.organizationId),
-        eq(orderEscalations.state, "open"),
-        inArray(orderEscalations.orderId, orderIds),
-      )),
-  ]);
+  const events = await db.select({ orderId: outboxEvents.aggregateId, at: max(outboxEvents.createdAt) })
+    .from(outboxEvents)
+    .where(and(
+      eq(outboxEvents.aggregateType, "order"),
+      eq(outboxEvents.organizationId, principal.organizationId),
+      inArray(outboxEvents.aggregateId, orderIds),
+      // An escalation is a report about the jam, not progress on the order. Counting it as
+      // activity would hide the very order the dispatcher escalated a minute ago.
+      notInArray(outboxEvents.eventType, [...ESCALATION_EVENT_TYPES]),
+    ))
+    .groupBy(outboxEvents.aggregateId);
 
   const lastEventAt = new Map(events.map(event => [event.orderId, event.at]));
+  // Only the escalations of the listed orders belong to the idle queue; the rest of the open
+  // escalations travel in their own queue.
   const openEscalation = new Map(escalations.map(escalation => [escalation.orderId, escalation]));
   const now = Date.now();
 
@@ -165,9 +253,11 @@ export async function listStuckOrders(
         ? {
           id: escalation.id,
           reason: escalation.reason,
-          assigneeId: escalation.assigneeId ?? null,
+          assigneeId: escalation.assigneeId,
+          assigneeName: escalation.assigneeName,
           escalatedBy: escalation.escalatedBy,
-          createdAt: (toDate(escalation.createdAt) ?? new Date(0)).toISOString(),
+          escalatedByName: escalation.escalatedByName,
+          createdAt: escalation.createdAt,
         }
         : null,
     });
@@ -175,7 +265,7 @@ export async function listStuckOrders(
 
   // The longest jam first: that is the order that needs a person now.
   items.sort((left, right) => right.idleMinutes - left.idleMinutes);
-  return { thresholdMinutes: minutes, items };
+  return { thresholdMinutes: minutes, items, escalations };
 }
 
 /** Loads an order of the tenant or fails with 404 — a foreign order must stay invisible. */
@@ -196,6 +286,11 @@ async function loadOrder(tx: Db | Tx, principal: Principal, orderId: string) {
  * Escalates a stuck order: it names the person who noticed the jam, the reason and, when the
  * dispatcher knows it, the person who owns the fix.
  *
+ * The author of the escalation owns the jam by policy: whoever noticed that the order stopped
+ * is the one who has to close the case, unless the escalation is handed over to somebody else
+ * explicitly. An escalation without a responsible person is a record nobody has to close, so
+ * the author is written into `assignee_id` when no other person is named.
+ *
  * The order is locked for the transaction, so two dispatchers pressing the button at the same
  * moment cannot open two escalations of the same order. The second request returns the
  * escalation that is already open instead of a second jam record.
@@ -210,7 +305,8 @@ export async function escalateOrder(
   if (reason.length < MIN_REASON_LENGTH) {
     throw new AppError("VALIDATION_ERROR", "ESCALATION_REASON_REQUIRED");
   }
-  const assigneeId = input.assigneeId ?? null;
+  // The author is the responsible person unless the dispatcher named somebody else.
+  const assigneeId = input.assigneeId ?? principal.userId;
 
   return withIdempotencyFlat(db, {
     organizationId: principal.organizationId,
@@ -237,6 +333,7 @@ export async function escalateOrder(
       state: orderEscalations.state,
       reason: orderEscalations.reason,
       assigneeId: orderEscalations.assigneeId,
+      escalatedBy: orderEscalations.escalatedBy,
       createdAt: orderEscalations.createdAt,
     }).from(orderEscalations).where(and(
       eq(orderEscalations.organizationId, principal.organizationId),
@@ -246,12 +343,16 @@ export async function escalateOrder(
     if (alreadyOpen) {
       // The order is already escalated. A second open escalation would hide the real one,
       // so the existing record is returned and the jam keeps a single owner.
+      const names = await loadPeopleNames(tx, [alreadyOpen.assigneeId, alreadyOpen.escalatedBy]);
       return {
         escalationId: alreadyOpen.id,
         orderId: order.id,
         state: escalationState(alreadyOpen.state),
         reason: alreadyOpen.reason,
         assigneeId: alreadyOpen.assigneeId ?? null,
+        assigneeName: alreadyOpen.assigneeId ? names.get(alreadyOpen.assigneeId) ?? null : null,
+        escalatedBy: alreadyOpen.escalatedBy,
+        escalatedByName: names.get(alreadyOpen.escalatedBy) ?? null,
         created: false,
         createdAt: (toDate(alreadyOpen.createdAt) ?? new Date(0)).toISOString(),
       };
@@ -275,12 +376,16 @@ export async function escalateOrder(
       reason,
     });
 
+    const names = await loadPeopleNames(tx, [assigneeId, principal.userId]);
     return {
       escalationId: escalation.id,
       orderId: order.id,
       state: "open" as EscalationState,
       reason,
       assigneeId,
+      assigneeName: names.get(assigneeId) ?? null,
+      escalatedBy: principal.userId,
+      escalatedByName: names.get(principal.userId) ?? null,
       created: true,
       createdAt: (toDate(escalation.createdAt) ?? new Date(0)).toISOString(),
     };

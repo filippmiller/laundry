@@ -1169,9 +1169,10 @@ export function buildApp(db: Db) {
     handler: ctx => drainOutbox(db, ctx.principal),
   });
   add({
-    // The stuck list is the answer to "which order is nobody moving": every order that is not
-    // in a terminal state and has not been touched for longer than the threshold, together
-    // with the escalation that owns it, if there is one.
+    // Two queues in one answer. `items` is the jam queue: every order that is not in a terminal
+    // state and has not been touched for longer than the threshold. `escalations` is the queue
+    // of the open escalations of the tenant — they stay reachable even when the order moved on
+    // or was completed, so an open escalation can always be closed explicitly.
     method: "GET", path: "/ops/stuck-orders", summary: "Orders that stopped moving, with their open escalations", tags: ["Ops", "Dispatcher"],
     roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance],
     query: z.object({
