@@ -17,6 +17,7 @@ Customer, Courier, Driver (transport-only), HubWorker, LaundryOperator, LaundryS
 | Create/resolve claim | own create/read | incident report | incident report | incident report | evidence response | incident report | triage | investigate/recommend | payout | no unilateral denial |
 | Partner invoice | no | no | no | no | own partner view | no | no | disputed lines only | reconcile/pay | contracts |
 | Configure tariffs | no | no | no | no | no | no | no | no | review | versioned publish |
+| Escalate a stuck order / close the escalation | no | no | no | no | no | own city (escalate and close) | no | no | read the list | escalate and close |
 | Access audit logs | own history | own actions | own actions | own actions | own actions | ops scoped | case scoped | case scoped | finance scoped | security role |
 
 ## Field-level security

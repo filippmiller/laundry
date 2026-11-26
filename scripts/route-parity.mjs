@@ -71,6 +71,26 @@ const INDIRECT = new Map([
   ["/slots/holds", "single hold — by design, the UI books pairs (TRIA-008)"],
 ]);
 
+/**
+ * Paths that reach the API through a helper instead of a direct `api()` call.
+ *
+ * A custom hook or loader takes the endpoint as its first argument and puts it
+ * into the client itself, so the literal never appears inside an `api(...)`
+ * call. The scan cannot follow that indirection on its own, but it CAN see the
+ * literal, and a route that is only reachable this way must not be reported as
+ * an orphan without a word about it — the reviewer then has to judge whether
+ * the helper really calls the API.
+ *
+ * This stays a static scan: a literal that a helper never sends to the server
+ * would still be counted as reachable here. That is why such a route is
+ * annotated rather than silently accepted, and why the live acceptance
+ * (npm run verify:wave7) is the proof.
+ */
+const indirectCalls = new Set();
+for (const m of webSrc.matchAll(/\b(?:use[A-Z]\w*|load[A-Z]\w*)\(\s*([`"'])(\/[^\s`"']*)\1/g)) {
+  indirectCalls.add(normalise(m[2]));
+}
+
 const segMatch = (call, route) => {
   const cs = call.split("/").filter(Boolean);
   const rs = route.replace(/^\//, "").split("/").filter(Boolean);
@@ -78,14 +98,20 @@ const segMatch = (call, route) => {
   return rs.every((seg, i) => seg.startsWith(":") || seg === cs[i] || cs[i] === ":param");
 };
 
-console.log("ROUTES:", routes.length, "| CALL PATHS:", calls.size);
+console.log("ROUTES:", routes.length, "| CALL PATHS:", calls.size, "| HELPER PATHS:", indirectCalls.size);
 
 const orphans = routes.filter(r => ![...calls].some(c => segMatch(c, r)));
 
-console.log("\n=== ROUTES WITH NO UI CALLER (verified by static scan) ===");
+console.log("\n=== ROUTES WITH NO DIRECT UI CALLER (verified by static scan) ===");
 for (const r of orphans) {
   const note = INDIRECT.get(r);
-  console.log(`   ${r}${note ? `   — ${note}` : ""}`);
+  const viaHelper = [...indirectCalls].some(c => segMatch(c, r));
+  const suffix = note
+    ? `   — ${note}`
+    : viaHelper
+      ? "   — reached through a helper (the literal is a helper argument): confirm with a live check"
+      : "";
+  console.log(`   ${r}${suffix}`);
 }
 
 console.log("\n=== WEB CALL PATHS WITH NO MATCHING ROUTE ===");

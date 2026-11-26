@@ -23,6 +23,7 @@
     "smoke:live": "node scripts/verify-preview-live.mjs",
     "verify:routes": "node scripts/route-parity.mjs",
     "verify:wave6": "node scripts/verify-wave6.mjs",
+    "verify:wave7": "node scripts/verify-wave7.mjs",
     "verify:mobile": "node scripts/verify-mobile-layout.mjs",
     "db:seed": "tsx src/scripts/seed-demo.ts",
     "db:drill": "tsx scripts/upgrade-restore-drill.ts",
