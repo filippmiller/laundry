@@ -11,6 +11,16 @@ import {
   orderStateTone,
   stateLabel,
 } from "../labels";
+import { type EscalationCapabilities } from "./escalation-capabilities";
+
+/**
+ * The escalation capabilities of the session.
+ *
+ * The implementation lives in a DOM-free module so that it can be proven by a unit test; the
+ * panel re-exports it, so the workspaces have a single import for it.
+ */
+export { escalationCapabilities } from "./escalation-capabilities";
+export type { EscalationCapabilities } from "./escalation-capabilities";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -316,7 +326,9 @@ type StuckEscalation = {
   id: string;
   reason: string;
   assigneeId: string | null;
+  assigneeName: string | null;
   escalatedBy: string;
+  escalatedByName: string | null;
   createdAt: string;
 };
 type StuckOrderRow = {
@@ -330,9 +342,22 @@ type StuckOrderRow = {
   partnerName: string | null;
   escalation: StuckEscalation | null;
 };
+type OpenEscalationRow = {
+  id: string;
+  orderId: string;
+  publicNumber: string;
+  lifecycleState: string;
+  reason: string;
+  assigneeId: string | null;
+  assigneeName: string | null;
+  escalatedBy: string;
+  escalatedByName: string | null;
+  createdAt: string;
+};
 type StuckOrdersResponse = {
   thresholdMinutes: number;
   items: StuckOrderRow[];
+  escalations: OpenEscalationRow[];
 };
 
 /** How long the order has stood still, in words the dispatcher reads at a glance. */
@@ -344,19 +369,37 @@ function formatIdle(minutes: number): string {
 }
 
 /**
- * The orders that stopped moving, and the escalation that owns each of them.
+ * Who owns the escalation.
+ *
+ * An escalation always names a responsible person: the dispatcher who opened it owns the jam
+ * until it is handed over. The rows that predate that rule carry no assignee at all, and those
+ * say so instead of pretending somebody is in charge.
+ */
+function responsibleName(escalation: { assigneeName: string | null }): string {
+  return escalation.assigneeName?.trim() ? escalation.assigneeName : "не назначен";
+}
+
+/**
+ * The orders that stopped moving, and the escalations that are still open.
  *
  * Before this panel a jammed order — one sitting in the hub without a factory, one whose
  * factory never answered — simply vanished from the dispatcher screens: no route showed it,
  * nobody owned it and the lifecycle had no way out of it. Here the jam is named, given a
  * reason and closed with a resolution, so the same order cannot get stuck unnoticed twice.
+ *
+ * The two queues are apart on purpose. The order queue answers "which order is nobody moving",
+ * and it drops the order as soon as the order moves. The escalation queue answers "which jam is
+ * still open", and it keeps the case until somebody closes it with a reason — otherwise an
+ * escalation would lose its way to be closed the moment a factory was assigned.
  */
 export function StuckOrdersPanel({
   notify,
   refreshToken,
+  capabilities,
 }: {
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
   refreshToken?: number;
+  capabilities: EscalationCapabilities;
 }) {
   const [data, setData] = useState<StuckOrdersResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -385,8 +428,9 @@ export function StuckOrdersPanel({
   }, [load, refreshToken]);
 
   const rows = data?.items ?? [];
+  const escalations = data?.escalations ?? [];
   const escalating = rows.find(row => row.orderId === escalatingId) ?? null;
-  const resolving = rows.find(row => row.escalation?.id === resolvingId) ?? null;
+  const resolving = escalations.find(row => row.id === resolvingId) ?? null;
 
   async function handleEscalate() {
     if (!escalating || reason.trim().length < 3) {
@@ -411,13 +455,13 @@ export function StuckOrdersPanel({
   }
 
   async function handleResolve() {
-    if (!resolving?.escalation || resolution.trim().length < 3) {
+    if (!resolving || resolution.trim().length < 3) {
       notify({ kind: "error", text: "Укажите, чем закончилась эскалация (минимум 3 символа)." });
       return;
     }
     setBusy(true);
     try {
-      await api(`/escalations/${resolving.escalation.id}/resolve`, {
+      await api(`/escalations/${resolving.id}/resolve`, {
         method: "POST",
         body: { resolution: resolution.trim() },
       });
@@ -432,7 +476,7 @@ export function StuckOrdersPanel({
     }
   }
 
-  const columns: DataTableColumn<StuckOrderRow>[] = [
+  const orderColumns: DataTableColumn<StuckOrderRow>[] = [
     { key: "number", header: "Номер", render: row => <span className="mono">{row.publicNumber}</span> },
     {
       key: "state",
@@ -464,6 +508,7 @@ export function StuckOrdersPanel({
             {stateLabel(ESCALATION_STATE_LABELS, "open")}
           </Badge>
           <span className="muted">{row.escalation.reason}</span>
+          <span className="muted">Ответственный: {responsibleName(row.escalation)}</span>
         </div>
       ) : (
         <span className="muted">—</span>
@@ -475,18 +520,10 @@ export function StuckOrdersPanel({
       render: row => (
         <div className="button-row">
           {row.escalation ? (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy}
-              onClick={() => {
-                setResolvingId(row.escalation?.id ?? null);
-                setResolution("");
-              }}
-            >
-              Снять эскалацию
-            </Button>
-          ) : (
+            // The escalation is closed in the queue of open escalations — the same case is
+            // listed there, and there it can be closed even if the order has moved on.
+            <span className="muted">Открытая эскалация</span>
+          ) : capabilities.canEscalate ? (
             <Button
               size="sm"
               variant="primary"
@@ -498,6 +535,56 @@ export function StuckOrdersPanel({
             >
               Эскалировать
             </Button>
+          ) : (
+            <span className="muted">—</span>
+          )}
+        </div>
+      ),
+    },
+  ];
+
+  const escalationColumns: DataTableColumn<OpenEscalationRow>[] = [
+    { key: "number", header: "Заказ", render: row => <span className="mono">{row.publicNumber}</span> },
+    {
+      key: "state",
+      header: "Состояние заказа",
+      render: row => (
+        <Badge tone={orderStateTone(row.lifecycleState)}>
+          {stateLabel(ORDER_STATE_LABELS, row.lifecycleState)}
+        </Badge>
+      ),
+    },
+    { key: "reason", header: "Причина", render: row => <span>{row.reason}</span> },
+    {
+      key: "responsible",
+      header: "Ответственный",
+      render: row => (
+        <div className="stack stack--tight">
+          <span>{responsibleName(row)}</span>
+          <span className="muted">Открыл: {row.escalatedByName?.trim() ? row.escalatedByName : "—"}</span>
+        </div>
+      ),
+    },
+    { key: "opened", header: "Открыта", render: row => <span className="mono">{dt(row.createdAt)}</span> },
+    {
+      key: "actions",
+      header: "Действия",
+      render: row => (
+        <div className="button-row">
+          {capabilities.canResolve ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => {
+                setResolvingId(row.id);
+                setResolution("");
+              }}
+            >
+              Снять эскалацию
+            </Button>
+          ) : (
+            <span className="muted">—</span>
           )}
         </div>
       ),
@@ -505,112 +592,156 @@ export function StuckOrdersPanel({
   ];
 
   return (
-    <Card as="section">
-      <CardHeader
-        title="Застрявшие заказы"
-        subtitle="Заказы без движения дольше 30 минут — с ответственным и причиной"
-        actions={
-          data ? (
-            <Badge tone={rows.length > 0 ? "warn" : "ok"}>
-              {rows.length > 0 ? `Застряло: ${rows.length}` : "Застрявших нет"}
-            </Badge>
-          ) : null
-        }
-      />
-      <CardBody className="stack">
-        {loading ? (
-          <p className="muted">Загрузка…</p>
-        ) : error ? (
-          <p className="muted" role="alert">
-            Не удалось загрузить застрявшие заказы: {error}
-          </p>
-        ) : (
-          <DataTable
-            columns={columns}
-            rows={rows}
-            rowKey={row => row.orderId}
-            caption="Заказы, которые не двигаются дольше порога"
-            empty={
-              <EmptyState
-                icon={<CheckCircle2 size={20} aria-hidden="true" />}
-                title="Застрявших заказов нет."
-                text="Все заказы в работе двигаются."
+    <>
+      <Card as="section">
+        <CardHeader
+          title="Открытые эскалации"
+          subtitle="Эскалации, которые ещё не закрыты — даже если заказ уже поехал"
+          actions={
+            data ? (
+              <Badge tone={escalations.length > 0 ? "warn" : "ok"}>
+                {escalations.length > 0 ? `Открытых: ${escalations.length}` : "Открытых нет"}
+              </Badge>
+            ) : null
+          }
+        />
+        <CardBody className="stack">
+          {!capabilities.canEscalate && !capabilities.canResolve ? (
+            <p className="muted">
+              Режим просмотра: ваша роль читает эскалации, но не открывает и не закрывает их.
+            </p>
+          ) : null}
+          {loading ? (
+            <p className="muted">Загрузка…</p>
+          ) : error ? (
+            <p className="muted" role="alert">
+              Не удалось загрузить эскалации: {error}
+            </p>
+          ) : (
+            <DataTable
+              columns={escalationColumns}
+              rows={escalations}
+              rowKey={row => row.id}
+              caption="Открытые эскалации заказов"
+              empty={
+                <EmptyState
+                  icon={<CheckCircle2 size={20} aria-hidden="true" />}
+                  title="Открытых эскалаций нет."
+                  text="Все замеченные заторы закрыты."
+                />
+              }
+            />
+          )}
+
+          {resolving && (
+            <div className="panel-muted stack">
+              <div className="alert-banner">
+                Заказ {resolving.publicNumber}: «{resolving.reason}». Опишите, чем закончилась
+                эскалация, — запись останется в истории заказа.
+              </div>
+              <Textarea
+                label="Итог эскалации (минимум 3 символа)"
+                placeholder="Например, фабрика назначена, заказ передан в обработку"
+                value={resolution}
+                disabled={busy}
+                onChange={event => setResolution(event.target.value)}
               />
-            }
-          />
-        )}
+              <div className="button-row">
+                <Button
+                  variant="primary"
+                  disabled={busy || resolution.trim().length < 3}
+                  onClick={() => void handleResolve()}
+                >
+                  {busy ? "Снимаем…" : "Снять эскалацию"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setResolvingId(null);
+                    setResolution("");
+                  }}
+                >
+                  Отмена
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardBody>
+      </Card>
 
-        {escalating && (
-          <div className="panel-muted stack">
-            <div className="alert-banner">
-              Заказ {escalating.publicNumber} стоит {formatIdle(escalating.idleMinutes)}. Укажите причину,
-              по которой он застрял, — она станет частью истории заказа.
-            </div>
-            <Textarea
-              label="Причина эскалации (минимум 3 символа)"
-              placeholder="Например, заказ на сортировочном хабе, фабрика не назначена"
-              value={reason}
-              disabled={busy}
-              onChange={event => setReason(event.target.value)}
+      <Card as="section">
+        <CardHeader
+          title="Застрявшие заказы"
+          subtitle={`Заказы без движения дольше ${data?.thresholdMinutes ?? 30} минут — с ответственным и причиной`}
+          actions={
+            data ? (
+              <Badge tone={rows.length > 0 ? "warn" : "ok"}>
+                {rows.length > 0 ? `Застряло: ${rows.length}` : "Застрявших нет"}
+              </Badge>
+            ) : null
+          }
+        />
+        <CardBody className="stack">
+          {loading ? (
+            <p className="muted">Загрузка…</p>
+          ) : error ? (
+            <p className="muted" role="alert">
+              Не удалось загрузить застрявшие заказы: {error}
+            </p>
+          ) : (
+            <DataTable
+              columns={orderColumns}
+              rows={rows}
+              rowKey={row => row.orderId}
+              caption="Заказы, которые не двигаются дольше порога"
+              empty={
+                <EmptyState
+                  icon={<CheckCircle2 size={20} aria-hidden="true" />}
+                  title="Застрявших заказов нет."
+                  text="Все заказы в работе двигаются."
+                />
+              }
             />
-            <div className="button-row">
-              <Button
-                variant="primary"
-                disabled={busy || reason.trim().length < 3}
-                onClick={() => void handleEscalate()}
-              >
-                {busy ? "Эскалируем…" : "Эскалировать"}
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={busy}
-                onClick={() => {
-                  setEscalatingId(null);
-                  setReason("");
-                }}
-              >
-                Отмена
-              </Button>
-            </div>
-          </div>
-        )}
+          )}
 
-        {resolving?.escalation && (
-          <div className="panel-muted stack">
-            <div className="alert-banner">
-              Заказ {resolving.publicNumber}: «{resolving.escalation.reason}». Опишите, чем закончилась
-              эскалация, — запись останется в истории заказа.
-            </div>
-            <Textarea
-              label="Итог эскалации (минимум 3 символа)"
-              placeholder="Например, фабрика назначена, заказ передан в обработку"
-              value={resolution}
-              disabled={busy}
-              onChange={event => setResolution(event.target.value)}
-            />
-            <div className="button-row">
-              <Button
-                variant="primary"
-                disabled={busy || resolution.trim().length < 3}
-                onClick={() => void handleResolve()}
-              >
-                {busy ? "Снимаем…" : "Снять эскалацию"}
-              </Button>
-              <Button
-                variant="ghost"
+          {escalating && capabilities.canEscalate && (
+            <div className="panel-muted stack">
+              <div className="alert-banner">
+                Заказ {escalating.publicNumber} стоит {formatIdle(escalating.idleMinutes)}. Укажите причину,
+                по которой он застрял, — она станет частью истории заказа.
+              </div>
+              <Textarea
+                label="Причина эскалации (минимум 3 символа)"
+                placeholder="Например, заказ на сортировочном хабе, фабрика не назначена"
+                value={reason}
                 disabled={busy}
-                onClick={() => {
-                  setResolvingId(null);
-                  setResolution("");
-                }}
-              >
-                Отмена
-              </Button>
+                onChange={event => setReason(event.target.value)}
+              />
+              <div className="button-row">
+                <Button
+                  variant="primary"
+                  disabled={busy || reason.trim().length < 3}
+                  onClick={() => void handleEscalate()}
+                >
+                  {busy ? "Эскалируем…" : "Эскалировать"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setEscalatingId(null);
+                    setReason("");
+                  }}
+                >
+                  Отмена
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
-      </CardBody>
-    </Card>
+          )}
+        </CardBody>
+      </Card>
+    </>
   );
 }
 

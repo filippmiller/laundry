@@ -66,11 +66,11 @@ export function Router({
       case "partner":
         return <PartnerWorkspace notify={setNotice} roles={me.roles} />;
       case "dispatcher":
-        return <DispatcherWorkspace notify={setNotice} />;
+        return <DispatcherWorkspace notify={setNotice} roles={me.roles} />;
       case "admin":
         return <AdminWorkspace notify={setNotice} roles={me.roles} />;
       case "finance":
-        return <FinanceWorkspace demo={demo} notify={setNotice} />;
+        return <FinanceWorkspace demo={demo} notify={setNotice} roles={me.roles} />;
       case "support":
         return <SupportClaimsWorkspace notify={setNotice} roles={me.roles} />;
       default:

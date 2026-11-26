@@ -16,7 +16,7 @@ import {
   stateLabel,
 } from "../labels";
 import { ChronometryPanel, ChurnPanel, ItemMixPanel } from "./analytics-panels";
-import { PickupQueuePanel, StuckOrdersPanel } from "./ops-panels";
+import { PickupQueuePanel, StuckOrdersPanel, escalationCapabilities } from "./ops-panels";
 import { Badge, type BadgeTone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -226,8 +226,11 @@ const CAPACITY_DRIFT_COLUMNS: DataTableColumn<CapacityMismatch>[] = [
 
 export function DispatcherWorkspace({
   notify,
+  roles,
 }: {
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
+  /** The session roles: the panel only offers the escalation actions the server allows them. */
+  roles: string[];
 }) {
   const [data, setData] = useState<DispatchOverview | null>(null);
   const [metrics, setMetrics] = useState<Metric | null>(null);
@@ -884,7 +887,11 @@ export function DispatcherWorkspace({
       <ChurnPanel notify={notify} refreshToken={refreshNonce} />
 
       {/* 10. Заказы, которые застряли: у них теперь есть владелец и причина */}
-      <StuckOrdersPanel notify={notify} refreshToken={refreshNonce} />
+      <StuckOrdersPanel
+        notify={notify}
+        refreshToken={refreshNonce}
+        capabilities={escalationCapabilities(roles)}
+      />
 
     </div>
   );

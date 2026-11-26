@@ -45,7 +45,7 @@ import {
 import { FinanceMoneyPanel } from "./analytics-panels";
 import { FinanceDisputesPanel } from "./partner-money-panels";
 import { notifyPartnerMoneyChanged, subscribeToPartnerMoneyRefresh } from "./partner-money-refresh";
-import { FiscalReceiptsPanel, StuckOrdersPanel } from "./ops-panels";
+import { escalationCapabilities, FiscalReceiptsPanel, StuckOrdersPanel } from "./ops-panels";
 import { useUrlState } from "../hooks/useUrlState";
 
 type InvoiceItem = {
@@ -203,9 +203,12 @@ function defaultPeriodDates(): { start: string; end: string } {
 export function FinanceWorkspace({
   demo,
   notify,
+  roles,
 }: {
   demo: DemoConfig | null;
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
+  /** The roles of the session — the panels decide what the operator may do with them. */
+  roles: string[];
 }) {
   const [overview, setOverview] = useState<FinanceOverviewResponse>({});
   const [reconciliation, setReconciliation] = useState<ReconciliationResponse>({});
@@ -826,7 +829,11 @@ export function FinanceWorkspace({
       <FiscalReceiptsPanel notify={notify} refreshToken={refreshNonce} />
 
       {/* 0c. Застрявшие заказы: у заказа в простое должен быть ответственный и причина */}
-      <StuckOrdersPanel notify={notify} refreshToken={refreshNonce} />
+      <StuckOrdersPanel
+        notify={notify}
+        refreshToken={refreshNonce}
+        capabilities={escalationCapabilities(roles)}
+      />
 
       {/* 1. Финансовая сверка и дрифт */}
       <section className="panel" aria-labelledby="finance-reconciliation-heading">
