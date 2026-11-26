@@ -25,6 +25,11 @@ coverage/
 temp/
 .evidence-storage/
 
+# Worker heartbeat: written by the worker after every successful cycle and read by the
+# worker's own health probe (scripts/worker-health.mjs). It is runtime state, not a source file.
+.worker-heartbeat
+.worker-heartbeat.tmp
+
 # Local agent runtime configuration. `.agents/skills/` is part of the repository; these three
 # are machine-local hooks and rules that point at absolute paths outside this checkout.
 .agents/hooks.json
