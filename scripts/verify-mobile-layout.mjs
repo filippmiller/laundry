@@ -18,6 +18,23 @@
  * therefore waits for the page to settle before it measures anything, and it
  * takes the reference position immediately before the drawer is opened.
  *
+ * Three rules keep the probe honest about what it measures:
+ *
+ * 1. It says WHAT it measures. The same sources behave differently when the
+ *    Vite dev server serves them (unbundled modules, hot reload) than when
+ *    the built app of `dist/web` is served, so a combination that fails
+ *    against one of them may fail because of the way the app is served. The
+ *    probe looks at the delivered HTML, names the target in its output and
+ *    repeats it in the summary: a green run against the dev server is not a
+ *    certification of the built app, and the summary says exactly that.
+ * 2. A missing witness is a failure, not a pass. If there is no element under
+ *    the viewport there is nothing to measure, and a probe that cannot
+ *    measure must not report success — the combination fails with the reason
+ *    ("no anchor element under the viewport").
+ * 3. The jump caused by opening the drawer belongs to the drawer. The
+ *    measurement window starts at the click on the menu button, so that jump
+ *    is counted and attributed to its phase instead of being dropped.
+ *
  * Usage (the stack must be running and serving the built web app):
  *   node scripts/verify-mobile-layout.mjs
  *   APP_URL=http://127.0.0.1:3010 node scripts/verify-mobile-layout.mjs
@@ -42,6 +59,14 @@ const WORKSPACE_OF = {
 const QUIET_MS = 1200;
 /** Upper bound for the wait: a page that never settles is a finding of its own. */
 const SETTLE_TIMEOUT_MS = 20000;
+/**
+ * Markers of a Vite dev server in the delivered HTML. The dev server serves
+ * the sources unbundled and injects its own client, so the very same tree
+ * behaves differently from the built app of `dist/web`.
+ */
+const VITE_MARKERS = ["/@vite/client", "/@react-refresh", "__vite", "/@fs/", "/src/main.tsx?t="];
+/** The fingerprint of a built app: bundles under /assets/ with a content hash. */
+const BUILT_ASSET = /\/assets\/[A-Za-z0-9_.-]*[.-][A-Za-z0-9_-]{8,}\.(?:js|css)/;
 
 const results = [];
 
@@ -82,6 +107,33 @@ function installActivityMeter() {
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+}
+
+/**
+ * Determines what the probe is about to measure: the built app of `dist/web`
+ * or a Vite dev server.
+ *
+ * WHY this is not a detail: the probe is a blocking gate, and the same source
+ * tree can behave differently depending on how it is served. A reader of the
+ * output has to be able to tell a defect of the product from a feature of the
+ * way the app is delivered, so the probe names its target instead of leaving
+ * it to be guessed.
+ */
+async function detectTarget(base) {
+  try {
+    const res = await fetch(base, { headers: { accept: "text/html" } });
+    const html = await res.text();
+    const markers = VITE_MARKERS.filter(marker => html.includes(marker));
+    if (markers.length) {
+      return { kind: "vite-dev", label: "Vite dev server", evidence: markers };
+    }
+    if (BUILT_ASSET.test(html)) {
+      return { kind: "built", label: "built web app (dist/web)", evidence: ["/assets/<hashed bundle>"] };
+    }
+    return { kind: "unknown", label: "unknown origin", evidence: [] };
+  } catch (err) {
+    return { kind: "unreachable", label: `unreachable (${err.message})`, evidence: [] };
+  }
 }
 
 async function loginAs(context, role) {
@@ -251,6 +303,10 @@ async function setPhase(page, phase) {
  * compensates the offset when a late panel changes the layout above the
  * reading position. Both move the number while the visible content stays
  * where it was. The element under the viewport is the witness that counts.
+ *
+ * A missing witness is reported as a failure of the combination, not as
+ * "nothing to check": a probe that has no witness cannot certify anything, and
+ * a silent pass would turn an unmeasurable page into a green result.
  */
 async function pickAnchor(page) {
   return page.evaluate(() => {
@@ -258,21 +314,31 @@ async function pickAnchor(page) {
     const y = Math.round(window.innerHeight / 2);
     const element = document.elementFromPoint(x, y);
     const anchor = element?.closest("section, article, .panel, .card") ?? element;
-    if (!anchor) return null;
+    if (!anchor) {
+      return { ok: false, reason: "no anchor element under the viewport" };
+    }
     anchor.setAttribute("data-mobile-probe-anchor", "1");
     const rect = anchor.getBoundingClientRect();
-    return { top: Math.round(rect.top), height: Math.round(rect.height) };
+    return { ok: true, top: Math.round(rect.top), height: Math.round(rect.height) };
   });
 }
 
-/** Where the marked element sits in the viewport now. */
-async function readAnchor(page) {
-  return page.evaluate(() => {
+/**
+ * Where the marked element sits in the viewport now.
+ *
+ * The element can be gone: the workspace re-renders, and the marked node
+ * leaves the page. That is a measurement that did not happen, so it is
+ * reported with the reason instead of being read as a position.
+ */
+async function readAnchor(page, missingReason = "the anchor element left the page") {
+  return page.evaluate(reason => {
     const anchor = document.querySelector("[data-mobile-probe-anchor]");
-    if (!anchor) return null;
+    if (!anchor) {
+      return { ok: false, reason };
+    }
     const rect = anchor.getBoundingClientRect();
-    return { top: Math.round(rect.top), height: Math.round(rect.height) };
-  });
+    return { ok: true, top: Math.round(rect.top), height: Math.round(rect.height) };
+  }, missingReason);
 }
 
 /**
@@ -293,10 +359,12 @@ async function measureDrawer(page, { toggle, layoutWidth, tag }) {
   let drawer = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     drawer = await measureDrawerOnce(page, { toggle, layoutWidth, tag });
-    // The anchor vanished: the workspace re-rendered the element under the
+    // The witness was lost: the workspace re-rendered the element under the
     // viewport, so the measurement has to be taken again on the new content.
-    if (!drawer.anchorLost) return drawer;
-    console.log(`  (${tag}): the element under the viewport was re-rendered, the measurement is repeated (${attempt}/${attempts})`);
+    // A witness that was never there is not a reason to keep measuring — it
+    // is a failure of the combination, and the reason says so.
+    if (!drawer.anchorLost && !drawer.anchorMissing) return drawer;
+    console.log(`  (${tag}): the witness under the viewport was lost (${attempt}/${attempts}), the measurement is repeated`);
   }
   return drawer;
 }
@@ -311,7 +379,12 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   const anchorBefore = await pickAnchor(page);
   const scrollAtClick = await page.evaluate(() => window.scrollY);
   const sampleMark = await page.evaluate(() => window.__samples.length);
+  // The window of the measurement starts HERE, before the click: the jump the
+  // opening of the drawer causes belongs to the drawer, so it has to be inside
+  // the window. The mark is taken right after the phase is set — a mark taken
+  // after the drawer is open would drop exactly the moves that matter.
   await setPhase(page, "opening");
+  const openingMark = await page.evaluate(() => window.__phaseMark);
   await toggle.click();
   await waitForRailState(page, "true");
   await setPhase(page, "open");
@@ -319,37 +392,32 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   await page.screenshot({ path: path.join(OUT, `after-${tag}-drawer.png`) });
   const drawer = await measure(page);
   drawer.scrollAtClick = scrollAtClick;
-  drawer.anchorBefore = anchorBefore;
+  drawer.anchorBefore = anchorBefore.ok ? { top: anchorBefore.top, height: anchorBefore.height } : null;
+  drawer.anchorMissing = !anchorBefore.ok;
 
-  const anchorOpen = await readAnchor(page);
-  drawer.anchorOpen = anchorOpen;
-  drawer.anchorLost = anchorBefore !== null && anchorOpen === null;
+  const anchorOpen = await readAnchor(page, "the anchor element disappeared while the drawer was open");
+  drawer.anchorOpen = anchorOpen.ok ? { top: anchorOpen.top, height: anchorOpen.height } : null;
+  drawer.anchorLost = anchorBefore.ok && !anchorOpen.ok;
   // The content the user was reading has to stay exactly where it was.
   drawer.anchorHeldWhileOpen =
-    anchorBefore === null || anchorOpen === null
+    !anchorBefore.ok || !anchorOpen.ok
       ? null
       : Math.abs(anchorOpen.top - anchorBefore.top) <= 2;
-
-  // Every move of the offset since the drawer was opened. A move is reported,
-  // but it is not a defect on its own: the number of the offset changes when
-  // the browser compensates it, while the content stays where it was.
-  const moves = await page.evaluate(mark => window.__samples.slice(mark), sampleMark);
-  const clickMark = await page.evaluate(() => window.__phaseMark);
-  drawer.movesWhileOpen = moves.filter(entry => entry.t >= clickMark);
 
   // (d) the page behind the drawer must not scroll. The user scrolls with a
   // wheel, not with scrollTo(): `overflow: hidden` blocks the user, while a
   // programmatic jump is still allowed.
   const yBeforeWheel = await page.evaluate(() => window.scrollY);
-  const anchorBeforeWheel = await readAnchor(page);
+  const anchorBeforeWheel = await readAnchor(page, "the anchor element disappeared before the wheel");
+  await setPhase(page, "wheel");
   await page.mouse.move(Math.round(layoutWidth * 0.8), 400);
   await page.mouse.wheel(0, 600);
   await page.waitForTimeout(350);
   drawer.scrollBehind = await page.evaluate(() => window.scrollY);
   drawer.scrollBehindMoved = drawer.scrollBehind !== yBeforeWheel;
-  const anchorAfterWheel = await readAnchor(page);
+  const anchorAfterWheel = await readAnchor(page, "the anchor element disappeared while the wheel was turning");
   drawer.anchorMovedByWheel =
-    anchorBeforeWheel === null || anchorAfterWheel === null
+    !anchorBeforeWheel.ok || !anchorAfterWheel.ok
       ? null
       : Math.abs(anchorAfterWheel.top - anchorBeforeWheel.top) > 2;
 
@@ -360,22 +428,83 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   await setPhase(page, "closed");
   await waitForSettledPage(page, 600);
   drawer.scrollAfterClose = await page.evaluate(() => window.scrollY);
-  const anchorClosed = await readAnchor(page);
-  drawer.anchorClosed = anchorClosed;
+  const anchorClosed = await readAnchor(page, "the anchor element disappeared after the drawer was closed");
+  drawer.anchorClosed = anchorClosed.ok ? { top: anchorClosed.top, height: anchorClosed.height } : null;
   // The reading position has to come back to the place the user left it.
   drawer.anchorRestored =
-    anchorBefore === null || anchorClosed === null
+    !anchorBefore.ok || !anchorClosed.ok
       ? null
       : Math.abs(anchorClosed.top - anchorBefore.top) <= 2;
   drawer.railOpenAfterClose = await page.evaluate(
     () => document.querySelector(".app-shell")?.getAttribute("data-rail-open"),
   );
+
+  // Every move of the offset since the drawer was opened, attributed to the
+  // phase it happened in. A move is reported, but it is not a defect on its
+  // own: the number of the offset changes when the browser compensates it,
+  // while the content stays where it was.
+  //
+  // The samples are read at the very end of the measurement, so the phases of
+  // the wheel and of the closing are part of the picture too.
+  const moves = await page.evaluate(mark => window.__samples.slice(mark), sampleMark);
+  const movesByPhase = {};
+  for (const move of moves) {
+    const phase = move.phase ?? "before";
+    movesByPhase[phase] = (movesByPhase[phase] ?? 0) + 1;
+  }
+  drawer.movesByPhase = movesByPhase;
+  // The window opens at the click on the menu button, so the jump caused by
+  // the opening of the drawer is part of the measurement and not a lost
+  // sample that happens to sit between two marks.
+  drawer.movesWhileOpen = moves.filter(
+    entry => entry.t >= openingMark && (entry.phase === "opening" || entry.phase === "open"),
+  );
+  drawer.movesWhileClosing = moves.filter(
+    entry => entry.t >= openingMark && (entry.phase === "closing" || entry.phase === "closed"),
+  );
+  drawer.movesByWheel = moves.filter(entry => entry.phase === "wheel");
+
+  // Everything that could not be measured is collected here and reported as a
+  // failure of the combination. A measurement that did not happen must never
+  // be read as a measurement that passed.
+  drawer.anchorProblems = collectAnchorProblems({
+    anchorBefore,
+    anchorOpen,
+    anchorBeforeWheel,
+    anchorAfterWheel,
+    anchorClosed,
+  });
   await page.screenshot({ path: path.join(OUT, `after-${tag}-drawer-closed.png`) });
   return drawer;
 }
 
+/**
+ * The reasons why the witness was not available for the whole measurement.
+ *
+ * The first missing witness explains all the others: without an anchor there
+ * is nothing to mark, so the later reads cannot find anything either. Only
+ * the first reason of a chain is reported — otherwise one missing element
+ * would produce three failures of the same combination.
+ */
+function collectAnchorProblems({ anchorBefore, anchorOpen, anchorBeforeWheel, anchorAfterWheel, anchorClosed }) {
+  if (!anchorBefore.ok) return [anchorBefore.reason];
+  const problems = [];
+  if (!anchorOpen.ok) problems.push(anchorOpen.reason);
+  else if (!anchorBeforeWheel.ok) problems.push(anchorBeforeWheel.reason);
+  else if (!anchorAfterWheel.ok) problems.push(anchorAfterWheel.reason);
+  else if (!anchorClosed.ok) problems.push(anchorClosed.reason);
+  return problems;
+}
+
 async function run() {
   await mkdir(OUT, { recursive: true });
+  // The target is named before the first measurement: the reader has to know
+  // what the numbers of this run are about — the built app of dist/web or the
+  // Vite dev server.
+  const target = await detectTarget(BASE);
+  console.log(
+    `target: ${BASE} — ${target.label}${target.evidence.length ? ` [marker: ${target.evidence.join(", ")}]` : ""}`,
+  );
   const browser = await chromium.launch();
 
   for (const width of WIDTHS) {
@@ -416,7 +545,7 @@ async function run() {
           drawer = await measureDrawer(page, { toggle, layoutWidth, tag });
         }
 
-        results.push({ tag, width, zoom, role, layoutWidth, before, drawer });
+        results.push({ tag, width, zoom, role, layoutWidth, target: target.kind, before, drawer });
 
         console.log(
           `--- ${tag} (layout ${layoutWidth}px) ---`,
@@ -426,6 +555,12 @@ async function run() {
           drawer
             ? `\n  drawer: brandHit=${drawer.brandHit} coveredByTopbar=${drawer.brandHitCoveredByTopbar} atClick=${drawer.scrollAtClick} anchorBefore=${JSON.stringify(drawer.anchorBefore)} anchorOpen=${JSON.stringify(drawer.anchorOpen)} anchorClosed=${JSON.stringify(drawer.anchorClosed)} afterWheel=${drawer.scrollBehind} railOpenAfterClose=${drawer.railOpenAfterClose}`
             : "\n  drawer: not available at this width (persistent rail)",
+          drawer
+            ? `\n  moves: ${JSON.stringify(drawer.movesByPhase ?? {})} whileOpen=${drawer.movesWhileOpen?.length ?? 0} whileClosing=${drawer.movesWhileClosing?.length ?? 0}`
+            : "",
+          drawer?.anchorProblems?.length
+            ? `\n  anchor problems: ${drawer.anchorProblems.join("; ")}`
+            : "",
         );
 
         await context.close();
@@ -448,14 +583,37 @@ async function run() {
     if (r.drawer?.anchorRestored === false) failures.push(`${r.tag}: the scroll position is not restored`);
     if (r.drawer && r.drawer.railOpenAfterClose !== "false") failures.push(`${r.tag}: the drawer did not close`);
     if (r.zoom === 2 && r.before.titleInfo?.clamped) failures.push(`${r.tag}: the topbar title is clamped`);
+    // A witness that was not there is a failure of the combination: the probe
+    // could not measure what it certifies, and it says why.
+    for (const problem of r.drawer?.anchorProblems ?? []) {
+      failures.push(`${r.tag}: ${problem}`);
+    }
     if (r.drawer?.movesWhileOpen?.length) {
+      const byPhase = r.drawer.movesByPhase ?? {};
+      // The verdict about the content is the anchor's, not the offset's: an
+      // offset move is harmless as long as the line the user reads stayed.
+      const held = r.drawer.anchorHeldWhileOpen;
+      const tail =
+        held === true
+          ? " — the content the user reads stayed where it was"
+          : held === false
+            ? " — the content the user reads jumped"
+            : "";
       notes.push(
-        `${r.tag}: the offset number moved ${r.drawer.movesWhileOpen.length} time(s) while the drawer was open — the content the user reads stayed where it was`,
+        `${r.tag}: the offset number moved ${r.drawer.movesWhileOpen.length} time(s) while the drawer was open (opening: ${byPhase.opening ?? 0}, open: ${byPhase.open ?? 0})${tail}`,
       );
     }
   }
 
   console.log("");
+  console.log(
+    `target: ${BASE} — ${target.label}${target.evidence.length ? ` [marker: ${target.evidence.join(", ")}]` : ""}`,
+  );
+  if (target.kind === "vite-dev") {
+    console.log(
+      ` * the measurement was taken against a Vite dev server, not against the built app of dist/web — this run does not certify the built app`,
+    );
+  }
   for (const n of notes) console.log(` * ${n}`);
   if (notes.length) console.log("");
   console.log(failures.length ? `FAIL (${failures.length}):` : "ALL CHECKS PASSED");
