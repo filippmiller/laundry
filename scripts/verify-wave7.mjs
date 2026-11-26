@@ -333,6 +333,41 @@ async function main() {
   const finance = await login("platform_finance", PERSONAS.platform_finance);
   const partner = await login("partner_finance", PERSONAS.partner_finance);
 
+  // The cursor only proves something when a second page exists. The demo book seeds one open
+  // dispute, so more are opened through the very endpoint a partner uses — that is what makes
+  // "the disputes behind the first page" a real question.
+  //
+  // The recheck rejected the previous shortcut: a run that found only one dispute PASSED the
+  // cursor check without walking a single page. Now the run opens as many disputes as it needs,
+  // and a run that cannot reach a second page is SKIPPED with a stated reason instead of passing.
+  //
+  // The fixture is created BEFORE the first check as well: a previous run of the acceptance
+  // resolves the open disputes, and a check that expects an open dispute must not depend on what
+  // the stand happens to hold.
+  const ensureOpenDisputes = async (wanted) => {
+    const current = await call(finance, "/finance/partner-disputes?state=open&limit=100");
+    const have = Array.isArray(current.payload?.items) ? current.payload.items.length : 0;
+    if (have >= wanted) return { have, created: [] };
+    const created = [];
+    const accrualLines = await call(partner, "/partner/accruals");
+    const lines = (accrualLines.payload?.invoices ?? []).flatMap(invoice => invoice.lines ?? []);
+    for (const line of lines) {
+      if (have + created.length >= wanted) break;
+      if (line.status === "credited" || line.disputed) continue;
+      const opened = await call(partner, `/finance/partner-invoice-lines/${line.id}/disputes`, {
+        method: "POST",
+        body: {
+          reason: `Волна 8: спор ${created.length + 1} за строкой счёта, чтобы страница вторая была настоящей.`,
+        },
+      });
+      if (opened.status === 200 && opened.payload?.disputeId) created.push(opened.payload.disputeId);
+    }
+    return { have: have + created.length, created };
+  };
+
+  const ensured = await ensureOpenDisputes(2);
+  const openTotal = ensured.have;
+
   const financeOpen = await call(finance, "/finance/partner-disputes?state=open");
   const financeItems = Array.isArray(financeOpen.payload?.items) ? financeOpen.payload.items : [];
   const financeTotal = financeOpen.payload?.totalCount;
@@ -347,7 +382,7 @@ async function main() {
     pass(
       "LND-R4-02-1",
       "finance open dispute list",
-      `status=200 items=${financeItems.length} totalCount=${financeTotal} every item is in the open state`,
+      `status=200 items=${financeItems.length} totalCount=${financeTotal} every item is in the open state${ensured.created.length ? ` (${ensured.created.length} open dispute(s) were opened through the partner endpoint first)` : ""}`,
     );
   } else {
     fail(
@@ -357,37 +392,7 @@ async function main() {
     );
   }
 
-  // The cursor only proves something when a second page exists. The demo book seeds one open
-  // dispute, so more are opened through the very endpoint a partner uses — that is what makes
-  // "the disputes behind the first page" a real question.
-  //
-  // The recheck rejected the previous shortcut: a run that found only one dispute PASSED the
-  // cursor check without walking a single page. Now the run opens as many disputes as it needs,
-  // and a run that cannot reach a second page is SKIPPED with a stated reason instead of passing.
-  const ensureOpenDisputes = async (wanted) => {
-    const current = await call(finance, "/finance/partner-disputes?state=open&limit=100");
-    const have = Array.isArray(current.payload?.items) ? current.payload.items.length : 0;
-    if (have >= wanted) return { have, created: [] };
-    const created = [];
-    const accrualLines = await call(partner, "/partner/accruals");
-    const lines = (accrualLines.payload?.invoices ?? []).flatMap(invoice => invoice.lines ?? []);
-    for (const line of lines) {
-      if (have + created.length >= wanted) break;
-      if (line.status === "credited" || line.disputed) continue;
-      const opened = await call(partner, `/finance/partner-invoice-lines/${line.id}/disputes`, {
-        method: "POST",
-        body: {
-          reason: `Волна 8: спор ${created.length + 1} за строкой счёта, чтобы вторая страница была настоящей.`,
-        },
-      });
-      if (opened.status === 200 && opened.payload?.disputeId) created.push(opened.payload.disputeId);
-    }
-    return { have: have + created.length, created };
-  };
-
   const wanted = 2;
-  const ensured = await ensureOpenDisputes(wanted);
-  const openTotal = ensured.have;
 
   const firstPage = await call(finance, "/finance/partner-disputes?state=open&limit=1");
   const firstItems = Array.isArray(firstPage.payload?.items) ? firstPage.payload.items : [];
