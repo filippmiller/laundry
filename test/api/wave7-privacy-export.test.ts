@@ -157,7 +157,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 7: privacy export covers t
     const otherCourier = await exportMyPrivacyData(db, cast.otherCourier);
     const agent = await exportMyPrivacyData(db, cast.agentA);
 
-    expect(customer.sessions.find(row => row.id === cast.sessionIds.customer)?.current).toBe(true);
+    expect(customer.sessions.items.find(row => row.id === cast.sessionIds.customer)?.current).toBe(true);
 
     const allSessionIds = Object.values(cast.sessionIds);
     for (const { exported, own } of [
@@ -166,7 +166,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 7: privacy export covers t
       { exported: otherCourier, own: cast.sessionIds.otherCourier },
       { exported: agent, own: cast.sessionIds.agentA },
     ]) {
-      const ids = exported.sessions.map(row => row.id);
+      const ids = exported.sessions.items.map(row => row.id);
       expect(ids).toContain(own);
       for (const other of allSessionIds) {
         if (other === own) continue;
@@ -183,7 +183,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 7: privacy export covers t
 
     // The second customer owns an address and a session; none of it may show up here.
     expect(mine.addresses.map(row => row.id)).not.toContain(cast.strangerAddressId);
-    expect(mine.sessions.map(row => row.id)).not.toContain(cast.sessionIds.stranger);
+    expect(mine.sessions.items.map(row => row.id)).not.toContain(cast.sessionIds.stranger);
     expect(json).not.toContain(cast.strangerId);
     expect(json).not.toContain(cast.strangerAddressId);
 
@@ -207,7 +207,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 7: privacy export covers t
     expect(mine.exportMeta.snapshotIsolation).toBe("repeatable_read_read_only");
     expect(mine.exportMeta.counts.orders).toBe(mine.orders.length);
     expect(mine.exportMeta.counts.shifts).toBe(mine.shifts.length);
-    expect(mine.exportMeta.counts.sessions).toBe(mine.sessions.length);
+    expect(mine.exportMeta.counts.sessions).toBe(mine.sessions.total);
+    expect(mine.sessions.total).toBe(mine.sessions.items.length);
     expect(mine.exportMeta.counts.supportMessages).toBe(mine.supportMessages.length);
   });
 });

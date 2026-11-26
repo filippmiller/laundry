@@ -22,10 +22,15 @@ const ACTIVE_CLAIM_STATES = new Set([
   "opened", "triage", "investigating", "decision_pending", "escalated", "reopened",
 ]);
 
-/** Active sessions of the signed-in principal; the current one is flagged, not hidden. */
+/**
+ * Active sessions of the signed-in principal for the settings UI; the current one is flagged,
+ * not hidden.
+ *
+ * WHY this list is capped at 50 and limited to the active state: it is a screen list, not a data
+ * export. The privacy export therefore does NOT reuse it — it has its own complete selection
+ * (`selectOwnSessionsForExport`) that covers every own session and never truncates.
+ */
 export async function listMySessions(db: Db | Tx, principal: Principal) {
-  // The same projection is read inside the privacy export's snapshot transaction, so the handle
-  // may be a transaction as well as the pool.
   const handle = db as Db;
   return handle.select({
     id: sessions.id,
@@ -42,6 +47,79 @@ export async function listMySessions(db: Db | Tx, principal: Principal) {
     .orderBy(desc(sessions.createdAt))
     .limit(50)
     .then(rows => rows.map(row => ({ ...row, current: row.id === principal.sessionId })));
+}
+
+/**
+ * Historical coverage registry of the privacy export's sessions section.
+ *
+ * WHY an explicit registry: the export answers with `complete: true`, and that flag is only
+ * truthful if the set of covered session states is stated, not implied by whatever list happens
+ * to be handy. Every session the caller owns inside their own tenant is exported — active,
+ * expired and revoked alike — and every row carries its own `state` marker.
+ *
+ * The three states are mutually exclusive and cover every exported row, so
+ * `total === active + expired + revoked` always holds:
+ *   - `revoked` — `revoked_at IS NOT NULL`; revocation wins over expiry, a session that was
+ *     revoked after it had already expired is still reported as revoked;
+ *   - `expired`  — not revoked and `expires_at <= now()`;
+ *   - `active`   — not revoked and `expires_at > now()`.
+ *
+ * `now()` is the snapshot transaction's timestamp, the same clock the counts are derived from,
+ * so the classification of a row and the count of its state can never disagree.
+ */
+export const PRIVACY_EXPORT_SESSION_COVERAGE = {
+  policy: "all_own_sessions" as const,
+  states: ["active", "expired", "revoked"] as const,
+  /**
+   * The internal credential column of the session store and every session of somebody else are
+   * left out. The column is named in prose only — a payload that carried the column name would
+   * look like a leak to anyone who scans an exported file.
+   */
+  excludes: ["credentials", "foreign_sessions"] as const,
+};
+
+/** State marker of one exported session row. */
+export type PrivacyExportSessionState = (typeof PRIVACY_EXPORT_SESSION_COVERAGE.states)[number];
+
+/**
+ * Complete export-only selection of the caller's own sessions.
+ *
+ * WHY this is not `listMySessions`: that list is the UI list — active sessions only, capped at
+ * 50 — and reusing it made the export silently truncate the caller's own session history while
+ * still claiming `complete: true`. The export needs the whole set, so it pages through it with
+ * a keyset cursor on `(created_at, id)` and reads it inside the export's snapshot transaction.
+ *
+ * The projection is deliberately minimal and contains no internal field: `token_hash` is never
+ * selected, so it cannot leak into the payload. Only the caller's own sessions inside the
+ * caller's own tenant are selected — another user's sessions and the same user's sessions in
+ * another tenant are excluded by the two ownership predicates.
+ */
+async function selectOwnSessionsForExport(tx: Tx, principal: Principal) {
+  const rows = await paginateKeysetAll(
+    (limit, cursor) =>
+      tx.select({
+        id: sessions.id,
+        createdAt: sessions.createdAt,
+        expiresAt: sessions.expiresAt,
+        revokedAt: sessions.revokedAt,
+        state: sql<PrivacyExportSessionState>`CASE
+          WHEN ${sessions.revokedAt} IS NOT NULL THEN 'revoked'
+          WHEN ${sessions.expiresAt} <= now() THEN 'expired'
+          ELSE 'active'
+        END`.as("state"),
+        cursorTs: pgCursorTimestampSql(sessions.createdAt),
+      }).from(sessions).where(and(
+        eq(sessions.organizationId, principal.organizationId),
+        eq(sessions.userId, principal.userId),
+        cursor
+          ? sql`(${sessions.createdAt}, ${sessions.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+          : undefined,
+      ))
+        .orderBy(desc(sessions.createdAt), desc(sessions.id))
+        .limit(limit),
+  );
+  // The current session is flagged, not hidden — even when it is expired or revoked.
+  return rows.map(row => ({ ...row, current: row.id === principal.sessionId }));
 }
 
 /** A user may revoke their own sessions only; admins keep the cross-member route. */
@@ -769,6 +847,11 @@ async function paginateKeysetAll<T extends { id: string; cursorTs: string }>(
  * messages they authored and the devices/sessions they signed in from. Role-dependent
  * collections are empty for a user who has no such records — that is the correct answer, not
  * a missing section.
+ *
+ * The sessions section follows an explicit coverage registry
+ * (`PRIVACY_EXPORT_SESSION_COVERAGE`): every own session — active, expired and revoked — is
+ * exported with keyset pagination and per-state counts, so `complete: true` means "the export
+ * contains everything it claims" and never "we stopped at the first 50 rows".
  */
 export async function exportMyPrivacyData(db: Db, principal: Principal) {
   return db.transaction(async tx => {
@@ -995,9 +1078,16 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
       orderId: orderCustomerId === principal.userId ? row.orderId : null,
     }));
 
-    // The devices/sessions the caller signed in from: the same projection the session list
-    // shows, read inside this snapshot so the export and the list cannot disagree.
-    const sessionRows = await listMySessions(tx, principal);
+    // The devices/sessions the caller signed in from. This is NOT the UI session list: the export
+    // carries every own session (active, expired and revoked — see the coverage registry) and
+    // pages through them with a keyset cursor, so `complete: true` never hides a truncation.
+    const sessionRows = await selectOwnSessionsForExport(tx, principal);
+    const sessionCounts = {
+      total: sessionRows.length,
+      active: sessionRows.filter(row => row.state === "active").length,
+      expired: sessionRows.filter(row => row.state === "expired").length,
+      revoked: sessionRows.filter(row => row.state === "revoked").length,
+    };
 
     return {
       exportedAt: exportedAsOf,
@@ -1013,7 +1103,7 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           claims: claimRows.length,
           notifications: notificationRows.length,
           reviews: reviewRows.length,
-          sessions: sessionRows.length,
+          sessions: sessionCounts.total,
           shifts: shiftRows.length,
           supportThreads: supportThreadRows.length,
           supportMessages: supportMessageRows.length,
@@ -1025,7 +1115,14 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
       claims: claimRows,
       notifications: notificationRows,
       reviews: reviewRows,
-      sessions: sessionRows,
+      sessions: {
+        coverage: PRIVACY_EXPORT_SESSION_COVERAGE,
+        total: sessionCounts.total,
+        active: sessionCounts.active,
+        expired: sessionCounts.expired,
+        revoked: sessionCounts.revoked,
+        items: sessionRows,
+      },
       shifts: shiftRows,
       supportThreads: supportThreadRows,
       supportMessages: supportMessageRows,
