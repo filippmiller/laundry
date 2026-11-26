@@ -170,13 +170,19 @@ async function main() {
     : Array.isArray(orders.payload)
       ? orders.payload
       : [];
-  const order = orderItems[0] ?? null;
+  // The order of the fixture must NOT be one of the idle ones: the check proves that the queues
+  // are apart, and an order that is idle anyway would prove nothing.
+  const idleBefore = await call(dispatcher, "/ops/stuck-orders?minutes=30");
+  const idleOrderIds = new Set(
+    (Array.isArray(idleBefore.payload?.items) ? idleBefore.payload.items : []).map(item => item.orderId),
+  );
+  const order = orderItems.find(item => !idleOrderIds.has(item.id)) ?? null;
 
   if (!order) {
     skip(
       "LND-R5-06-1",
       "an open escalation stays reachable while its order moves on",
-      "the demo book holds no order to escalate",
+      `the demo book holds no order outside the idle queue (${orderItems.length} order(s), all of them idle) — the two queues cannot be told apart with this stand`,
     );
     skip("LND-R5-06-2", "an escalation is closed explicitly with a reason", "no order to escalate");
     skip("LND-R5-06-3", "the escalation names a responsible person", "no order to escalate");
