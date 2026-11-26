@@ -234,12 +234,45 @@ async function waitForRailState(page, state) {
     .catch(() => {});
 }
 
-/** Marks the phase of the interaction, so every move of the page can be attributed. */
+/**
+ * Marks the phase of the interaction, so every move of the page can be attributed. */
 async function setPhase(page, phase) {
   await page.evaluate(value => {
     window.__phase = value;
     window.__phaseMark = performance.now();
   }, phase);
+}
+
+/**
+ * Picks the element the user is reading at and marks it.
+ *
+ * The offset number is not a reliable witness of what the user sees: the app
+ * restores a remembered position with a smooth scroll, and the browser
+ * compensates the offset when a late panel changes the layout above the
+ * reading position. Both move the number while the visible content stays
+ * where it was. The element under the viewport is the witness that counts.
+ */
+async function pickAnchor(page) {
+  return page.evaluate(() => {
+    const x = Math.round(window.innerWidth / 2);
+    const y = Math.round(window.innerHeight / 2);
+    const element = document.elementFromPoint(x, y);
+    const anchor = element?.closest("section, article, .panel, .card") ?? element;
+    if (!anchor) return null;
+    anchor.setAttribute("data-mobile-probe-anchor", "1");
+    const rect = anchor.getBoundingClientRect();
+    return { top: Math.round(rect.top), height: Math.round(rect.height) };
+  });
+}
+
+/** Where the marked element sits in the viewport now. */
+async function readAnchor(page) {
+  return page.evaluate(() => {
+    const anchor = document.querySelector("[data-mobile-probe-anchor]");
+    if (!anchor) return null;
+    const rect = anchor.getBoundingClientRect();
+    return { top: Math.round(rect.top), height: Math.round(rect.height) };
+  });
 }
 
 /**
@@ -249,24 +282,21 @@ async function setPhase(page, phase) {
  * behind the open menu must not scroll and has to come back to the same place
  * when the menu closes.
  *
- * The measurement is taken on a page that has stopped changing. A panel that
- * arrives late changes the layout above the reading position, and the browser
- * compensates the offset by itself (scroll anchoring) — the visible content
- * stays where it was, but the offset moves. Such a move belongs to the page,
- * not to the drawer, so the probe notes it and repeats the measurement instead
- * of blaming the drawer. Only a move that happens *after* the drawer was
- * opened is a defect of the drawer.
+ * The measurement is taken on a page that has stopped changing, and it watches
+ * the *content* the user is reading, not the offset number: the app restores a
+ * remembered position with a smooth scroll, and the browser compensates the
+ * offset when a late panel changes the layout above the reading position —
+ * both move the number while the visible content stays where it was.
  */
 async function measureDrawer(page, { toggle, layoutWidth, tag }) {
   const attempts = 3;
   let drawer = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     drawer = await measureDrawerOnce(page, { toggle, layoutWidth, tag });
-    // The page moved on its own before the drawer was opened: the measurement
-    // compared two different states of the page, so it is repeated on a page
-    // that has settled again.
-    if (!drawer.racy) return drawer;
-    console.log(`  (${tag}): the page moved on its own, the measurement is repeated (${attempt}/${attempts})`);
+    // The anchor vanished: the workspace re-rendered the element under the
+    // viewport, so the measurement has to be taken again on the new content.
+    if (!drawer.anchorLost) return drawer;
+    console.log(`  (${tag}): the element under the viewport was re-rendered, the measurement is repeated (${attempt}/${attempts})`);
   }
   return drawer;
 }
@@ -275,9 +305,10 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   await page.evaluate(() => window.scrollTo({ top: 600, behavior: "instant" }));
   await waitForQuietPage(page);
 
-  // The reference is the position in the moment the drawer is opened:
-  // everything that happened before it (a late panel, the compensation of the
-  // browser) belongs to the page, not to the drawer.
+  // The witness: the element the user is reading at the moment the menu is
+  // opened. Everything that happened before it (a late panel, the restoration
+  // of a remembered position) belongs to the page, not to the drawer.
+  const anchorBefore = await pickAnchor(page);
   const scrollAtClick = await page.evaluate(() => window.scrollY);
   const sampleMark = await page.evaluate(() => window.__samples.length);
   await setPhase(page, "opening");
@@ -288,29 +319,39 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   await page.screenshot({ path: path.join(OUT, `after-${tag}-drawer.png`) });
   const drawer = await measure(page);
   drawer.scrollAtClick = scrollAtClick;
+  drawer.anchorBefore = anchorBefore;
 
-  // Every move of the page since the drawer was opened. A move before the
-  // drawer was open is the browser compensating the offset by itself; a move
-  // while the drawer is open is the drawer moving the page.
+  const anchorOpen = await readAnchor(page);
+  drawer.anchorOpen = anchorOpen;
+  drawer.anchorLost = anchorBefore !== null && anchorOpen === null;
+  // The content the user was reading has to stay exactly where it was.
+  drawer.anchorHeldWhileOpen =
+    anchorBefore === null || anchorOpen === null
+      ? null
+      : Math.abs(anchorOpen.top - anchorBefore.top) <= 2;
+
+  // Every move of the offset since the drawer was opened. A move is reported,
+  // but it is not a defect on its own: the number of the offset changes when
+  // the browser compensates it, while the content stays where it was.
   const moves = await page.evaluate(mark => window.__samples.slice(mark), sampleMark);
   const clickMark = await page.evaluate(() => window.__phaseMark);
-  drawer.movesBeforeOpen = moves.filter(entry => entry.t < clickMark);
   drawer.movesWhileOpen = moves.filter(entry => entry.t >= clickMark);
-  drawer.selfMoved = drawer.movesBeforeOpen.length > 0;
-  drawer.racy = drawer.selfMoved;
 
   // (d) the page behind the drawer must not scroll. The user scrolls with a
   // wheel, not with scrollTo(): `overflow: hidden` blocks the user, while a
   // programmatic jump is still allowed.
   const yBeforeWheel = await page.evaluate(() => window.scrollY);
+  const anchorBeforeWheel = await readAnchor(page);
   await page.mouse.move(Math.round(layoutWidth * 0.8), 400);
   await page.mouse.wheel(0, 600);
   await page.waitForTimeout(350);
   drawer.scrollBehind = await page.evaluate(() => window.scrollY);
   drawer.scrollBehindMoved = drawer.scrollBehind !== yBeforeWheel;
-  drawer.scrollAtDrawerOpen = yBeforeWheel;
-  // The background has to stay exactly where the user left it while the drawer is open.
-  drawer.offsetHeldWhileOpen = drawer.scrollAtDrawerOpen === scrollAtClick;
+  const anchorAfterWheel = await readAnchor(page);
+  drawer.anchorMovedByWheel =
+    anchorBeforeWheel === null || anchorAfterWheel === null
+      ? null
+      : Math.abs(anchorAfterWheel.top - anchorBeforeWheel.top) > 2;
 
   // Close again with Escape (the backdrop click lands on the drawer).
   await setPhase(page, "closing");
@@ -319,8 +360,13 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   await setPhase(page, "closed");
   await waitForSettledPage(page, 600);
   drawer.scrollAfterClose = await page.evaluate(() => window.scrollY);
-  // The restore target is the position the drawer held, not a clamped one.
-  drawer.scrollRestored = drawer.scrollAfterClose === drawer.scrollAtDrawerOpen;
+  const anchorClosed = await readAnchor(page);
+  drawer.anchorClosed = anchorClosed;
+  // The reading position has to come back to the place the user left it.
+  drawer.anchorRestored =
+    anchorBefore === null || anchorClosed === null
+      ? null
+      : Math.abs(anchorClosed.top - anchorBefore.top) <= 2;
   drawer.railOpenAfterClose = await page.evaluate(
     () => document.querySelector(".app-shell")?.getAttribute("data-rail-open"),
   );
@@ -378,7 +424,7 @@ async function run() {
           `\n  tabs: rows=${before.tabRows} count=${before.tabCount} overflowX=${before.tabBarOverflowX} scrollW=${before.tabBarScrollWidth}`,
           `\n  title: ${JSON.stringify(before.titleInfo)}`,
           drawer
-            ? `\n  drawer: brandHit=${drawer.brandHit} coveredByTopbar=${drawer.brandHitCoveredByTopbar} atClick=${drawer.scrollAtClick} scrollAtOpen=${drawer.scrollAtDrawerOpen} afterWheel=${drawer.scrollBehind} afterClose=${drawer.scrollAfterClose} railOpenAfterClose=${drawer.railOpenAfterClose}${drawer.selfMoved ? " (the page moved on its own before the drawer was open)" : ""}`
+            ? `\n  drawer: brandHit=${drawer.brandHit} coveredByTopbar=${drawer.brandHitCoveredByTopbar} atClick=${drawer.scrollAtClick} anchorBefore=${JSON.stringify(drawer.anchorBefore)} anchorOpen=${JSON.stringify(drawer.anchorOpen)} anchorClosed=${JSON.stringify(drawer.anchorClosed)} afterWheel=${drawer.scrollBehind} railOpenAfterClose=${drawer.railOpenAfterClose}`
             : "\n  drawer: not available at this width (persistent rail)",
         );
 
@@ -397,16 +443,14 @@ async function run() {
     if (r.before.tabCount > 0 && r.before.tabRows > 1) failures.push(`${r.tag}: the tab strip uses ${r.before.tabRows} rows`);
     if (r.drawer?.brandHitCoveredByTopbar) failures.push(`${r.tag}: the topbar covers the brand of the drawer`);
     if (r.drawer?.scrollBehindMoved) failures.push(`${r.tag}: the page behind the drawer scrolls`);
-    if (r.drawer?.movesWhileOpen?.length) failures.push(`${r.tag}: the page behind the drawer jumps`);
-    if (r.drawer && !r.drawer.offsetHeldWhileOpen && !r.drawer.selfMoved) {
-      failures.push(`${r.tag}: the page behind the drawer jumps`);
-    }
-    if (r.drawer && !r.drawer.scrollRestored) failures.push(`${r.tag}: the scroll position is not restored`);
+    if (r.drawer?.anchorMovedByWheel === true) failures.push(`${r.tag}: the page behind the drawer scrolls`);
+    if (r.drawer?.anchorHeldWhileOpen === false) failures.push(`${r.tag}: the page behind the drawer jumps`);
+    if (r.drawer?.anchorRestored === false) failures.push(`${r.tag}: the scroll position is not restored`);
     if (r.drawer && r.drawer.railOpenAfterClose !== "false") failures.push(`${r.tag}: the drawer did not close`);
     if (r.zoom === 2 && r.before.titleInfo?.clamped) failures.push(`${r.tag}: the topbar title is clamped`);
-    if (r.drawer?.selfMoved) {
+    if (r.drawer?.movesWhileOpen?.length) {
       notes.push(
-        `${r.tag}: the browser compensated the offset by itself before the drawer was opened (${r.drawer.movesBeforeOpen.length} move(s)) — the page, not the drawer`,
+        `${r.tag}: the offset number moved ${r.drawer.movesWhileOpen.length} time(s) while the drawer was open — the content the user reads stayed where it was`,
       );
     }
   }
