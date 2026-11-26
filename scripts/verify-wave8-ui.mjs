@@ -19,6 +19,8 @@
  * The report lands in docs/evidence/wave8/ as a JSON file and a Markdown summary.
  */
 import { chromium } from "playwright";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +43,33 @@ function skip(id, name, detail) {
 }
 function fail(id, name, detail) {
   record(id, name, "FAIL", detail);
+}
+
+/**
+ * The identity of the code that is on disk right now.
+ *
+ * A browser acceptance proves something about a build only when the receipt says which build it
+ * was taken on: the commit, the tree, whether the tree was dirty and a digest of the difference.
+ */
+function codeIdentity() {
+  const git = (args) => {
+    try {
+      return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim();
+    } catch {
+      return null;
+    }
+  };
+  const status = git(["status", "--porcelain"]) ?? "";
+  const changed = status.split(/\r?\n/).filter(Boolean);
+  const diff = git(["diff", "HEAD"]) ?? "";
+  return {
+    codeSha: git(["rev-parse", "HEAD"]),
+    codeTree: git(["rev-parse", "HEAD^{tree}"]),
+    branch: git(["rev-parse", "--abbrev-ref", "HEAD"]),
+    dirty: changed.length > 0,
+    changedFiles: changed.map(line => line.slice(0, 2).trim() + " " + line.slice(3).trim()),
+    diffSha256: createHash("sha256").update(diff, "utf8").digest("hex"),
+  };
 }
 
 /**
@@ -467,6 +496,11 @@ async function main() {
     generatedAt: startedAt.toISOString(),
     appUrl: APP,
     kind: "browser acceptance in Chromium against the running web app",
+    code: {
+      ...codeIdentity(),
+      evidenceCommit: null,
+      evidenceCommitNote: "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA",
+    },
     summary: {
       total: results.length,
       passed: passed.length,
@@ -489,6 +523,8 @@ async function main() {
     ``,
     `- Web app: \`${APP}\``,
     `- Browser: Chromium (Playwright)`,
+    `- Code: \`${report.code.codeSha}\` tree \`${report.code.codeTree}\` on \`${report.code.branch}\``,
+    `- Working tree: ${report.code.dirty ? `DIRTY — ${report.code.changedFiles.length} path(s)` : "clean"}`,
     `- Started at: \`${report.generatedAt}\``,
     `- Result: ${passed.length} passed, ${skipped.length} skipped, ${failed.length} failed (${results.length} checks)`,
     ``,
