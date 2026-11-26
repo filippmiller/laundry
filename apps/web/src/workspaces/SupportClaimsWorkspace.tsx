@@ -41,6 +41,12 @@ import {
   orderStateTone,
   stateLabel,
 } from "../labels";
+import {
+  createSupportDraftController,
+  type SupportDraftController,
+  type SupportDraftSnapshot,
+  type SupportDraftStatus,
+} from "./support-draft-autosave";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -283,6 +289,30 @@ function threadStatusTone(status: string): BadgeTone {
   return THREAD_STATUS_TONES[status] ?? "neutral";
 }
 
+/**
+ * The state of the reply draft in the reply box.
+ *
+ * The draft is saved on the server, so the operator has to see whether the text really is there —
+ * a draft that only looks saved is worse than no draft at all.
+ */
+const DRAFT_STATUS_LABELS: Record<SupportDraftStatus, string> = {
+  loading: "Загрузка черновика…",
+  clean: "",
+  dirty: "Не сохранено",
+  saving: "Сохранение…",
+  saved: "Черновик сохранён",
+  error: "Не сохранено",
+};
+
+const DRAFT_STATUS_TONES: Record<SupportDraftStatus, BadgeTone> = {
+  loading: "neutral",
+  clean: "neutral",
+  dirty: "warn",
+  saving: "neutral",
+  saved: "ok",
+  error: "danger",
+};
+
 export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; roles: string[] }) {
   const tabsId = useId();
   const [activeSection, setActiveSection] = useUrlState<string>("section", "search");
@@ -314,7 +344,6 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const [loadingThreadDetail, setLoadingThreadDetail] = useState(false);
   const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false);
   // Isolate drafts per threadId so switching threads never leaks replyText or closeReason.
-  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [closeReasonDrafts, setCloseReasonDrafts] = useState<Record<string, string>>({});
   const [sendingReply, setSendingReply] = useState(false);
   const [closingThread, setClosingThread] = useState(false);
@@ -362,52 +391,62 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const threadsListReqRef = useRef(0);
   const claimsListReqRef = useRef(0);
 
+  /**
+   * The reply draft is saved on the server by a plain state machine
+   * (see ./support-draft-autosave.ts). The component only renders the state of the machine and
+   * forwards the input of the operator: the machine decides when a draft is written, when it is
+   * removed and when the operator has to be warned about a failure.
+   */
+  const notifyRef = useRef(notify);
+  notifyRef.current = notify;
+  const draftControllerRef = useRef<SupportDraftController | null>(null);
+  const getDraftController = useCallback(() => {
+    if (!draftControllerRef.current) {
+      draftControllerRef.current = createSupportDraftController({
+        api,
+        formatError,
+        onError: message => notifyRef.current({ kind: "error", text: message }),
+      });
+    }
+    return draftControllerRef.current;
+  }, []);
+  const [draftSnap, setDraftSnap] = useState<SupportDraftSnapshot>({
+    threadId: null,
+    status: "clean",
+    body: "",
+    savedBody: "",
+    error: null,
+    errorScope: null,
+  });
+
+  useEffect(() => {
+    const controller = getDraftController();
+    setDraftSnap(controller.getSnapshot());
+    const unsubscribe = controller.subscribe(setDraftSnap);
+    return () => {
+      unsubscribe();
+      controller.dispose();
+      if (draftControllerRef.current === controller) {
+        draftControllerRef.current = null;
+      }
+    };
+  }, [getDraftController]);
+
   const activeThreadId = threadDetail && threadDetail.thread.id === selectedThreadId ? selectedThreadId : null;
-  const replyText = activeThreadId ? (replyDrafts[activeThreadId] ?? "") : "";
+  const draftIsActive = Boolean(activeThreadId) && draftSnap.threadId === activeThreadId;
+  const replyText = draftIsActive ? draftSnap.body : "";
+  const draftStatus: SupportDraftStatus = draftIsActive ? draftSnap.status : "clean";
   const closeReason = activeThreadId ? (closeReasonDrafts[activeThreadId] ?? "") : "";
 
   const setActiveReplyText = (value: string) => {
     if (!activeThreadId) return;
-    setReplyDrafts((prev) => ({ ...prev, [activeThreadId]: value }));
+    getDraftController().setBody(value);
   };
 
   const setActiveCloseReason = (value: string) => {
     if (!activeThreadId) return;
     setCloseReasonDrafts((prev) => ({ ...prev, [activeThreadId]: value }));
   };
-
-  /**
-   * The last body the server confirmed for a thread.
-   *
-   * It keeps the autosave from writing the same text over and over, and it stops the draft that
-   * comes back from the server from being written to the server again.
-   */
-  const lastSavedDraftRef = useRef<Record<string, string>>({});
-
-  /**
-   * The unfinished answer is stored on the server, not only in the tab.
-   *
-   * A support reply is typed in a few sentences and then interrupted — by a reload, by a crash, by
-   * a handover to a colleague. The draft belongs to the thread, so it survives all three; the
-   * request is debounced so that typing does not produce one request per keystroke.
-   */
-  useEffect(() => {
-    if (!activeThreadId) return;
-    const threadId = activeThreadId;
-    const body = replyDrafts[threadId] ?? "";
-    if (lastSavedDraftRef.current[threadId] === body) return;
-    const timer = window.setTimeout(() => {
-      lastSavedDraftRef.current[threadId] = body;
-      const trimmed = body.trim();
-      const request = trimmed
-        ? api(`/support/threads/${threadId}/draft`, { method: "PUT", body: { body: trimmed } })
-        : api(`/support/threads/${threadId}/draft`, { method: "DELETE" });
-      void request.catch(() => {
-        // A failed draft save must never block the answer itself.
-      });
-    }, 800);
-    return () => window.clearTimeout(timer);
-  }, [activeThreadId, replyDrafts]);
 
   const closeEvidencePreview = useCallback(() => {
     setEvidencePreview((prev) => {
@@ -524,6 +563,10 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       setSelectedThreadId(threadId);
       setThreadDetail(null);
       setLoadingThreadDetail(true);
+      // The draft of the thread is loaded next to the thread itself: the reply box shows it as
+      // soon as it arrives, and until then the autosave stays idle instead of deleting a draft
+      // that the operator never saw.
+      void getDraftController().openThread(threadId);
       try {
         const res = await api<Record<string, unknown>>(`/support/threads/${threadId}`);
         if (threadReqRef.current !== reqId) return;
@@ -536,19 +579,6 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
           earlierCursor: typeof res.earlierCursor === "string" ? res.earlierCursor : null,
           totalMessages: typeof res.totalMessages === "number" ? res.totalMessages : messages.length,
         });
-        // The draft lives on the server, so an unfinished answer survives a reload, a second tab
-        // and a handover between colleagues. A locally typed answer wins over the stored one.
-        void api<{ body: string } | null>(`/support/threads/${threadId}/draft`)
-          .then(draft => {
-            if (threadReqRef.current !== reqId) return;
-            const stored = draft?.body ?? "";
-            if (!stored) return;
-            lastSavedDraftRef.current[threadId] = stored;
-            setReplyDrafts(prev => (prev[threadId] ? prev : { ...prev, [threadId]: stored }));
-          })
-          .catch(() => {
-            // A missing draft is not an error: the reply box simply starts empty.
-          });
       } catch (err) {
         if (threadReqRef.current !== reqId) return;
         notify({ kind: "error", text: formatError(err) });
@@ -558,7 +588,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         }
       }
     },
-    [notify],
+    [getDraftController, notify],
   );
 
   // The thread that was picked is rendered under the list on a narrow screen. Without this the
@@ -804,14 +834,9 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
       });
       // The sent answer is no longer a draft: drop it on the server before the thread is read
       // again, otherwise the reload would bring the very text that was just sent back.
-      lastSavedDraftRef.current[targetThreadId] = "";
+      getDraftController().markSent(targetThreadId);
       await api(`/support/threads/${targetThreadId}/draft`, { method: "DELETE" }).catch(() => {
         // The message is already sent: a failed draft cleanup is not worth a second error.
-      });
-      setReplyDrafts((prev) => {
-        const next = { ...prev };
-        delete next[targetThreadId];
-        return next;
       });
       notify({ kind: "ok", text: "Сообщение отправлено клиенту" });
       await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
@@ -845,12 +870,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         return next;
       });
       // A closed thread has no answer left to write: the draft goes with it.
-      lastSavedDraftRef.current[targetThreadId] = "";
-      setReplyDrafts((prev) => {
-        const next = { ...prev };
-        delete next[targetThreadId];
-        return next;
-      });
+      getDraftController().markSent(targetThreadId);
       await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
@@ -1391,6 +1411,24 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                       onChange={(e) => setActiveReplyText(e.target.value)}
                       placeholder="Введите сообщение для клиента..."
                     />
+                    {DRAFT_STATUS_LABELS[draftStatus] ? (
+                      <div className="row row--tight">
+                        <Badge tone={DRAFT_STATUS_TONES[draftStatus]}>
+                          {DRAFT_STATUS_LABELS[draftStatus]}
+                        </Badge>
+                        {draftStatus === "error" ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => void getDraftController().retry()}
+                          >
+                            {draftSnap.errorScope === "load"
+                              ? "Повторить загрузку черновика"
+                              : "Повторить сохранение"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div className="row row--end">
                       <Button
                         type="submit"
