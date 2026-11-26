@@ -15,15 +15,23 @@
  * Usage (the stand must be running and seeded):
  *   SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/verify-wave8.mjs
  *
+ * The stand can also be started by the script itself:
+ *   VERIFY_SPAWN_API=1 DATABASE_URL=... node scripts/verify-wave8.mjs
+ * Then the receipt names the pid, the port, the moment of readiness and the tree the answering
+ * process was started from, so the answers and the code under review provably belong together.
+ * Without that flag the receipt states that the identity of an externally started stand is not
+ * proven.
+ *
  * The report lands in docs/evidence/wave8/ as a JSON file and a Markdown summary.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const BASE = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:3000";
+let BASE = process.env.SMOKE_BASE_URL ?? "http://127.0.0.1:3000";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const EVIDENCE_DIR = resolve(REPO_ROOT, process.env.VERIFY_EVIDENCE_DIR ?? "docs/evidence/wave8");
 
@@ -130,6 +138,23 @@ function codeIdentity() {
   const status = git(["status", "--porcelain"]) ?? "";
   const changed = status.split(/\r?\n/).filter(Boolean);
   const diff = git(["diff", "HEAD"]) ?? "";
+  // An untracked file is part of the code that is served — a new source file is loaded by the
+  // server and by the build — but it is not part of `git diff HEAD`. The receipt therefore names
+  // the untracked paths and the digest of their content, so the identity of the code is complete
+  // and not only the identity of the tracked part.
+  const untracked = changed
+    .filter(line => line.startsWith("??"))
+    .map(line => line.slice(3).trim())
+    .filter(Boolean);
+  const untrackedDigest = createHash("sha256");
+  for (const file of untracked.sort()) {
+    untrackedDigest.update(file, "utf8");
+    try {
+      untrackedDigest.update(readFileSync(resolve(REPO_ROOT, file)));
+    } catch {
+      untrackedDigest.update("<unreadable>", "utf8");
+    }
+  }
   return {
     codeSha: git(["rev-parse", "HEAD"]),
     codeTree: git(["rev-parse", "HEAD^{tree}"]),
@@ -137,6 +162,180 @@ function codeIdentity() {
     dirty: changed.length > 0,
     changedFiles: changed.map(line => line.slice(0, 2).trim() + " " + line.slice(3).trim()),
     diffSha256: createHash("sha256").update(diff, "utf8").digest("hex"),
+    untrackedFiles: untracked,
+    untrackedSha256: untrackedDigest.digest("hex"),
+  };
+}
+
+/**
+ * Starts the API from the tree that is on disk and reports the identity of that very process.
+ *
+ * The finding LND-R5-EV-01 demanded a receipt that proves the identity of the code AND of the
+ * process: a stand that was started before the last edit answers with the old code and still
+ * looks healthy. When VERIFY_SPAWN_API is set the verification brings its own server and writes
+ * down its pid, its port, the moment it became ready and the tree it was started from — so the
+ * receipt and the answers belong together.
+ */
+let spawnedChild = null;
+
+/**
+ * Picks a free TCP port.
+ *
+ * The port of the request is only a wish: another project may be listening on it, and a server
+ * that cannot bind would make the verification talk to somebody else's process instead of its
+ * own. The port is therefore checked before the server starts. The default of this wave is 3126 —
+ * wave 7 uses its own default, so the two verifications never fight over the same port.
+ */
+function findFreePort(preferred) {
+  return new Promise((resolvePort, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.on("error", () => {
+      // The preferred port is taken: the next free one is used and named in the receipt.
+      const fallback = createServer();
+      fallback.unref();
+      fallback.on("error", reject);
+      fallback.listen(0, "127.0.0.1", () => {
+        const { port } = fallback.address();
+        fallback.close(() => resolvePort(port));
+      });
+    });
+    probe.listen(preferred, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolvePort(port));
+    });
+  });
+}
+
+/** Waits for the readiness probe of the spawned server and returns when it answers. */
+async function waitForReady(baseUrl, getLog) {
+  const deadline = Date.now() + 90_000;
+  let lastError = "no attempt";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/health/ready`);
+      if (res.status === 200) return new Date();
+      lastError = `status ${res.status}`;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise(done => setTimeout(done, 500));
+  }
+  throw new Error(`the spawned API did not become ready: ${lastError}\n${getLog().slice(-2000)}`);
+}
+
+/**
+ * Starts the API server and records everything that ties the answers to the tree on disk.
+ *
+ * The `code` argument is the identity of the tree that is read at the moment of the start: the
+ * server is started from the very directory the identity was taken from, so the receipt can name
+ * the commit and the tree the answering process runs.
+ */
+async function spawnStand(code) {
+  const databaseUrl = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("VERIFY_SPAWN_API needs DATABASE_URL — the database of the stand to check");
+  }
+  const requestedPort = Number(process.env.VERIFY_API_PORT ?? 3126);
+  const port = await findFreePort(requestedPort);
+  const argv = ["node_modules/tsx/dist/cli.mjs", "src/api/server.ts"];
+  const startedAt = new Date();
+  const child = spawn(process.execPath, argv, {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATABASE_URL: databaseUrl,
+      NODE_ENV: process.env.NODE_ENV ?? "development",
+      WEB_ORIGIN: process.env.WEB_ORIGIN ?? "http://localhost:5173",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout?.on("data", chunk => {
+    output += String(chunk);
+  });
+  child.stderr?.on("data", chunk => {
+    output += String(chunk);
+  });
+  const baseUrl = `http://127.0.0.1:${port}`;
+  BASE = baseUrl;
+  // The child is remembered before the readiness wait: a server that never becomes ready must not
+  // stay behind when the run gives up.
+  spawnedChild = child;
+  const readyAt = await waitForReady(baseUrl, () => output);
+  process.on("exit", stopStand);
+  return {
+    mode: "spawned-by-this-script",
+    pid: child.pid,
+    port,
+    requestedPort,
+    baseUrl,
+    argv: [process.execPath, ...argv],
+    cwd: REPO_ROOT,
+    startedAt: startedAt.toISOString(),
+    readyAt: readyAt.toISOString(),
+    // The tree the answering process was started from — the same tree the receipt names as the
+    // code under review.
+    code: {
+      codeSha: code.codeSha,
+      codeTree: code.codeTree,
+      branch: code.branch,
+      dirty: code.dirty,
+      diffSha256: code.diffSha256,
+    },
+    log: output.slice(-4000),
+  };
+}
+
+/**
+ * Stops the server the verification started.
+ *
+ * The pipes of the child keep the event loop of the parent alive, so the parent would wait for a
+ * server that only exists for the checks. The child is stopped and its pipes are closed before
+ * the script leaves.
+ *
+ * The tsx wrapper starts the server as a child of its own: stopping only the wrapper would leave
+ * the server holding the port, so the whole tree is stopped on Windows.
+ */
+function stopStand() {
+  if (!spawnedChild) return;
+  const child = spawnedChild;
+  spawnedChild = null;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+  } else {
+    try {
+      child.kill();
+    } catch {
+      // The process is already gone.
+    }
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
+}
+
+/** The identity of a stand that was started by somebody else — as far as it can be observed. */
+async function externalStandIdentity(code) {
+  const health = await fetch(`${BASE}/api/v1/health`).catch(() => null);
+  const ready = await fetch(`${BASE}/api/v1/health/ready`).catch(() => null);
+  return {
+    mode: "external-stand",
+    baseUrl: BASE,
+    healthStatus: health?.status ?? null,
+    healthAt: new Date().toISOString(),
+    readyStatus: ready?.status ?? null,
+    // The tree on disk is NOT the tree the answering process was started from — that is exactly
+    // what cannot be observed from the outside, and the receipt has to say so.
+    codeOnDisk: {
+      codeSha: code.codeSha,
+      codeTree: code.codeTree,
+      branch: code.branch,
+      dirty: code.dirty,
+      diffSha256: code.diffSha256,
+    },
+    note: "the process identity of an externally started stand cannot be proven from the outside — run with VERIFY_SPAWN_API=1 to let the script start the server it checks",
   };
 }
 
@@ -157,7 +356,12 @@ function credentialLikeKeys(value, found = []) {
 
 async function main() {
   const startedAt = new Date();
+  // The identity of the code and of the process that answers come first: a check that ran against
+  // an unknown build proves nothing about the build under review.
   const code = codeIdentity();
+  const stand = process.env.VERIFY_SPAWN_API
+    ? await spawnStand(code)
+    : await externalStandIdentity(code);
   ORG = await resolveOrganization();
 
   const dispatcher = await login("dispatcher", PERSONAS.dispatcher);
@@ -397,6 +601,8 @@ async function main() {
       evidenceCommit: null,
       evidenceCommitNote: "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA",
     },
+    // The process that answered the requests.
+    stand,
     summary: {
       total: results.length,
       passed: passed.length,
@@ -417,10 +623,11 @@ async function main() {
   const markdown = [
     `# Wave 8 live verification (PR #4)`,
     ``,
-    `- Stand: \`${BASE}\``,
+    `- Stand: \`${BASE}\` (${stand.mode})`,
     `- Code: \`${code.codeSha}\` tree \`${code.codeTree}\` on \`${code.branch}\``,
     `- Working tree: ${code.dirty ? `DIRTY — ${code.changedFiles.length} path(s)` : "clean"}`,
     `- Diff digest (sha256 of \`git diff HEAD\`): \`${code.diffSha256}\``,
+    `- Serving process: ${stand.mode === "spawned-by-this-script" ? `pid ${stand.pid}, started ${stand.startedAt}, ready ${stand.readyAt}, port ${stand.port}, tree \`${stand.code?.codeTree}\`` : `externally started — ${stand.note}`}`,
     `- Organization: \`${ORG}\``,
     `- Started at: \`${report.generatedAt}\``,
     `- Result: ${passed.length} passed, ${skipped.length} skipped, ${failed.length} failed (${results.length} checks)`,
@@ -441,11 +648,14 @@ async function main() {
   if (failed.length) {
     console.log("FAILED:");
     for (const item of failed) console.log(` - ${item.id} ${item.name} (${item.detail})`);
-    process.exitCode = 1;
   }
+  stopStand();
+  // The script leaves with an explicit code: the server it started must not keep it alive.
+  process.exit(failed.length ? 1 : 0);
 }
 
 main().catch(err => {
   console.error("verification crashed:", err);
+  stopStand();
   process.exitCode = 1;
 });

@@ -16,16 +16,23 @@
  *   APP_URL=http://localhost:5173 node scripts/verify-wave8-ui.mjs
  *   APP_URL=http://localhost:5173 SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/verify-wave8-ui.mjs
  *
+ * The stand can also be started by the script itself:
+ *   VERIFY_SPAWN_APP=1 DATABASE_URL=... node scripts/verify-wave8-ui.mjs
+ * Then the receipt names the pid, the port, the moment of readiness and the tree the app was
+ * started from. Without that flag the receipt states what the app is and that the identity of
+ * an externally started process is not proven.
+ *
  * The report lands in docs/evidence/wave8/ as a JSON file and a Markdown summary.
  */
 import { chromium } from "playwright";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const APP = process.env.APP_URL ?? "http://localhost:5173";
+let APP = process.env.APP_URL ?? "http://localhost:5173";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const EVIDENCE_DIR = resolve(REPO_ROOT, process.env.VERIFY_EVIDENCE_DIR ?? "docs/evidence/wave8");
 
@@ -69,6 +76,225 @@ function codeIdentity() {
     dirty: changed.length > 0,
     changedFiles: changed.map(line => line.slice(0, 2).trim() + " " + line.slice(3).trim()),
     diffSha256: createHash("sha256").update(diff, "utf8").digest("hex"),
+  };
+}
+
+/**
+ * The app that answers at the address of the stand.
+ *
+ * A browser acceptance proves something about a build only when the receipt says which build it
+ * was taken on. Two different apps can answer at the same address: the dev server of Vite (the
+ * HTML carries the client of Vite) and the built bundle of `dist/web` (the HTML carries the
+ * hashed assets of the build). The kind is therefore read from the answer of the server itself
+ * instead of being assumed.
+ */
+async function describeApp(url) {
+  try {
+    const res = await fetch(url, { headers: { accept: "text/html" } });
+    const html = await res.text();
+    const assets = [...html.matchAll(/\/assets\/[^\s"'<>]+\.(?:js|css)/g)].map(match => match[0]);
+    const kind = html.includes("/@vite/client")
+      ? "vite-dev-server"
+      : assets.length > 0
+        ? "built-app-from-dist/web"
+        : "unknown";
+    return {
+      kind,
+      httpStatus: res.status,
+      detectedBy: html.includes("/@vite/client")
+        ? "the served HTML loads /@vite/client"
+        : assets.length > 0
+          ? `the served HTML loads the built asset(s) ${assets.slice(0, 3).join(", ")}`
+          : "the served HTML names neither /@vite/client nor a built asset",
+      servedAssets: [...new Set(assets)],
+    };
+  } catch (err) {
+    return {
+      kind: "unreachable",
+      httpStatus: null,
+      detectedBy: `the address did not answer: ${err instanceof Error ? err.message : String(err)}`,
+      servedAssets: [],
+    };
+  }
+}
+
+/**
+ * Picks a free TCP port.
+ *
+ * The port of the request is only a wish: another project may be listening on it, and a server
+ * that cannot bind would make the acceptance talk to somebody else's process instead of its own.
+ * The default of this script is 3127 — wave 7 and wave 8 use their own, so the verifications
+ * never fight over the same port.
+ */
+function findFreePort(preferred) {
+  return new Promise((resolvePort, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.on("error", () => {
+      const fallback = createServer();
+      fallback.unref();
+      fallback.on("error", reject);
+      fallback.listen(0, "127.0.0.1", () => {
+        const { port } = fallback.address();
+        fallback.close(() => resolvePort(port));
+      });
+    });
+    probe.listen(preferred, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolvePort(port));
+    });
+  });
+}
+
+/** Waits for the readiness probe of the spawned server and returns when it answers. */
+async function waitForReady(baseUrl, getLog) {
+  const deadline = Date.now() + 90_000;
+  let lastError = "no attempt";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/health/ready`);
+      if (res.status === 200) return new Date();
+      lastError = `status ${res.status}`;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise(done => setTimeout(done, 500));
+  }
+  throw new Error(`the spawned stand did not become ready: ${lastError}\n${getLog().slice(-2000)}`);
+}
+
+/**
+ * Starts the API server, which also serves the built web app of `dist/web`.
+ *
+ * The API and the app answer on one port in the production arrangement, and this acceptance
+ * talks to both through the same address. The build is served from the tree on disk, so the
+ * receipt names the tree and the moment the built bundle was written.
+ */
+let spawnedChild = null;
+
+async function spawnStand(code) {
+  const databaseUrl = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("VERIFY_SPAWN_APP needs DATABASE_URL — the database of the stand to check");
+  }
+  const builtApp = resolve(REPO_ROOT, "dist/web/index.html");
+  if (!existsSync(builtApp)) {
+    throw new Error("VERIFY_SPAWN_APP needs the built web app: dist/web/index.html is missing — run npm run web:build first");
+  }
+  const requestedPort = Number(process.env.VERIFY_API_PORT ?? process.env.VERIFY_APP_PORT ?? 3127);
+  const port = await findFreePort(requestedPort);
+  const argv = ["node_modules/tsx/dist/cli.mjs", "src/api/server.ts"];
+  const startedAt = new Date();
+  const child = spawn(process.execPath, argv, {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATABASE_URL: databaseUrl,
+      NODE_ENV: process.env.NODE_ENV ?? "development",
+      WEB_ORIGIN: process.env.WEB_ORIGIN ?? "http://localhost:5173",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout?.on("data", chunk => {
+    output += String(chunk);
+  });
+  child.stderr?.on("data", chunk => {
+    output += String(chunk);
+  });
+  const baseUrl = `http://127.0.0.1:${port}`;
+  APP = baseUrl;
+  // The child is remembered before the readiness wait: a server that never becomes ready must not
+  // stay behind when the run gives up.
+  spawnedChild = child;
+  const readyAt = await waitForReady(baseUrl, () => output);
+  process.on("exit", stopStand);
+  const app = await describeApp(baseUrl);
+  return {
+    mode: "spawned-by-this-script",
+    appUrl: baseUrl,
+    kind: app.kind,
+    detectedBy: app.detectedBy,
+    httpStatus: app.httpStatus,
+    servedAssets: app.servedAssets,
+    pid: child.pid,
+    port,
+    requestedPort,
+    baseUrl,
+    argv: [process.execPath, ...argv],
+    cwd: REPO_ROOT,
+    startedAt: startedAt.toISOString(),
+    readyAt: readyAt.toISOString(),
+    // The tree the answering process was started from — the same tree the receipt names as the
+    // code under review.
+    code: {
+      codeSha: code.codeSha,
+      codeTree: code.codeTree,
+      branch: code.branch,
+      dirty: code.dirty,
+      diffSha256: code.diffSha256,
+    },
+    // The bundle that was served: a build that is older than the sources is a different app, and
+    // the receipt has to let a reader see that.
+    build: {
+      dir: "dist/web",
+      indexHtmlMtime: statSync(builtApp).mtime.toISOString(),
+    },
+    log: output.slice(-4000),
+  };
+}
+
+/**
+ * Stops the server the acceptance started.
+ *
+ * The tsx wrapper starts the server as a child of its own: stopping only the wrapper would leave
+ * the server holding the port, so the whole tree is stopped on Windows. The pipes of the child
+ * are closed as well — they would keep the event loop of the parent alive.
+ */
+function stopStand() {
+  if (!spawnedChild) return;
+  const child = spawnedChild;
+  spawnedChild = null;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+  } else {
+    try {
+      child.kill();
+    } catch {
+      // The process is already gone.
+    }
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
+}
+
+/**
+ * The identity of a stand that was started by somebody else — as far as it can be observed.
+ *
+ * The address and the kind of the app are observable, but the pid that serves it and the tree it
+ * was started from are not: the receipt has to say so instead of pretending otherwise.
+ */
+async function externalStandIdentity(code) {
+  const app = await describeApp(APP);
+  return {
+    mode: "external-stand",
+    appUrl: APP,
+    kind: app.kind,
+    detectedBy: app.detectedBy,
+    httpStatus: app.httpStatus,
+    servedAssets: app.servedAssets,
+    // The tree on disk is NOT the tree the answering process was started from — that is exactly
+    // what cannot be observed from the outside, and the receipt has to say so.
+    codeOnDisk: {
+      codeSha: code.codeSha,
+      codeTree: code.codeTree,
+      branch: code.branch,
+      dirty: code.dirty,
+      diffSha256: code.diffSha256,
+    },
+    note: "the process identity of an externally started stand cannot be proven from the outside — run with VERIFY_SPAWN_APP=1 to let the script start the app it checks",
   };
 }
 
@@ -168,6 +394,12 @@ async function readDraft(page) {
 
 async function main() {
   const startedAt = new Date();
+  // The identity of the code and of the process that answers come first: a browser acceptance
+  // against an unknown build proves nothing about the build under review.
+  const code = codeIdentity();
+  const stand = process.env.VERIFY_SPAWN_APP
+    ? await spawnStand(code)
+    : await externalStandIdentity(code);
   const browser = await chromium.launch();
 
   try {
@@ -497,10 +729,12 @@ async function main() {
     appUrl: APP,
     kind: "browser acceptance in Chromium against the running web app",
     code: {
-      ...codeIdentity(),
+      ...code,
       evidenceCommit: null,
       evidenceCommitNote: "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA",
     },
+    // The app that answered and the process behind it.
+    stand,
     summary: {
       total: results.length,
       passed: passed.length,
@@ -521,10 +755,12 @@ async function main() {
   const markdown = [
     `# Wave 8 browser acceptance (PR #4)`,
     ``,
-    `- Web app: \`${APP}\``,
+    `- Web app: \`${APP}\` (${stand.kind})`,
+    `- App detected by: ${stand.detectedBy}`,
     `- Browser: Chromium (Playwright)`,
     `- Code: \`${report.code.codeSha}\` tree \`${report.code.codeTree}\` on \`${report.code.branch}\``,
     `- Working tree: ${report.code.dirty ? `DIRTY — ${report.code.changedFiles.length} path(s)` : "clean"}`,
+    `- Serving process: ${stand.mode === "spawned-by-this-script" ? `pid ${stand.pid}, started ${stand.startedAt}, ready ${stand.readyAt}, port ${stand.port}, tree \`${stand.code?.codeTree}\`` : `externally started — ${stand.note}`}`,
     `- Started at: \`${report.generatedAt}\``,
     `- Result: ${passed.length} passed, ${skipped.length} skipped, ${failed.length} failed (${results.length} checks)`,
     ``,
@@ -541,11 +777,14 @@ async function main() {
   if (failed.length) {
     console.log("FAILED:");
     for (const item of failed) console.log(` - ${item.id} ${item.name} (${item.detail})`);
-    process.exitCode = 1;
   }
+  stopStand();
+  // The script leaves with an explicit code: the stand it started must not keep it alive.
+  process.exit(failed.length ? 1 : 0);
 }
 
 main().catch(err => {
   console.error("the browser acceptance crashed:", err);
+  stopStand();
   process.exitCode = 1;
 });
