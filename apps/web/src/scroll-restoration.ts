@@ -28,19 +28,25 @@ export type ScrollRestoreDecision = "wait" | "restore" | "skip";
  * @param target the remembered offset of the workspace, if there is one
  * @param currentScrollY where the page is right now
  * @param documentHeight how tall the document is right now
+ * @param viewportHeight how tall the visible part of the page is right now
  * @param attemptsLeft how many checks are still allowed
  */
 export function decideScrollRestore(options: {
   target: number | null | undefined;
   currentScrollY: number;
   documentHeight: number;
+  viewportHeight: number;
   attemptsLeft: number;
 }): ScrollRestoreDecision {
-  const { target, currentScrollY, documentHeight, attemptsLeft } = options;
+  const { target, currentScrollY, documentHeight, viewportHeight, attemptsLeft } = options;
   // Nothing to remember: the workspace was never read.
   if (typeof target !== "number" || !Number.isFinite(target) || target <= 0) return "skip";
-  // The document is still too short to hold the remembered offset.
-  if (documentHeight < target + SCROLL_RESTORE_TOLERANCE_PX) {
+  // The document must be able to hold the offset. The height of the document is not the measure
+  // for that: the browser can only scroll to `height - viewport`, so an offset near the end of a
+  // document that is barely taller than the target would be clamped to a smaller value and the
+  // reader would land on a different line than the one they left.
+  const reachable = Math.max(0, documentHeight - viewportHeight);
+  if (reachable < target - SCROLL_RESTORE_TOLERANCE_PX) {
     return attemptsLeft > 0 ? "wait" : "skip";
   }
   // The reader has scrolled somewhere else in the meantime: their choice wins over the memory.
