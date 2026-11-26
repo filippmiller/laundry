@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import {
   Badge,
@@ -28,6 +28,16 @@ import {
   notifyPartnerMoneyChanged,
   subscribeToPartnerMoneyRefresh,
 } from "./partner-money-refresh";
+import {
+  applyLoadError,
+  applyLoadedPage,
+  createRequestGeneration,
+  initialListSnapshot,
+  type ListSnapshot,
+  type RequestGeneration,
+  startAppendLoad,
+  startFreshLoad,
+} from "./request-generation";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -75,11 +85,6 @@ function disputeQuery(state: DisputeStateFilter, cursor?: string | null): string
   return params.toString();
 }
 
-function mergeById<T extends { id: string }>(previous: T[], next: T[]): T[] {
-  const seen = new Set(previous.map(item => item.id));
-  return [...previous, ...next.filter(item => !seen.has(item.id))];
-}
-
 const DISPUTE_STATE_TONES: Record<string, BadgeTone> = {
   open: "warn",
   investigating: "info",
@@ -100,38 +105,60 @@ function disputeTone(state: string): BadgeTone {
  * The filter lives in the URL, so a reload keeps it and the Back button walks through the
  * filters the operator has already tried. The list also follows the money bus: a dispute that
  * was closed somewhere else has to show up here without a full reload of the page.
+ *
+ * Every request belongs to a generation. The operator can switch the filter while a page is
+ * still loading, and the late answer of the previous filter must not replace the rows, the
+ * count and the cursor of the new one — the request generation in ./request-generation decides
+ * which answer may write, the panel only renders what it is told.
  */
 function useDisputeList(endpoint: string, urlStateKey: string) {
   const [filter, setFilter] = useUrlState<DisputeStateFilter>(urlStateKey, "all");
-  const [items, setItems] = useState<PartnerDisputeItem[] | null>(null);
-  /** `null` — the server did not tell how many disputes there are in total. */
-  const [totalCount, setTotalCount] = useState<number | null>(null);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<ListSnapshot<PartnerDisputeItem>>(() =>
+    initialListSnapshot<PartnerDisputeItem>(),
+  );
+
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+
+  // The filter can change without our own setter — the Back button walks the URL history — so
+  // the generation is closed while rendering: a late answer of the previous filter then finds
+  // it closed and changes nothing.
+  const requestKey = `${endpoint}|${filter}`;
+  const requestKeyRef = useRef(requestKey);
+  if (requestKeyRef.current !== requestKey) {
+    requestKeyRef.current = requestKey;
+    generation.invalidate();
+  }
+
+  // The cursor is opaque and belongs to one filter. A click on the button of the previous
+  // filter must not send that cursor to the server for the new one.
+  const nextCursorRef = useRef<string | null>(null);
+  nextCursorRef.current = snapshot.nextCursor;
 
   const load = useCallback(
     async (cursor?: string | null) => {
       const appending = Boolean(cursor);
-      if (appending) setLoadingMore(true);
-      else setLoading(true);
-      setError(null);
+      if (appending && cursor !== nextCursorRef.current) return;
+      // A fresh load opens a new generation and closes everything that is still running —
+      // including a pending load-more of the previous filter.
+      const token = appending ? generation.beginAppend() : generation.beginFresh();
+      setSnapshot(previous => (appending ? startAppendLoad(previous) : startFreshLoad(previous)));
       try {
         const page = await api<Paged<PartnerDisputeItem>>(`${endpoint}?${disputeQuery(filter, cursor)}`);
-        const pageItems = page.items ?? [];
-        setItems(previous => (appending ? mergeById(previous ?? [], pageItems) : pageItems));
-        setNextCursor(page.nextCursor ?? null);
-        setTotalCount(page.totalCount ?? null);
+        setSnapshot(previous => applyLoadedPage(previous, token, generation, page));
       } catch (err) {
-        if (!appending) setItems(null);
-        setError(err instanceof Error ? err.message : "Не удалось загрузить споры");
-      } finally {
-        setLoading(false);
-        setLoadingMore(false);
+        setSnapshot(previous =>
+          applyLoadError(
+            previous,
+            token,
+            generation,
+            err instanceof Error ? err.message : "Не удалось загрузить споры",
+          ),
+        );
       }
     },
-    [endpoint, filter],
+    [endpoint, filter, generation],
   );
 
   useEffect(() => {
@@ -143,7 +170,18 @@ function useDisputeList(endpoint: string, urlStateKey: string) {
     [load],
   );
 
-  return { filter, setFilter, items, totalCount, nextCursor, loading, loadingMore, error, load };
+  return {
+    filter,
+    setFilter,
+    items: snapshot.items,
+    /** `null` — the server did not tell how many disputes there are in total. */
+    totalCount: snapshot.totalCount,
+    nextCursor: snapshot.nextCursor,
+    loading: snapshot.loading,
+    loadingMore: snapshot.loadingMore,
+    error: snapshot.error,
+    load,
+  };
 }
 
 /**
@@ -191,6 +229,8 @@ export function FinanceDisputesPanel({ notify }: { notify: NotifyFn }) {
       setReason("");
       setCreditRub("");
       // The money of the partner changed: every panel that shows a sum has to recalculate it.
+      // The bus is one-way — it reloads the panels and never notifies itself, otherwise the
+      // panels would reload each other in an endless loop.
       notifyPartnerMoneyChanged();
     } catch (err) {
       notify({ kind: "error", text: err instanceof Error ? err.message : "Не удалось закрыть спор" });

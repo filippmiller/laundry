@@ -157,6 +157,14 @@ type FinanceAnalyticsDto = {
   monthly: Array<{ month: string; invoicedKopeks: number; netCollectedKopeks: number }>;
 };
 
+/**
+ * The money of the platform: what the customers owe and what the laundries are owed.
+ *
+ * The panel fetches its own numbers from /finance/analytics. It is refreshed through the
+ * refresh token of the workspace, not through the partner money bus: the workspace reloads
+ * itself when the bus fires and bumps the token, so the sums are fetched exactly once per
+ * change. A second subscription would ask the server for the very same numbers again.
+ */
 export function FinanceMoneyPanel({
   notify,
   onPendingRefundsChange,

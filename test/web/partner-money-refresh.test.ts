@@ -92,4 +92,37 @@ describe("LND-R4-06: the partner money refresh bus", () => {
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledTimes(1);
   });
+
+  it("does not loop when a listener notifies the bus again", () => {
+    // The bus is one-way: the panels reload and never notify the bus themselves. A listener
+    // that does it anyway must not start an endless reload of all panels.
+    let calls = 0;
+    const unsubscribe = subscribe(() => {
+      calls += 1;
+      notifyPartnerMoneyChanged();
+    });
+
+    notifyPartnerMoneyChanged();
+
+    expect(calls).toBe(1);
+    unsubscribe();
+  });
+
+  it("reloads the workspace and the dispute list from one notification of the resolver", () => {
+    // The finance workspace and the dispute list are separate panels: one notification of the
+    // resolver has to reach both of them.
+    const reloaded: string[] = [];
+    const unsubscribeWorkspace = subscribe(() => {
+      reloaded.push("workspace");
+    });
+    const unsubscribeDisputes = subscribe(() => {
+      reloaded.push("disputes");
+    });
+
+    notifyPartnerMoneyChanged();
+
+    expect(reloaded).toEqual(["workspace", "disputes"]);
+    unsubscribeWorkspace();
+    unsubscribeDisputes();
+  });
 });

@@ -15,6 +15,9 @@ type PartnerMoneyRefreshListener = () => void;
 
 const listeners = new Set<PartnerMoneyRefreshListener>();
 
+/** True while a notification is being delivered. */
+let notifying = false;
+
 /**
  * Registers a listener and returns the function that removes it again.
  *
@@ -33,13 +36,23 @@ export function subscribeToPartnerMoneyRefresh(listener: PartnerMoneyRefreshList
  *
  * A listener that throws must not keep the other panels stale, so the failure is reported and
  * the remaining listeners are still called.
+ *
+ * The bus is one-way: a listener reloads its panel and never notifies the bus again. A nested
+ * notification would make the panels reload each other in an endless loop, so it is dropped —
+ * the money changed once, one reload is enough.
  */
 export function notifyPartnerMoneyChanged(): void {
-  for (const listener of Array.from(listeners)) {
-    try {
-      listener();
-    } catch (error) {
-      console.error("Панель денежных данных не обновилась", error);
+  if (notifying) return;
+  notifying = true;
+  try {
+    for (const listener of Array.from(listeners)) {
+      try {
+        listener();
+      } catch (error) {
+        console.error("Панель денежных данных не обновилась", error);
+      }
     }
+  } finally {
+    notifying = false;
   }
 }

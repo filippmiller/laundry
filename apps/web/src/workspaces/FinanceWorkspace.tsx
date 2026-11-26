@@ -44,7 +44,7 @@ import {
 } from "./chargebacks-controller";
 import { FinanceMoneyPanel } from "./analytics-panels";
 import { FinanceDisputesPanel } from "./partner-money-panels";
-import { notifyPartnerMoneyChanged } from "./partner-money-refresh";
+import { notifyPartnerMoneyChanged, subscribeToPartnerMoneyRefresh } from "./partner-money-refresh";
 import { FiscalReceiptsPanel, StuckOrdersPanel } from "./ops-panels";
 import { useUrlState } from "../hooks/useUrlState";
 
@@ -213,6 +213,12 @@ export function FinanceWorkspace({
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  /**
+   * Whether the workspace has already loaded once. The first load must not move the refresh
+   * token: the panels mounted with it have just fetched, and a new token would ask the server
+   * for the same figures a second time.
+   */
+  const financeLoadedRef = useRef(false);
   const [pendingRefundKopeks, setPendingRefundKopeks] = useState(0);
 
   const [printDoc, setPrintDoc] = useState<{ kind: DocumentKind; id: string } | null>(null);
@@ -351,7 +357,6 @@ export function FinanceWorkspace({
 
   const loadFinance = useCallback(async () => {
     setLoading(true);
-    setRefreshNonce(n => n + 1);
     try {
       const [ov, rec, dr] = await Promise.all([
         api<FinanceOverviewResponse>("/finance/overview"),
@@ -359,6 +364,12 @@ export function FinanceWorkspace({
         api<DriftItem[] | { items?: DriftItem[] }>("/finance/payment-drift"),
         refreshChargebacks(),
       ]);
+      // The panels below fetch their own numbers with the refresh token. The token must change
+      // only when the numbers really changed: on the first load the panels have just fetched with
+      // the token they were mounted with, and a new token would ask the server for the very same
+      // figures a second time.
+      if (financeLoadedRef.current) setRefreshNonce(n => n + 1);
+      financeLoadedRef.current = true;
       setOverview(ov ?? {});
       if (ov?.partnerPayoutsActive) {
         setPayoutActiveBucket(ov.partnerPayoutsActive);
@@ -402,6 +413,18 @@ export function FinanceWorkspace({
   useEffect(() => {
     void loadFinance();
   }, [loadFinance]);
+
+  // A dispute that was settled in this workspace changes the money: the sums, the overview and
+  // the credit-note queue have to show the fresh state of the server without a manual refresh.
+  // The workspace reloads itself through the money bus — it never notifies the bus again, or the
+  // panels would reload each other in an endless loop.
+  useEffect(
+    () =>
+      subscribeToPartnerMoneyRefresh(() => {
+        void loadFinance();
+      }),
+    [loadFinance],
+  );
 
   const openRefundModal = (intent: PaymentIntentItem) => {
     setRefundTarget(intent);
@@ -776,9 +799,10 @@ export function FinanceWorkspace({
             variant="ghost"
             leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
             onClick={() => {
-              void loadFinance();
-              // The panels that show the partner's money live outside this workspace: tell them
-              // that the numbers moved, so nothing stays stale until the next full reload.
+              // The workspace reloads itself through the money bus, so the button only notifies
+              // the bus: calling loadFinance() here as well would ask the server twice for the
+              // same numbers. The panels that show the partner's money live outside this
+              // workspace and reload from the same notification.
               notifyPartnerMoneyChanged();
             }}
             disabled={loading}
