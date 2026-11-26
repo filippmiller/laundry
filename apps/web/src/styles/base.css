@@ -138,10 +138,16 @@
      Scroll lock — the document is frozen while the mobile drawer is open
      so the page behind the menu cannot scroll (MA-08). The class is
      toggled on <html> and <body> by the shell.
+
+     It does NOT set `overflow: hidden`. That would collapse the scrollable
+     range of the document: the browser clamps the offset to the new maximum
+     and the content the user is reading lands on another line (M-3). It would
+     also turn the body into a scroll container, and the sticky topbar and tab
+     strip would stop sticking — they would go away together with the content.
+     The freeze of the page is done with the input instead, in `scroll-lock.ts`.
      ------------------------------------------------------------------ */
   html.scroll-locked,
   body.scroll-locked {
-    overflow: hidden;
     overscroll-behavior: none;
   }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { LogOut, Menu, UserRound, X } from "lucide-react";
 import { ROLE_LABELS, stateLabel } from "../labels";
+import { decideScrollGuard, shouldLockScroll } from "../scroll-lock";
 import type { Me, Notice } from "../types";
 import type { WorkspaceDef, WorkspaceKey } from "../workspaces/registry";
 import { Badge } from "./ui/Badge";
@@ -82,47 +83,110 @@ export function Shell({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [railOpen]);
 
-  // The reading position of the page behind the drawer.
+  // The reading position of the page behind the drawer, and the witness of
+  // what the user reads.
   //
-  // It has to be remembered *before* the drawer opens: applying `inert` to the content column
-  // shifts the scroll offset, so a position read afterwards is already the wrong one.
-  const railOpenRef = useRef(false);
-  const scrollYRef = useRef(0);
+  // Both are captured at the moment the drawer is opened: a position read
+  // after the drawer is on the screen is already the wrong one.
+  const lockedOffsetRef = useRef(0);
+  const witnessRef = useRef<Element | null>(null);
+  const witnessTopRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    railOpenRef.current = railOpen;
-  }, [railOpen]);
-
-  useEffect(() => {
-    function onScroll() {
-      // While the drawer is open the document is locked and `inert` may shift the offset; the
-      // position to restore is the one from before the drawer opened.
-      if (railOpenRef.current) return;
-      scrollYRef.current = window.scrollY;
-    }
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
+  function openRail() {
+    lockedOffsetRef.current = window.scrollY;
+    // The witness is the element under the reading point — taken on the edge of
+    // the screen, where the drawer does not lie. It tells a scroll of the
+    // reader apart from the compensation of the browser: when a panel arrives
+    // above the reading position, the browser moves the offset and leaves the
+    // content where it was — the witness stays, the offset does not.
+    const point = document.elementFromPoint(
+      Math.max(0, window.innerWidth - 24),
+      Math.round(window.innerHeight / 2),
+    );
+    const witness =
+      point && point !== document.body && point !== document.documentElement ? point : null;
+    witnessRef.current = witness;
+    witnessTopRef.current = witness ? witness.getBoundingClientRect().top : null;
+    setRailOpen(true);
+  }
 
   // The page behind the open drawer must not scroll, and it has to come back
   // to the same place when the drawer closes (MA-08).
+  //
+  // The freeze is done with the input and not with the layout: `overflow:
+  // hidden` on <html>/<body> would collapse the scrollable range of the
+  // document — the browser clamps the offset to the new maximum, so the content
+  // the user is reading lands on another line — and it would turn the body into
+  // a scroll container, which stops the sticky topbar and tab strip from
+  // sticking: they go away together with the content (M-3).
   useEffect(() => {
     if (!isMobile || !railOpen) return;
+    const drawer = railRef.current;
+
+    const insideDrawer = (target: EventTarget | null): boolean =>
+      !!drawer && target instanceof Node && drawer.contains(target);
+
+    function onWheel(event: WheelEvent) {
+      if (shouldLockScroll({ kind: "wheel", insideDrawer: insideDrawer(event.target) })) {
+        event.preventDefault();
+      }
+    }
+
+    function onTouchMove(event: TouchEvent) {
+      if (shouldLockScroll({ kind: "touchmove", insideDrawer: insideDrawer(event.target) })) {
+        event.preventDefault();
+      }
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (shouldLockScroll({ kind: "keydown", key: event.key, insideDrawer: insideDrawer(event.target) })) {
+        event.preventDefault();
+      }
+    }
+
+    // A scroll that happened for another reason — a dragged scrollbar, a
+    // focused element, a programmatic jump — is put back where it was.
+    function onScroll() {
+      const witness = witnessRef.current;
+      const witnessTop = witnessTopRef.current;
+      // A witness that left the page cannot witness anything: without it the
+      // guard has no proof that the content moved, and a guess would move the
+      // page under the reader.
+      const witnessMoved =
+        witness && witness.isConnected && witnessTop !== null
+          ? Math.abs(witness.getBoundingClientRect().top - witnessTop) > 1
+          : false;
+      const maxOffset = document.documentElement.scrollHeight - window.innerHeight;
+      const action = decideScrollGuard({
+        current: window.scrollY,
+        locked: lockedOffsetRef.current,
+        maxOffset,
+        witnessMoved,
+      });
+      if (action.kind === "restore") {
+        lockedOffsetRef.current = action.top;
+        // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, and `auto`
+        // follows it — the page would glide instead of holding its place.
+        window.scrollTo({ top: action.top, behavior: "instant" as ScrollBehavior });
+      }
+    }
+
     const root = document.documentElement;
-    const scrollY = scrollYRef.current;
     root.classList.add("scroll-locked");
     document.body.classList.add("scroll-locked");
-    // `overflow: hidden` on the root resets the visible offset in Chrome: the page behind the
-    // drawer jumps up to the top of the document while the menu is open. Re-applying the saved
-    // offset keeps the content exactly where the user left it — the close path restores it again.
-    window.scrollTo({ top: scrollY, behavior: "instant" as ScrollBehavior });
+    // `passive: false` — a listener that may prevent the default action has to
+    // say so, otherwise the browser treats it as a reader and ignores the veto.
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       root.classList.remove("scroll-locked");
       document.body.classList.remove("scroll-locked");
-      // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, and `auto` follows it —
-      // the page would then glide back to the top instead of returning to the same line.
-      window.scrollTo({ top: scrollY, behavior: "instant" as ScrollBehavior });
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", onScroll);
     };
   }, [railOpen, isMobile]);
 
@@ -250,7 +314,7 @@ export function Shell({
                 aria-label={railOpen ? "Закрыть меню" : "Открыть меню"}
                 aria-expanded={railOpen}
                 aria-controls="app-rail"
-                onClick={() => setRailOpen(open => !open)}
+                onClick={() => (railOpen ? setRailOpen(false) : openRail())}
               >
                 {railOpen ? <X size={20} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
               </button>
