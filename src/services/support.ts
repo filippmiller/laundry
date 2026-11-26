@@ -4,7 +4,7 @@ import { notifications, orders, supportMessageDrafts, supportMessages, supportTh
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
-import { appendEvent } from "../core/events.js";
+import { appendEvent, supportTransitionDedupeKey } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 
 const SUPPORT_ROLES = [...ROLE_GROUPS.support, ...ROLE_GROUPS.admin] as const;
@@ -274,13 +274,14 @@ export async function closeThread(
     const { thread, customerId } = await loadThread(tx, principal, input.threadId, { lock: true });
     if (thread.state === "closed") return { threadId: thread.id, state: "closed" as const };
     await tx.update(supportThreads).set({ state: "closed" }).where(eq(supportThreads.id, thread.id));
-    await appendEvent(tx, {
+    const event = await appendEvent(tx, {
       principal, aggregateType: "support_thread", aggregateId: thread.id,
       eventType: "support.closed", reason: input.reason,
     });
     // The customer has to learn that the conversation is over without opening the thread again.
-    // The dedupe key is the one the outbox uses for the same event, so the customer never sees
-    // the notice twice.
+    // The dedupe key names the transition and not the thread: closing the same thread again
+    // (after a reopening) has to tell the customer again, while the outbox copy of this very
+    // event has to stay silent - and it does, because both copies carry the id of the same event.
     if (customerId) {
       await tx.insert(notifications).values({
         organizationId: principal.organizationId,
@@ -289,7 +290,7 @@ export async function closeThread(
         channel: "push",
         template: "support_closed",
         payloadJson: { threadId: thread.id, subject: thread.subject, reason: input.reason },
-        dedupeKey: `support:${thread.id}:closed`,
+        dedupeKey: supportTransitionDedupeKey(thread.id, "closed", event.id),
       }).onConflictDoNothing();
     }
     // A closed thread has no answer left to write: the pending drafts go with it.
@@ -320,12 +321,14 @@ export async function reopenThread(
     const { thread, customerId } = await loadThread(tx, principal, input.threadId, { lock: true });
     if (thread.state !== "closed") throw errors.transition(thread.state, "open");
     await tx.update(supportThreads).set({ state: "open" }).where(eq(supportThreads.id, thread.id));
-    await appendEvent(tx, {
+    const event = await appendEvent(tx, {
       principal, aggregateType: "support_thread", aggregateId: thread.id,
       eventType: "support.reopened",
       payload: { previousState: thread.state, customerId: customerId ?? null },
     });
     // The customer asked to continue the conversation; the notice says the thread is open again.
+    // The key names this reopening, so a later reopening notifies again and the outbox copy of
+    // this very event does not.
     if (customerId) {
       await tx.insert(notifications).values({
         organizationId: principal.organizationId,
@@ -334,7 +337,7 @@ export async function reopenThread(
         channel: "push",
         template: "support_reopened",
         payloadJson: { threadId: thread.id, subject: thread.subject },
-        dedupeKey: `support:${thread.id}:reopened`,
+        dedupeKey: supportTransitionDedupeKey(thread.id, "reopened", event.id),
       }).onConflictDoNothing();
     }
     return { threadId: thread.id, state: "open" as const };

@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { supportTransitionDedupeKey } from "../core/events.js";
 import { claims, notifications, orders, outboxEvents, paymentIntents, refunds, supportThreads } from "../db/schema.js";
 
 export const OUTBOX_MAX_ATTEMPTS = 5;
@@ -74,10 +75,15 @@ const EVENT_TEMPLATES: Record<string, string> = {
  * Events whose notification is written by the service that produced them (the support service
  * notifies the customer the moment a thread is closed or reopened) and therefore has to share the
  * dedupe key with the outbox copy of the same event: one customer, one notification.
+ *
+ * The key names the transition and not the thread, because a thread can be closed and reopened
+ * many times and every one of those transitions deserves its own notice. The outbox row id is
+ * the id of the event, so the same event always produces the same key - a redelivery collapses
+ * into the first delivery - while a later transition of the same thread gets a key of its own.
  */
-const EVENT_DEDUPE_KEYS: Record<string, (aggregateId: string) => string> = {
-  "support.closed": aggregateId => `support:${aggregateId}:closed`,
-  "support.reopened": aggregateId => `support:${aggregateId}:reopened`,
+const EVENT_DEDUPE_KEYS: Record<string, (aggregateId: string, eventId: string) => string> = {
+  "support.closed": (aggregateId, eventId) => supportTransitionDedupeKey(aggregateId, "closed", eventId),
+  "support.reopened": (aggregateId, eventId) => supportTransitionDedupeKey(aggregateId, "reopened", eventId),
 };
 
 type ClaimedOutboxRow = {
@@ -234,7 +240,7 @@ export async function processOutbox(
             eq(orders.organizationId, row.organizationId),
           )).limit(1);
           if (!order) throw new Error("ORDER_NOT_FOUND");
-          const dedupeKey = EVENT_DEDUPE_KEYS[row.eventType]?.(row.aggregateId) ?? `outbox:${row.id}`;
+          const dedupeKey = EVENT_DEDUPE_KEYS[row.eventType]?.(row.aggregateId, row.id) ?? `outbox:${row.id}`;
 
           // Idempotent provider receipt recording: if already delivered with a receipt, do not re-send.
           let receiptId = row.providerReceipt;
