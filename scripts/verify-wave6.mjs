@@ -100,13 +100,32 @@ function check(name, ok, detail) {
 async function main() {
   // --- LA-18 / TRIA-001: the finance dispute loop is reachable end to end -------------------
   const finance = await login("platform_finance", PERSONAS.platform_finance);
+  const partner = await login("partner_finance", PERSONAS.partner_finance);
   const disputes = await call(finance, "/finance/partner-disputes?limit=50");
   check(
     "GET /finance/partner-disputes returns a list (was 404)",
     disputes.status === 200 && Array.isArray(disputes.payload?.items),
     `status=${disputes.status} items=${disputes.payload?.items?.length ?? "n/a"}`,
   );
-  const openDispute = (disputes.payload?.items ?? []).find(item => item.state !== "resolved");
+  let openDispute = (disputes.payload?.items ?? []).find(item => item.state !== "resolved");
+  if (!openDispute) {
+    // A previous acceptance resolves the open disputes, and the stand keeps that state. The
+    // check needs one, so the run opens it through the very endpoint a partner uses instead of
+    // depending on what the stand happens to hold.
+    const accrualLines = await call(partner, "/partner/accruals");
+    const lines = (accrualLines.payload?.invoices ?? []).flatMap(invoice => invoice.lines ?? []);
+    for (const line of lines) {
+      if (line.status === "credited" || line.disputed) continue;
+      const opened = await call(partner, `/finance/partner-invoice-lines/${line.id}/disputes`, {
+        method: "POST",
+        body: { reason: "Волна 8: спор, чтобы список споров был непустым." },
+      });
+      if (opened.status !== 200 || !opened.payload?.disputeId) continue;
+      const fresh = await call(finance, "/finance/partner-disputes?limit=50");
+      openDispute = (fresh.payload?.items ?? []).find(item => item.state !== "resolved");
+      if (openDispute) break;
+    }
+  }
   check(
     "a partner dispute is listed with its id and amount",
     Boolean(openDispute?.id && typeof openDispute?.amountKopeks === "number"),
@@ -114,7 +133,6 @@ async function main() {
   );
 
   // --- LA-05 / TRIA: the partner sees their own money ---------------------------------------
-  const partner = await login("partner_finance", PERSONAS.partner_finance);
   const partnerDisputes = await call(partner, "/partner/disputes");
   const partnerPayouts = await call(partner, "/partner/payouts?bucket=all&limit=50");
   const partnerCredits = await call(partner, "/partner/credit-notes?bucket=all&limit=50");
