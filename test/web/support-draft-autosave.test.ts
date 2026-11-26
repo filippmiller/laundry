@@ -434,6 +434,32 @@ describe("LND-R5-01 and LND-R5-02: the send confirmation and the draft writes", 
     expect(server.getStored("thread-r5-5")).toBeNull();
   });
 
+  it("removes the sent answer from the server even when the load of the draft failed", async () => {
+    // The load of the draft failed, so the client does not know what the server holds. The answer
+    // was sent anyway: the server must not keep it as a draft. The removal is idempotent, so a
+    // draft the operator never saw cannot be destroyed by accident — and the load has settled, so
+    // the removal does not overtake it.
+    const calls: Call[] = [];
+    const api: SupportDraftApiFn = async (path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push({ path, method, body: options?.body });
+      if (method === "GET") throw new Error("Черновик недоступен");
+      return null;
+    };
+    const controller = createSupportDraftController({ api, formatError });
+
+    await controller.openThread("thread-r5-7");
+    expect(controller.getSnapshot().status).toBe("error");
+
+    controller.setBody("Отправленный ответ");
+    controller.markSent("thread-r5-7", controller.getSnapshot().revision);
+    await settle();
+
+    expect(calls.filter(call => call.method === "DELETE")).toHaveLength(1);
+    expect(controller.getSnapshot().status).toBe("clean");
+    expect(controller.getSnapshot().body).toBe("");
+  });
+
   it("drops the draft of a closed thread and removes it from the server", async () => {
     const server = draftServer();
     server.release();

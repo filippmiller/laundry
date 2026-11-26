@@ -219,9 +219,16 @@ export function createSupportDraftController(opts: {
    */
   const pendingAction = (record: ThreadRecord): "put" | "delete" | null => {
     const trimmed = record.body.trim();
-    if (record.dropDraft && record.serverKnown && record.savedBody !== "") {
+    if (record.dropDraft && record.loadSettled && (!record.serverKnown || record.savedBody !== "")) {
       // The server must not keep the sent answer. The newer text of the box replaces it in the
       // write that follows this removal.
+      //
+      // The removal is sent even when the client does not know what the server holds — the load
+      // of the draft failed, so the server state is unknown. The intent is explicit here (the
+      // answer was sent, or the thread was closed) and the removal is idempotent, so a draft that
+      // the operator never saw cannot be destroyed by accident: it is the answer that was already
+      // sent, and it must not come back as a draft. The load must have settled: a removal that
+      // overtakes the load would destroy a draft nobody ever touched.
       return "delete";
     }
     if (trimmed) return trimmed === record.savedBody ? null : "put";
