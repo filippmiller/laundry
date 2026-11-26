@@ -49,6 +49,7 @@ import {
   proposeCompensation, readEvidence, readEvidenceContent, registerEvidence, revokeOwnSession, searchOrders, uploadEvidence,
 } from "../services/workspace.js";
 import { seedDemo } from "../services/seed.js";
+import { escalateOrder, listStuckOrders, resolveEscalation } from "../services/escalation.js";
 import { apiFinanceOverview } from "../services/api-overview.js";
 import { financeAnalytics } from "../services/finance-analytics.js";
 import { customerFinance } from "../services/customer-finance.js";
@@ -640,6 +641,10 @@ export function buildApp(db: Db) {
       })).min(1),
       declaredItems: z.array(z.object({
         subtypeId: z.string().min(1), quantity: z.number().int().min(1).max(MAX_PICKED_QUANTITY),
+        // The customer's own statement of what a piece is worth. It is optional — a customer
+        // may hand things over without stating a value — but a negative or fractional number
+        // is a client mistake: it is rejected here instead of being silently dropped.
+        declaredValueKopeks: z.number().int().nonnegative().optional(),
       })).max(MAX_DECLARED_ROWS).optional(),
       releaseReservationIds: z.array(z.uuid()).max(10).optional(),
     }),
@@ -945,6 +950,11 @@ export function buildApp(db: Db) {
         itemCode: z.string().min(2), category: z.string().min(2), description: z.string().min(1),
         subtypeId: z.string().min(1).optional(),
         declaredValueKopeks: z.number().int().nonnegative().optional(),
+        // How the courier settled the value the customer declared for this piece:
+        // "confirmed" — the piece matches the declaration, "discrepancy" — the courier
+        // recorded a different value. Without it a differing value would look like a
+        // silent overwrite of the customer's declaration.
+        declaredValueSettlement: z.enum(["confirmed", "discrepancy"]).optional(),
         condition: z.record(z.string(), z.unknown()).optional(),
         evidenceAssetIds: z.array(z.uuid()).optional(),
       })).max(MAX_DECLARED_ROWS).optional(),
@@ -956,8 +966,26 @@ export function buildApp(db: Db) {
     handler: async ctx => {
       const [stop] = await db.select().from(routeStops).where(eq(routeStops.id, ctx.params.id)).limit(1);
       if (!stop || stop.organizationId !== ctx.principal.organizationId) throw new AppError("NOT_FOUND");
+      type IntakeItemBody = {
+        itemCode: string;
+        category: string;
+        description: string;
+        subtypeId?: string;
+        declaredValueKopeks?: number;
+        declaredValueSettlement?: "confirmed" | "discrepancy";
+        condition?: Record<string, unknown>;
+        evidenceAssetIds?: string[];
+      };
+      // The settlement rides along with the piece in the free-form condition record: the
+      // garment keeps the accepted value, and the record says whether the courier confirmed
+      // the customer's declaration or recorded a different one.
+      const items: IntakeItemBody[] | undefined = ctx.body.items?.map((item: IntakeItemBody) => {
+        const { declaredValueSettlement, ...rest } = item;
+        if (!declaredValueSettlement) return rest;
+        return { ...rest, condition: { ...(rest.condition ?? {}), declaredValueSettlement } };
+      });
       return recordIntake(db, ctx.principal, {
-        orderId: stop.orderId, ...ctx.body, key: idempotencyKey(ctx),
+        orderId: stop.orderId, ...ctx.body, ...(items ? { items } : {}), key: idempotencyKey(ctx),
       });
     },
   });
@@ -1139,6 +1167,46 @@ export function buildApp(db: Db) {
     roles: ["system_worker", "platform_admin"],
     body: z.object({ key: z.string().min(1).optional() }),
     handler: ctx => drainOutbox(db, ctx.principal),
+  });
+  add({
+    // The stuck list is the answer to "which order is nobody moving": every order that is not
+    // in a terminal state and has not been touched for longer than the threshold, together
+    // with the escalation that owns it, if there is one.
+    method: "GET", path: "/ops/stuck-orders", summary: "Orders that stopped moving, with their open escalations", tags: ["Ops", "Dispatcher"],
+    roles: [...ROLE_GROUPS.dispatcher, ...ROLE_GROUPS.finance],
+    query: z.object({
+      minutes: z.coerce.number().int().min(1).max(1440).optional(),
+      escalated: z.enum(["true", "false"]).optional(),
+    }),
+    handler: ctx => listStuckOrders(db, ctx.principal, {
+      minutes: ctx.query.minutes as number | undefined,
+      onlyEscalated: ctx.query.escalated === "true",
+    }),
+  });
+  add({
+    method: "POST", path: "/orders/:id/escalations", summary: "Escalate a stuck order: name the reason and the owner of the fix", tags: ["Ops", "Dispatcher"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.dispatcher],
+    body: z.object({
+      reason: z.string().min(3), assigneeId: z.uuid().optional(), key: z.string().optional(),
+    }),
+    handler: ctx => escalateOrder(db, ctx.principal, {
+      orderId: ctx.params.id,
+      reason: ctx.body.reason,
+      assigneeId: ctx.body.assigneeId ?? null,
+      key: idempotencyKey(ctx),
+    }),
+  });
+  add({
+    method: "POST", path: "/escalations/:id/resolve", summary: "Close an escalation with the resolution text", tags: ["Ops", "Dispatcher"],
+    params: idSchema,
+    roles: [...ROLE_GROUPS.dispatcher],
+    body: z.object({ resolution: z.string().min(3), key: z.string().optional() }),
+    handler: ctx => resolveEscalation(db, ctx.principal, {
+      escalationId: ctx.params.id,
+      resolution: ctx.body.resolution,
+      key: idempotencyKey(ctx),
+    }),
   });
   add({
     method: "POST", path: "/evidence", summary: "Register photo evidence metadata (hash, object key)", tags: ["Customer"],
@@ -1437,7 +1505,18 @@ export function buildApp(db: Db) {
   add({
     method: "GET", path: "/partner/disputes", summary: "Disputes opened on my partner's invoice lines", tags: ["Partner"],
     roles: [...ROLE_GROUPS.partner],
-    handler: ctx => listPartnerScopedDisputes(db, ctx.principal),
+    // The partner reads its own disputes with the same contract as the finance list, so the
+    // panel can page through them and tell how many there are in total.
+    query: z.object({
+      state: z.enum(["open", "investigating", "resolved"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).optional(),
+    }),
+    handler: ctx => listPartnerScopedDisputes(db, ctx.principal, {
+      state: ctx.query.state as "open" | "investigating" | "resolved" | undefined,
+      limit: ctx.query.limit as number | undefined,
+      cursor: ctx.query.cursor as string | undefined,
+    }),
   });
   add({
     method: "GET", path: "/partner/payouts", summary: "My partner payouts (active queue or history)", tags: ["Partner"],

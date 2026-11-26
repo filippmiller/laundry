@@ -1,5 +1,6 @@
-import { sql } from "drizzle-orm";
+import { and, eq, inArray, sql, sum } from "drizzle-orm";
 import type { Db, Tx } from "../db/client.js";
+import { partnerPayouts } from "../db/schema.js";
 
 export type PartnerAccrualTotalsRow = {
   partnerId: string;
@@ -31,7 +32,7 @@ type RawPartnerAccrualTotalsRow = {
 
 /**
  * Single source of truth for partner accrual totals and net disputed holds.
- * Shared by payout authorization (`computePartnerBalanceTx`) and `financeAnalytics`
+ * Shared by the partner balance (`queryPartnerBalance`) and `financeAnalytics`
  * so available payable, disputed hold, and advance metrics never diverge.
  */
 export async function queryPartnerAccrualTotals(
@@ -89,4 +90,70 @@ export async function queryPartnerAccrualTotals(
       grossPayableKopeks,
     };
   });
+}
+
+/**
+ * Everything the platform owes one partner, and everything it already promised.
+ *
+ * The partner panel and the payout authorization have to agree about the money down to the
+ * last kopeck, so both read this one function instead of each summing their own rows:
+ * - `accruedKopeks`: net sum of every non-voided accrual of the partner — the whole history,
+ *   never a page of it
+ * - `disputedKopeks`: the contested part of that accrual (each disputed accrual holds only
+ *   its uncredited remainder, exactly like `queryPartnerAccrualTotals`)
+ * - `grossPayableKopeks`: `accruedKopeks - disputedKopeks`
+ * - `paidKopeks`: payouts that are approved or paid
+ * - `reservedKopeks`: payouts that are scheduled or pending — money promised but not released
+ * - `availableKopeks`: `grossPayableKopeks - paidKopeks - reservedKopeks`
+ */
+export type PartnerBalance = {
+  accruedKopeks: number;
+  disputedKopeks: number;
+  grossPayableKopeks: number;
+  paidKopeks: number;
+  reservedKopeks: number;
+  availableKopeks: number;
+};
+
+/**
+ * The balance of one partner, computed over the whole history.
+ *
+ * `excludePayoutId` drops one payout from the reservation — the payout that is being
+ * approved reserves the money it is about to receive and must not block itself.
+ */
+export async function queryPartnerBalance(
+  executor: Db | Tx,
+  organizationId: string,
+  partnerId: string,
+  options: { excludePayoutId?: string } = {},
+): Promise<PartnerBalance> {
+  const [totals] = await queryPartnerAccrualTotals(executor, organizationId, partnerId);
+  const [paidRow] = await executor.select({ total: sum(partnerPayouts.amountKopeks) })
+    .from(partnerPayouts)
+    .where(and(
+      eq(partnerPayouts.organizationId, organizationId),
+      eq(partnerPayouts.partnerId, partnerId),
+      inArray(partnerPayouts.state, ["approved", "paid"]),
+    ));
+  const [reservedRow] = await executor.select({ total: sum(partnerPayouts.amountKopeks) })
+    .from(partnerPayouts)
+    .where(and(
+      eq(partnerPayouts.organizationId, organizationId),
+      eq(partnerPayouts.partnerId, partnerId),
+      inArray(partnerPayouts.state, ["scheduled", "pending"]),
+      ...(options.excludePayoutId ? [sql`${partnerPayouts.id} <> ${options.excludePayoutId}`] : []),
+    ));
+  const accruedKopeks = totals?.accruedKopeks ?? 0;
+  const disputedKopeks = totals?.disputedKopeks ?? 0;
+  const grossPayableKopeks = accruedKopeks - disputedKopeks;
+  const paidKopeks = Number(paidRow?.total ?? 0);
+  const reservedKopeks = Number(reservedRow?.total ?? 0);
+  return {
+    accruedKopeks,
+    disputedKopeks,
+    grossPayableKopeks,
+    paidKopeks,
+    reservedKopeks,
+    availableKopeks: grossPayableKopeks - paidKopeks - reservedKopeks,
+  };
 }

@@ -24,6 +24,19 @@ type QuoteSnapshot = {
   declaredItems?: DeclaredItem[];
 };
 
+/**
+ * A declared piece as it travels in the snapshot: the subtype, how many of it, and the value the
+ * customer stated for it.
+ *
+ * The shared taxonomy type describes the normalized declaration, which is what the hash is built
+ * from. The value is optional and rides along with the declaration, so the DTO says so instead of
+ * leaving the extra field to be discovered at runtime.
+ */
+type DeclaredItemWithValue = DeclaredItem & {
+  /** The value the customer stated, in kopeks. `null` means "not declared". */
+  declaredValueKopeks?: number | null;
+};
+
 export async function createOrder(
   db: Db,
   principal: Principal,
@@ -568,7 +581,7 @@ export async function loadOrderView(db: Db, principal: Principal, orderId: strin
   // What the customer declared at handover, straight out of the immutable quote
   // snapshot. The courier reconciles the accepted garments against this list.
   const quoteSnapshot = (quoteRows[0]?.snapshotJson ?? null) as QuoteSnapshot | null;
-  const declaredItems: DeclaredItem[] = quoteSnapshot?.declaredItems ?? [];
+  const declaredItems: DeclaredItemWithValue[] = quoteSnapshot?.declaredItems ?? [];
 
   const weightByCode = new Map<string, number>();
   const weightByContainerId = new Map<string, number>();

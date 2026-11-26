@@ -8,7 +8,7 @@ import { hashRequest, withIdempotency } from "../core/idempotency.js";
 import { calculateQuote, type QuoteInput, type ServiceLineInput } from "../domain/pricing.js";
 import { releaseHeldReservationsInTx } from "../domain/slot-reservation.js";
 import { activeTariff, resolveAddress } from "./catalog.js";
-import { normalizeDeclaredItems } from "../../shared/garment-taxonomy.js";
+import { normalizeDeclaredItems, type DeclaredItem } from "../../shared/garment-taxonomy.js";
 
 export type QuoteLineInput = {
   serviceId: string;
@@ -256,11 +256,19 @@ export async function getQuote(db: Db, principal: Principal, quoteId: string) {
   )).limit(1);
   if (!quote) throw errors.notFound("quote");
   if (hasRole(principal, "customer") && quote.customerId !== principal.userId) throw errors.notFound("quote");
-  const snapshot = (quote.snapshotJson ?? {}) as { addressId?: string; termsVersion?: string };
+  const snapshot = (quote.snapshotJson ?? {}) as {
+    addressId?: string;
+    termsVersion?: string;
+    declaredItems?: Array<DeclaredItem & { declaredValueKopeks?: number | null }>;
+  };
   return {
     ...quote,
     addressId: snapshot.addressId ?? null,
     termsVersion: snapshot.termsVersion ?? null,
+    // The declaration is part of the immutable snapshot, so the value the customer stated
+    // is readable together with the quote it belongs to — by the customer (who declared it)
+    // and by the courier (who confirms it at intake).
+    declaredItems: snapshot.declaredItems ?? [],
   };
 }
 

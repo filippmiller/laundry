@@ -17,7 +17,7 @@ import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 import { expireDueHolds as expireDueHoldsDomain } from "../domain/slot-reservation.js";
 import { loadOrder } from "./orders.js";
 import { processOutboxBatch } from "./outbox.js";
-import { queryPartnerAccrualTotals } from "./partner-payable.js";
+import { queryPartnerBalance } from "./partner-payable.js";
 
 const ACCOUNTS = [
   ["clearing", "Платежный клиринг"],
@@ -638,6 +638,7 @@ export async function orderFinance(db: Db, principal: Principal, orderId: string
 export async function partnerAccruals(db: Db, principal: Principal, input: { limit?: number } = {}) {
   assertRole(principal, ...ROLE_GROUPS.partner);
   if (!principal.partnerId) throw errors.forbidden("partner scope required");
+  const partnerId = principal.partnerId;
   const limit = Math.min(input.limit ?? 50, 100);
   const accruals = await db.select({
     id: partnerServiceAccruals.id,
@@ -746,7 +747,9 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
     });
     linesByInvoice.set(row.invoiceId, list);
   }
-  const [totals] = await queryPartnerAccrualTotals(db, principal.organizationId, principal.partnerId);
+  // One balance for the whole history of the partner, not for the page of accruals above:
+  // the panel and the payout authorization have to read the same numbers.
+  const balance = await queryPartnerBalance(db, principal.organizationId, partnerId);
   return {
     partnerId: principal.partnerId,
     accruals,
@@ -754,16 +757,19 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
       ...inv,
       lines: linesByInvoice.get(inv.id) ?? [],
     })),
-    estimatedTotalKopeks: accruals
-      .filter(accrual => accrual.status !== "voided")
-      .reduce((total, accrual) => total + accrual.amountKopeks, 0),
+    /** The lifetime accrual total of the partner — the sum over every non-voided accrual. */
+    estimatedTotalKopeks: balance.accruedKopeks,
+    /** The full balance of the partner, shared with the payout authorization. */
+    balance,
     /**
-     * What the platform owes the partner: the accrued work minus the amount that is contested
-     * right now. The contested part is reported separately and is not payable until the dispute
-     * is settled.
+     * What the platform owes the partner before payouts: the accrued work minus the amount
+     * that is contested right now. The contested part is reported separately and is not
+     * payable until the dispute is settled. Kept as an alias of
+     * `balance.grossPayableKopeks` — the money that is still free to pay out is
+     * `balance.availableKopeks`, which already subtracts paid and reserved payouts.
      */
-    payableKopeks: totals?.grossPayableKopeks ?? 0,
-    disputedKopeks: totals?.disputedKopeks ?? 0,
+    payableKopeks: balance.grossPayableKopeks,
+    disputedKopeks: balance.disputedKopeks,
   };
 }
 
@@ -1229,6 +1235,21 @@ async function partnerDisputePage(
     .orderBy(desc(partnerDisputes.openedAt), desc(partnerDisputes.id))
     .limit(limit + 1);
 
+  // How many disputes the same filters match — the whole set, not the page. Without it a
+  // reader cannot tell whether the cursor ends at the last dispute or somewhere in the middle.
+  const [countRow] = await db.select({ count: sql<number>`count(*)::int` })
+    .from(partnerDisputes)
+    .innerJoin(partnerInvoiceLines, eq(partnerInvoiceLines.id, partnerDisputes.invoiceLineId))
+    .innerJoin(partnerInvoices, and(
+      eq(partnerInvoices.id, partnerInvoiceLines.invoiceId),
+      eq(partnerInvoices.organizationId, principal.organizationId),
+    ))
+    .where(and(
+      eq(partnerDisputes.organizationId, principal.organizationId),
+      scope.partnerId ? eq(partnerInvoices.partnerId, scope.partnerId) : undefined,
+      stateFilter ? inArray(partnerDisputes.state, stateFilter) : undefined,
+    ));
+
   const hasMore = rows.length > limit;
   const pageRows: PartnerDisputeRow[] = hasMore ? rows.slice(0, limit) : rows;
   const last = pageRows[pageRows.length - 1];
@@ -1300,7 +1321,7 @@ async function partnerDisputePage(
     };
   });
 
-  return { items, nextCursor };
+  return { items, nextCursor, totalCount: Number(countRow?.count ?? 0) };
 }
 
 /** Every partner dispute of this tenant, newest first. */
@@ -1324,7 +1345,7 @@ export async function listPartnerScopedDisputes(
   if (!principal.partnerId) throw errors.forbidden("partner scope required");
   const page = await partnerDisputePage(db, principal, input, { partnerId: principal.partnerId });
   const items: PartnerScopedDisputeItem[] = page.items.map(({ creditNoteId: _creditNoteId, ...item }) => item);
-  return { items, nextCursor: page.nextCursor };
+  return { items, nextCursor: page.nextCursor, totalCount: page.totalCount };
 }
 
 export type FinanceQueueBucket = "active" | "history" | "all";
@@ -2122,7 +2143,9 @@ export async function approvePartnerCreditNote(
 
 /**
  * Computes a partner's available payable balance inside an open transaction whose caller holds
- * the `partners` FOR UPDATE lock:
+ * the `partners` FOR UPDATE lock. It is a thin adapter over `queryPartnerBalance`, the single
+ * balance the partner panel reads too, so what is displayed and what may be paid out can never
+ * diverge:
  * - `grossPayableKopeks`: non-voided accruals minus net disputed holds (where each disputed
  *   accrual holds only its remaining uncredited balance, never double-deducting prior partial credits)
  * - `paidKopeks`: already approved or paid payouts
@@ -2135,27 +2158,13 @@ async function computePartnerBalanceTx(
   partnerId: string,
   excludePayoutId?: string,
 ) {
-  const [accrualTotals] = await queryPartnerAccrualTotals(tx, organizationId, partnerId);
-  const [paidRow] = await tx.select({ total: sum(partnerPayouts.amountKopeks) })
-    .from(partnerPayouts)
-    .where(and(
-      eq(partnerPayouts.organizationId, organizationId),
-      eq(partnerPayouts.partnerId, partnerId),
-      inArray(partnerPayouts.state, ["approved", "paid"]),
-    ));
-  const [reservedRow] = await tx.select({ total: sum(partnerPayouts.amountKopeks) })
-    .from(partnerPayouts)
-    .where(and(
-      eq(partnerPayouts.organizationId, organizationId),
-      eq(partnerPayouts.partnerId, partnerId),
-      inArray(partnerPayouts.state, ["scheduled", "pending"]),
-      ...(excludePayoutId ? [sql`${partnerPayouts.id} <> ${excludePayoutId}`] : []),
-    ));
-  const grossPayableKopeks = accrualTotals?.grossPayableKopeks ?? 0;
-  const paidKopeks = Number(paidRow?.total ?? 0);
-  const reservedKopeks = Number(reservedRow?.total ?? 0);
-  const availablePayableKopeks = grossPayableKopeks - paidKopeks - reservedKopeks;
-  return { grossPayableKopeks, paidKopeks, reservedKopeks, availablePayableKopeks };
+  const balance = await queryPartnerBalance(tx, organizationId, partnerId, { excludePayoutId });
+  return {
+    grossPayableKopeks: balance.grossPayableKopeks,
+    paidKopeks: balance.paidKopeks,
+    reservedKopeks: balance.reservedKopeks,
+    availablePayableKopeks: balance.availableKopeks,
+  };
 }
 
 /** Schedules a partner payout in `scheduled` state; requires a second finance/admin approver to release. */

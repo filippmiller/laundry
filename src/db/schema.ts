@@ -13,3 +13,4 @@ export * from "./schema/11-partner-finance.js";
 export * from "./schema/12-support.js";
 export * from "./schema/13-social.js";
 export * from "./schema/14-custody-devices.js";
+export * from "./schema/15-escalations.js";
