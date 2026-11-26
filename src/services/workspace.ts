@@ -6,7 +6,7 @@ import type { Db, Tx } from "../db/client.js";
 import {
   buildings, claims, compensations, courierShifts, custodyEvents, customerAddresses,
   evidenceAssets, evidenceAccessEvents, evidenceLegalHolds, auditEvents,
-  garmentEvidence, garments, notifications, orders, outboxEvents, reviews, sessions, supportThreads, users,
+  garmentEvidence, garments, notifications, orders, outboxEvents, reviews, sessions, supportMessages, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { pgCursorTimestampSql } from "../core/cursor.js";
@@ -23,8 +23,11 @@ const ACTIVE_CLAIM_STATES = new Set([
 ]);
 
 /** Active sessions of the signed-in principal; the current one is flagged, not hidden. */
-export async function listMySessions(db: Db, principal: Principal) {
-  return db.select({
+export async function listMySessions(db: Db | Tx, principal: Principal) {
+  // The same projection is read inside the privacy export's snapshot transaction, so the handle
+  // may be a transaction as well as the pool.
+  const handle = db as Db;
+  return handle.select({
     id: sessions.id,
     createdAt: sessions.createdAt,
     expiresAt: sessions.expiresAt,
@@ -760,6 +763,12 @@ async function paginateKeysetAll<T extends { id: string; cursorTs: string }>(
  * READ ONLY transaction so concurrent inserts/updates/deletes never produce duplicates,
  * skips, or cross-collection skew. Never exposes internal hashes, door codes, storage keys,
  * or other users' data.
+ *
+ * The export covers the data the caller created themselves in every role, not only the
+ * customer's data: their own courier shifts, the support threads they wrote into, the support
+ * messages they authored and the devices/sessions they signed in from. Role-dependent
+ * collections are empty for a user who has no such records — that is the correct answer, not
+ * a missing section.
  */
 export async function exportMyPrivacyData(db: Db, principal: Principal) {
   return db.transaction(async tx => {
@@ -894,6 +903,102 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           .limit(limit),
     );
 
+    // The caller's own shifts: a shift belongs to the courier who opened it, so the owner filter
+    // is the courier id. A role that never opened a shift simply gets an empty list.
+    const shiftRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: courierShifts.id,
+          state: courierShifts.state,
+          startsAt: courierShifts.startsAt,
+          endsAt: courierShifts.endsAt,
+          completedAt: courierShifts.completedAt,
+          createdAt: courierShifts.createdAt,
+          cursorTs: pgCursorTimestampSql(courierShifts.createdAt),
+        }).from(courierShifts).where(and(
+          eq(courierShifts.organizationId, principal.organizationId),
+          eq(courierShifts.courierId, principal.userId),
+          cursor
+            ? sql`(${courierShifts.createdAt}, ${courierShifts.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+            : undefined,
+        ))
+          .orderBy(desc(courierShifts.createdAt), desc(courierShifts.id))
+          .limit(limit),
+    );
+
+    // The caller's own support messages: the author id is the caller, the tenant comes from the
+    // thread the message lives in (support_messages itself carries no organization column).
+    const supportMessageRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: supportMessages.id,
+          threadId: supportMessages.threadId,
+          body: supportMessages.body,
+          createdAt: supportMessages.createdAt,
+          cursorTs: pgCursorTimestampSql(supportMessages.createdAt),
+        }).from(supportMessages)
+          .innerJoin(supportThreads, eq(supportThreads.id, supportMessages.threadId))
+          .where(and(
+            eq(supportThreads.organizationId, principal.organizationId),
+            eq(supportMessages.authorId, principal.userId),
+            cursor
+              ? sql`(${supportMessages.createdAt}, ${supportMessages.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+              : undefined,
+          ))
+            .orderBy(desc(supportMessages.createdAt), desc(supportMessages.id))
+            .limit(limit),
+    );
+
+    // The caller's own support threads: a thread belongs to the caller when they wrote a message
+    // in it. The wording of the opening message and the order the thread hangs on belong to
+    // whoever opened it, so both are exported only when that author/owner is the caller — a
+    // support agent's export carries the thread ids they wrote into, never the customer's
+    // subject line or order pointer.
+    const supportThreadRows = (await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: supportThreads.id,
+          orderId: supportThreads.orderId,
+          state: supportThreads.state,
+          subject: supportThreads.subject,
+          createdAt: supportThreads.createdAt,
+          // The columns of the outer table are written out qualified on purpose: an unqualified
+          // `id` inside the subquery resolves to the inner table's own `id` and the correlation
+          // silently breaks.
+          openingAuthorId: sql<string | null>`(
+            SELECT m.author_id FROM support_messages m
+            WHERE m.thread_id = support_threads.id
+            ORDER BY m.created_at ASC, m.id ASC
+            LIMIT 1
+          )`.as("openingAuthorId"),
+          orderCustomerId: sql<string | null>`(
+            SELECT o.customer_id FROM orders o
+            WHERE o.id = support_threads.order_id
+              AND o.organization_id = ${principal.organizationId}
+          )`.as("orderCustomerId"),
+          cursorTs: pgCursorTimestampSql(supportThreads.createdAt),
+        }).from(supportThreads).where(and(
+          eq(supportThreads.organizationId, principal.organizationId),
+          sql`EXISTS (
+            SELECT 1 FROM support_messages m
+            WHERE m.thread_id = ${supportThreads.id} AND m.author_id = ${principal.userId}
+          )`,
+          cursor
+            ? sql`(${supportThreads.createdAt}, ${supportThreads.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+            : undefined,
+        ))
+          .orderBy(desc(supportThreads.createdAt), desc(supportThreads.id))
+          .limit(limit),
+    )).map(({ openingAuthorId, orderCustomerId, ...row }) => ({
+      ...row,
+      subject: openingAuthorId === principal.userId ? row.subject : null,
+      orderId: orderCustomerId === principal.userId ? row.orderId : null,
+    }));
+
+    // The devices/sessions the caller signed in from: the same projection the session list
+    // shows, read inside this snapshot so the export and the list cannot disagree.
+    const sessionRows = await listMySessions(tx, principal);
+
     return {
       exportedAt: exportedAsOf,
       exportedAsOf,
@@ -908,6 +1013,10 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           claims: claimRows.length,
           notifications: notificationRows.length,
           reviews: reviewRows.length,
+          sessions: sessionRows.length,
+          shifts: shiftRows.length,
+          supportThreads: supportThreadRows.length,
+          supportMessages: supportMessageRows.length,
         },
       },
       profile: user ?? { id: principal.userId, phone: null, displayName: null, createdAt: null },
@@ -916,6 +1025,10 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
       claims: claimRows,
       notifications: notificationRows,
       reviews: reviewRows,
+      sessions: sessionRows,
+      shifts: shiftRows,
+      supportThreads: supportThreadRows,
+      supportMessages: supportMessageRows,
     };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Download, ShieldCheck, UserRound } from "lucide-react";
 import { api, dt } from "../api";
 import { formatError } from "../labels";
-import type { Notice } from "../types";
+import type { Me, Notice } from "../types";
 import { ModalDialog } from "./ModalDialog";
 import { Badge, Button, EmptyState, Skeleton } from "./ui";
 
@@ -15,6 +15,36 @@ type SessionDto = {
   userAgent?: string | null;
   ip?: string | null;
 };
+
+/**
+ * The sections the export contains, and the roles each of them applies to.
+ *
+ * The list mirrors the server's own filters: addresses, orders and reviews exist only for a
+ * customer, shifts only for a courier or dispatcher, and the support section — the threads the
+ * caller wrote into and the messages they authored — only for the roles that are allowed to
+ * write them. A section with no records stays empty — that is a fact about the user, not a
+ * missing part of the export.
+ */
+const EXPORT_SECTIONS: Array<{ label: string; roles: string[] | null }> = [
+  { label: "профиль", roles: null },
+  { label: "адреса", roles: ["customer"] },
+  { label: "заказы", roles: ["customer"] },
+  { label: "обращения", roles: null },
+  { label: "уведомления", roles: null },
+  { label: "отзывы", roles: ["customer"] },
+  { label: "сессии", roles: null },
+  { label: "смены", roles: ["courier", "dispatcher"] },
+  {
+    label: "сообщения поддержки",
+    roles: ["customer", "customer_support", "claims_investigator", "claims_approver", "platform_admin"],
+  },
+];
+
+function exportSections(roles: string[]): string[] {
+  return EXPORT_SECTIONS
+    .filter(section => section.roles === null || section.roles.some(role => roles.includes(role)))
+    .map(section => section.label);
+}
 
 /**
  * «Мои данные» и «Мои сессии» for every signed-in role.
@@ -34,6 +64,7 @@ export function ProfilePanel({
   notify: (notice: Notice) => void;
 }) {
   const [sessions, setSessions] = useState<SessionDto[] | null>(null);
+  const [roles, setRoles] = useState<string[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -56,10 +87,23 @@ export function ProfilePanel({
     }
   }, []);
 
+  // The section list depends on the signed-in role: the panel lives outside any workspace, so it
+  // asks who it is showing the export to instead of guessing from the current screen.
+  const loadRoles = useCallback(async () => {
+    try {
+      const me = await api<Me>("/me");
+      setRoles(me.roles ?? []);
+    } catch {
+      // The roles only label the sections; a failed lookup must not block the download itself.
+      setRoles(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     void loadSessions();
-  }, [open, loadSessions]);
+    void loadRoles();
+  }, [open, loadSessions, loadRoles]);
 
   const handleExport = async () => {
     setExporting(true);
@@ -105,6 +149,8 @@ export function ProfilePanel({
     }
   };
 
+  const sections = roles ? exportSections(roles) : EXPORT_SECTIONS.map(section => section.label);
+
   return (
     <ModalDialog open={open} title="Мои данные и сессии" onClose={onClose}>
       <div className="stack">
@@ -113,9 +159,9 @@ export function ProfilePanel({
             <Download size={18} aria-hidden="true" /> Выгрузка персональных данных
           </h3>
           <p className="muted">
-            Файл содержит ваши персональные данные, которые хранит платформа: заказы, адреса,
-            обращения в поддержку и платежи. Выгрузка формируется на сервере и скачивается в ваш
-            браузер.
+            В выгрузку входят только ваши собственные данные: {sections.join(", ")}. Разделы, в
+            которых у вас нет записей, остаются пустыми. Файл формируется на сервере и скачивается
+            в ваш браузер.
           </p>
           <Button
             variant="secondary"
