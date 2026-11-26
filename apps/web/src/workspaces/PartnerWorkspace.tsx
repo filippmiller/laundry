@@ -45,6 +45,7 @@ import { TabPanel, Tabs, type TabItem } from "../components/ui/Tabs";
 import { ItemMixPanel } from "./analytics-panels";
 import { ChronometryPanel } from "./analytics-panels";
 import { PartnerMoneyPanel } from "./partner-money-panels";
+import { notifyPartnerMoneyChanged } from "./partner-money-refresh";
 import { ExpectedReceiptsPanel } from "./ops-panels";
 import { useUrlState } from "../hooks/useUrlState";
 
@@ -692,6 +693,8 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
         });
         setDisputeLine(null);
         setDisputeReason("");
+        // A new dispute holds the contested amount: the money panels must show it immediately.
+        notifyPartnerMoneyChanged();
       },
       "Возражение по строке начисления отправлено",
     );
@@ -837,7 +840,11 @@ export function PartnerWorkspace({ notify, roles }: { notify: NotifyFn; roles?: 
             {accruals?.partnerId && <Badge tone="neutral">Партнёр: {accruals.partnerId}</Badge>}
             <Button
               variant="ghost"
-              onClick={() => void loadData()}
+              onClick={() => {
+                void loadData();
+                // The money panels live in their own component: tell them that the numbers moved.
+                notifyPartnerMoneyChanged();
+              }}
               disabled={loading || isBusy}
               leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
             >

@@ -28,7 +28,9 @@ import {
   formatError,
   INVOICE_STATE_LABELS,
   ORDER_STATE_LABELS,
+  PARTNER_CREDIT_NOTE_STATE_LABELS,
   PARTNER_INVOICE_STATE_LABELS,
+  PARTNER_PAYOUT_STATE_LABELS,
   PAYMENT_STATE_LABELS,
   providerLabel,
   stateLabel,
@@ -42,7 +44,8 @@ import {
 } from "./chargebacks-controller";
 import { FinanceMoneyPanel } from "./analytics-panels";
 import { FinanceDisputesPanel } from "./partner-money-panels";
-import { FiscalReceiptsPanel } from "./ops-panels";
+import { notifyPartnerMoneyChanged } from "./partner-money-refresh";
+import { FiscalReceiptsPanel, StuckOrdersPanel } from "./ops-panels";
 import { useUrlState } from "../hooks/useUrlState";
 
 type InvoiceItem = {
@@ -164,22 +167,6 @@ type FinanceOverviewResponse = {
   partnerCreditNotesActive?: PaginatedBucket<PartnerCreditNoteItem>;
   partnerCreditNotesHistory?: PaginatedBucket<PartnerCreditNoteItem>;
   deliveredOrders?: DeliveredOrderItem[];
-};
-
-const PAYOUT_STATE_LABELS: Record<string, string> = {
-  scheduled: "Запланирована",
-  pending: "Ожидает одобрения",
-  approved: "Одобрена",
-  paid: "Выплачена",
-  cancelled: "Отменена",
-};
-
-const CREDIT_NOTE_STATE_LABELS: Record<string, string> = {
-  draft: "Черновик",
-  pending: "На согласовании",
-  approved: "Одобрена",
-  applied: "Применена",
-  rejected: "Отклонена",
 };
 
 type ReconciliationResponse = {
@@ -628,6 +615,8 @@ export function FinanceWorkspace({
       setPayoutAmountRub("");
       setPayoutReference("");
       await loadFinance();
+      // A scheduled payout reserves money: the partner's balance must show it right away.
+      notifyPartnerMoneyChanged();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -644,6 +633,8 @@ export function FinanceWorkspace({
       });
       notify({ kind: "ok", text: "Выплата партнёру одобрена" });
       await loadFinance();
+      // The approved payout leaves the reserved sum and becomes paid money.
+      notifyPartnerMoneyChanged();
     } catch (err) {
       if (
         err instanceof ApiError &&
@@ -670,6 +661,8 @@ export function FinanceWorkspace({
       });
       notify({ kind: "ok", text: "Кредит-нота одобрена" });
       await loadFinance();
+      // An approved credit note lowers the payable amount.
+      notifyPartnerMoneyChanged();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -782,7 +775,12 @@ export function FinanceWorkspace({
           <Button
             variant="ghost"
             leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
-            onClick={() => void loadFinance()}
+            onClick={() => {
+              void loadFinance();
+              // The panels that show the partner's money live outside this workspace: tell them
+              // that the numbers moved, so nothing stays stale until the next full reload.
+              notifyPartnerMoneyChanged();
+            }}
             disabled={loading}
           >
             {loading ? "Обновление…" : "Обновить данные"}
@@ -802,6 +800,9 @@ export function FinanceWorkspace({
 
       {/* 0b. Фискальная регистрация счетов в демо-адаптере */}
       <FiscalReceiptsPanel notify={notify} refreshToken={refreshNonce} />
+
+      {/* 0c. Застрявшие заказы: у заказа в простое должен быть ответственный и причина */}
+      <StuckOrdersPanel notify={notify} refreshToken={refreshNonce} />
 
       {/* 1. Финансовая сверка и дрифт */}
       <section className="panel" aria-labelledby="finance-reconciliation-heading">
@@ -1453,7 +1454,7 @@ export function FinanceWorkspace({
                       <td className="muted">{p.reference ?? "—"}</td>
                       <td>
                         <Badge tone={p.state === "approved" || p.state === "paid" ? "ok" : p.state === "cancelled" ? "danger" : "warn"}>
-                          {stateLabel(PAYOUT_STATE_LABELS, p.state)}
+                          {stateLabel(PARTNER_PAYOUT_STATE_LABELS, p.state)}
                         </Badge>
                       </td>
                       <td className="mono">{dt(p.createdAt)}</td>
@@ -1537,7 +1538,7 @@ export function FinanceWorkspace({
                       <td className="mono">{money(cn.amountKopeks)}</td>
                       <td>
                         <Badge tone={cn.state === "approved" || cn.state === "applied" ? "ok" : cn.state === "rejected" ? "danger" : "warn"}>
-                          {stateLabel(CREDIT_NOTE_STATE_LABELS, cn.state)}
+                          {stateLabel(PARTNER_CREDIT_NOTE_STATE_LABELS, cn.state)}
                         </Badge>
                       </td>
                       <td className="mono">{dt(cn.createdAt)}</td>
