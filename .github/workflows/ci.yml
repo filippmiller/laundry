@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   pull_request:
@@ -101,14 +101,16 @@ jobs:
         env:
           VERIFY_SPAWN_API: "1"
           VERIFY_API_PORT: "3107"
-      - name: Wave 8 live verification
+      - name: Wave 8 live verification (the script starts the server it checks)
         run: npm run verify:wave8
         env:
-          SMOKE_BASE_URL: http://127.0.0.1:3000
-      - name: Wave 8 browser acceptance
+          VERIFY_SPAWN_API: "1"
+          VERIFY_API_PORT: "3126"
+      - name: Wave 8 browser acceptance (the script starts the stand it checks)
         run: npm run verify:wave8:ui
         env:
-          APP_URL: http://127.0.0.1:3000
+          VERIFY_SPAWN_APP: "1"
+          VERIFY_API_PORT: "3127"
       - name: Mobile layout regression (16 combinations of viewport, zoom and role)
         run: npm run verify:mobile
         env:
