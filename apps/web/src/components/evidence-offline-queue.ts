@@ -25,6 +25,8 @@ export type QueuedEvidence = {
   createdAt: string;
   attempts: number;
   lastError?: string | null;
+  /** When the last attempt to send the photo failed; absent while no attempt failed yet. */
+  lastAttemptAt?: string | null;
 };
 
 function openDb(): Promise<IDBDatabase> {
@@ -111,7 +113,14 @@ export async function markEvidenceAttempt(id: string, error: string | null): Pro
     request.onsuccess = () => {
       const record = request.result as QueuedEvidence | undefined;
       if (record) {
-        store.put({ ...record, attempts: record.attempts + 1, lastError: error });
+        // The moment of the attempt is kept next to the reason: the courier has to see that the
+        // photo failed recently, not that it failed once in an unknown past.
+        store.put({
+          ...record,
+          attempts: record.attempts + 1,
+          lastError: error,
+          lastAttemptAt: new Date().toISOString(),
+        });
       }
     };
     tx.oncomplete = () => resolve();

@@ -21,6 +21,14 @@ import {
   removeQueuedEvidence,
   type QueuedEvidence,
 } from "./evidence-offline-queue";
+import {
+  deriveEvidenceQueueRows,
+  describeQueueError,
+  evidencePendingIds,
+  evidenceRemovableIds,
+  evidenceRetryIds,
+  type EvidenceQueueRow,
+} from "./evidence-queue-state";
 
 export type EvidenceOwnerType = "order" | "claim" | "custody_event";
 export type EvidencePurpose = "intake_condition" | "delivery_proof" | "claim_evidence" | "qc";
@@ -81,6 +89,27 @@ const EVIDENCE_STATUS_TONES: Record<string, BadgeTone> = {
   expired: "neutral",
 };
 
+/** How long a photo the server accepted stays on screen before it leaves the queue for good. */
+const SENT_VISIBLE_MS = 5000;
+
+/** The photos that wait for the network, with the state each of them is in. */
+type EvidenceQueueView = {
+  ownerKey: string;
+  /** The records that still wait in IndexedDB. */
+  items: QueuedEvidence[];
+  /** The records whose upload is running right now. */
+  inFlightIds: string[];
+  /** The records the server accepted a moment ago; they leave the queue right after. */
+  sentItems: QueuedEvidence[];
+};
+
+const EMPTY_QUEUE_VIEW: EvidenceQueueView = {
+  ownerKey: "",
+  items: [],
+  inFlightIds: [],
+  sentItems: [],
+};
+
 function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
   if (bytes < 1024) return `${bytes} Б`;
@@ -109,6 +138,18 @@ function isNetworkFailure(err: unknown): boolean {
   if (err instanceof DOMException && err.name === "NetworkError") return true;
   const message = err instanceof Error ? err.message.toLowerCase() : "";
   return message.includes("network") || message.includes("failed to fetch") || message.includes("offline");
+}
+
+/**
+ * Statuses that mean "the server refused this particular file": the next photo of the queue
+ * still has to go. Anything else says nothing about the next file — no network, an unwell
+ * server, a timeout — so the rest of the queue waits for the next attempt instead of piling up
+ * failures.
+ */
+const PER_FILE_REJECTION_STATUSES = new Set([400, 413, 415, 422]);
+
+function isPerFileRejection(err: unknown): boolean {
+  return err instanceof ApiError && PER_FILE_REJECTION_STATUSES.has(err.status);
 }
 
 function normalizeEvidenceList(raw: unknown): EvidenceAssetItem[] {
@@ -183,7 +224,12 @@ export function EvidenceUploader({
     loadError: null,
   });
   // Photos that waited for the network on this device.
-  const [queuedCount, setQueuedCount] = useState(0);
+  const [queueView, setQueueView] = useState<EvidenceQueueView>({
+    ownerKey: currentOwnerKey,
+    items: [],
+    inFlightIds: [],
+    sentItems: [],
+  });
 
   useEffect(() => {
     const initial = getOwnerUploadSnapshot(currentOwnerKey);
@@ -202,6 +248,10 @@ export function EvidenceUploader({
   const loadError = loadErrorState.ownerKey === currentOwnerKey ? loadErrorState.loadError : null;
   const uploadError = uploadSnapshot.ownerKey === currentOwnerKey ? uploadSnapshot.lastError : null;
   const hasError = Boolean(loadError || uploadError);
+
+  // The queue belongs to one owner: while another one is open, nothing of it is shown.
+  const queue = queueView.ownerKey === currentOwnerKey ? queueView : EMPTY_QUEUE_VIEW;
+  const queuedCount = queue.items.length;
 
   useEffect(() => {
     onUploadedIdsChangeRef.current = onUploadedIdsChange;
@@ -303,7 +353,7 @@ export function EvidenceUploader({
    * Registers the file on the server and uploads its bytes. The SHA-256 is computed from the
    * bytes themselves, so a queued photo is hashed the same way when it is finally sent.
    */
-  const uploadEvidenceFile = async (
+  const uploadEvidenceFile = useCallback(async (
     file: Blob,
     fileName: string,
     mimeType: string,
@@ -339,7 +389,7 @@ export function EvidenceUploader({
       body: { contentBase64, mimeType },
     });
     return evidenceId;
-  };
+  }, [purpose]);
 
   /** Puts files into the on-device queue; returns how many were accepted. */
   const queueFiles = async (
@@ -371,18 +421,40 @@ export function EvidenceUploader({
     return queued;
   };
 
-  const refreshQueuedCount = useCallback(async () => {
+  /**
+   * Reads the on-device queue, so every photo of it can be shown with its own state instead of
+   * a single number.
+   */
+  const refreshQueue = useCallback(async () => {
+    const targetOwnerKey = currentOwnerKey;
     if (!evidenceQueueAvailable() || !ownerType || !ownerId) {
-      setQueuedCount(0);
+      setQueueView(prev => ({ ...prev, ownerKey: targetOwnerKey, items: [] }));
       return;
     }
     try {
       const rows = await queuedEvidence(ownerType, ownerId);
-      setQueuedCount(rows.length);
+      // The courier may have opened another order while the queue was read.
+      if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
+      setQueueView(prev => ({ ...prev, ownerKey: targetOwnerKey, items: rows }));
     } catch {
-      setQueuedCount(0);
+      if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
+      setQueueView(prev => ({ ...prev, ownerKey: targetOwnerKey, items: [] }));
     }
-  }, [ownerType, ownerId]);
+  }, [ownerType, ownerId, currentOwnerKey]);
+
+  /** Keeps the accepted photos on screen for a moment, so the courier sees them leave the queue. */
+  const markQueueSent = useCallback((items: QueuedEvidence[]) => {
+    if (!items.length) return;
+    const ids = new Set(items.map(item => item.id));
+    setQueueView(prev => ({
+      ...prev,
+      sentItems: [...prev.sentItems.filter(item => !ids.has(item.id)), ...items],
+    }));
+    if (typeof window === "undefined") return;
+    window.setTimeout(() => {
+      setQueueView(prev => ({ ...prev, sentItems: prev.sentItems.filter(item => !ids.has(item.id)) }));
+    }, SENT_VISIBLE_MS);
+  }, []);
 
   /** Sends everything that waited in the queue as soon as the network is back. */
   const flushQueuedEvidence = useCallback(async () => {
@@ -395,11 +467,15 @@ export function EvidenceUploader({
       return;
     }
     if (!rows.length) {
-      setQueuedCount(0);
+      await refreshQueue();
       return;
     }
-    const uploaded: string[] = [];
+    const pending = new Set(evidencePendingIds(rows));
+    const uploaded: QueuedEvidence[] = [];
+    const failed: QueuedEvidence[] = [];
     for (const row of rows) {
+      if (!pending.has(row.id)) continue;
+      setQueueView(prev => ({ ...prev, inFlightIds: [...prev.inFlightIds, row.id] }));
       try {
         await uploadEvidenceFile(
           row.blob,
@@ -409,27 +485,41 @@ export function EvidenceUploader({
           row.ownerType as EvidenceOwnerType,
           row.ownerId,
         );
-        uploaded.push(row.id);
+        uploaded.push(row);
       } catch (err) {
-        await markEvidenceAttempt(row.id, formatError(err)).catch(() => undefined);
-        // The connection is still broken: the rest of the queue waits for the next attempt.
-        break;
+        const message = describeQueueError(formatError(err)) ?? "Причина ошибки неизвестна.";
+        await markEvidenceAttempt(row.id, message).catch(() => undefined);
+        failed.push(row);
+        // The connection or the server is gone: the rest of the queue waits for the next attempt.
+        if (!isPerFileRejection(err)) break;
+        // The server refused this file alone, so the next photo still has to go.
+      } finally {
+        setQueueView(prev => ({ ...prev, inFlightIds: prev.inFlightIds.filter(id => id !== row.id) }));
       }
     }
     if (uploaded.length) {
-      await removeQueuedEvidence(uploaded).catch(() => undefined);
-      await refreshQueuedCount();
+      await removeQueuedEvidence(uploaded.map(row => row.id)).catch(() => undefined);
+      markQueueSent(uploaded);
+      await refreshQueue();
       await loadAssets({ reportErrorToast: true }).catch(() => undefined);
       notify({
         kind: "ok",
         text: `Отправлено файлов из очереди: ${uploaded.length}.`,
       });
+    } else {
+      await refreshQueue();
     }
-  }, [ownerType, ownerId, refreshQueuedCount, loadAssets, notify]);
+    if (failed.length) {
+      notify({
+        kind: "error",
+        text: `Не отправлено файлов: ${failed.length}. Причина — в очереди.`,
+      });
+    }
+  }, [ownerType, ownerId, refreshQueue, loadAssets, notify, uploadEvidenceFile, markQueueSent]);
 
   useEffect(() => {
-    void refreshQueuedCount();
-  }, [refreshQueuedCount]);
+    void refreshQueue();
+  }, [refreshQueue]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -437,6 +527,68 @@ export function EvidenceUploader({
     window.addEventListener("online", handleOnline);
     return () => window.removeEventListener("online", handleOnline);
   }, [flushQueuedEvidence]);
+
+  /** One row per queued photo: the state it is in and what may be done with it. */
+  const queueRows = useMemo(() => {
+    const byId = new Map<string, QueuedEvidence>();
+    for (const item of queue.items) byId.set(item.id, item);
+    // A photo the server accepted wins over the same photo still waiting in the queue.
+    for (const item of queue.sentItems) byId.set(item.id, item);
+    return deriveEvidenceQueueRows(
+      [...byId.values()],
+      queue.inFlightIds,
+      queue.sentItems.map(item => item.id),
+    );
+  }, [queue.items, queue.sentItems, queue.inFlightIds]);
+
+  /** Sends one photo of the queue again and tells the courier what came of it. */
+  const retryQueuedEvidence = async (row: EvidenceQueueRow) => {
+    if (!evidenceRetryIds(queue.items).includes(row.id)) return;
+    const record = queue.items.find(item => item.id === row.id);
+    if (!record) return;
+    const targetOwnerKey = currentOwnerKey;
+    setQueueView(prev => ({ ...prev, inFlightIds: [...prev.inFlightIds, row.id] }));
+    try {
+      await uploadEvidenceFile(
+        record.blob,
+        record.fileName,
+        record.mimeType,
+        record.sizeBytes,
+        record.ownerType as EvidenceOwnerType,
+        record.ownerId,
+      );
+      await removeQueuedEvidence([record.id]).catch(() => undefined);
+      markQueueSent([record]);
+      await refreshQueue();
+      await loadAssets({ reportErrorToast: true }).catch(() => undefined);
+      if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
+      notify({ kind: "ok", text: `Файл «${record.fileName}» отправлен.` });
+    } catch (err) {
+      const message = describeQueueError(formatError(err)) ?? "Причина ошибки неизвестна.";
+      await markEvidenceAttempt(record.id, message).catch(() => undefined);
+      await refreshQueue();
+      if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
+      notify({ kind: "error", text: `Не удалось отправить «${record.fileName}»: ${message}` });
+    } finally {
+      setQueueView(prev => ({ ...prev, inFlightIds: prev.inFlightIds.filter(id => id !== row.id) }));
+    }
+  };
+
+  /** Drops a photo that will never be sent, so it does not hold the queue hostage. */
+  const removeFromQueue = async (row: EvidenceQueueRow) => {
+    if (!evidenceRemovableIds(queue.items).includes(row.id)) return;
+    const targetOwnerKey = currentOwnerKey;
+    try {
+      await removeQueuedEvidence([row.id]);
+      setQueueView(prev => ({ ...prev, sentItems: prev.sentItems.filter(item => item.id !== row.id) }));
+      await refreshQueue();
+      if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
+      notify({ kind: "ok", text: `Файл «${row.fileName}» удалён из очереди.` });
+    } catch (err) {
+      if (activeOwnerRef.current.ownerKey !== targetOwnerKey) return;
+      notify({ kind: "error", text: `Не удалось удалить «${row.fileName}»: ${formatError(err)}` });
+    }
+  };
 
   const handleFilesSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = event.target.files;
@@ -471,7 +623,7 @@ export function EvidenceUploader({
           kind: "ok",
           text: `Сети нет: файлов сохранено в очереди — ${queued}. Они уйдут автоматически, когда связь появится.`,
         });
-        await refreshQueuedCount();
+        await refreshQueue();
       }
       return;
     }
@@ -518,7 +670,7 @@ export function EvidenceUploader({
           if (isNetworkFailure(err)) {
             const queued = await queueFiles([file], targetOwnerType, targetOwnerId);
             if (queued > 0) {
-              await refreshQueuedCount();
+              await refreshQueue();
               if (isSameOwner()) {
                 notify({
                   kind: "ok",
@@ -697,6 +849,60 @@ export function EvidenceUploader({
             >
               Скрыть
             </Button>
+          </div>
+        )}
+
+        {queueRows.length > 0 && (
+          <div className="stack">
+            <div className="row row--tight">
+              <strong>Очередь без сети</strong>
+              <Badge tone="neutral">{queuedCount}</Badge>
+            </div>
+            <ul className="list">
+              {queueRows.map(row => (
+                <li key={row.id} className="list-item">
+                  <div className="stack stack--tight">
+                    <div className="row row--tight">
+                      <Badge tone={row.tone}>{row.label}</Badge>
+                      <span>{row.fileName}</span>
+                    </div>
+                    <span className="muted">
+                      {row.mimeType || "Файл"} · {formatFileSize(row.sizeBytes)} · {dt(row.createdAt)}
+                      {row.attempts > 0 ? ` · попыток отправки: ${row.attempts}` : ""}
+                      {row.lastAttemptAt ? ` · последняя попытка: ${dt(row.lastAttemptAt)}` : ""}
+                    </span>
+                    {row.errorText ? (
+                      <span className="u-c-var-status-danger-ink">Причина: {row.errorText}</span>
+                    ) : null}
+                  </div>
+
+                  <div className="button-row">
+                    {row.canRetry ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        leadingIcon={<RefreshCw size={14} aria-hidden="true" />}
+                        onClick={() => void retryQueuedEvidence(row)}
+                      >
+                        Повторить
+                      </Button>
+                    ) : null}
+                    {row.canRemove ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        leadingIcon={<Trash2 size={14} aria-hidden="true" />}
+                        onClick={() => void removeFromQueue(row)}
+                      >
+                        Удалить из очереди
+                      </Button>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
