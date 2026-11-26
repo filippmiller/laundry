@@ -108,6 +108,54 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("Wave 7: the declared value of a
     expect(body.quoteHash).not.toBe(plain.quoteHash);
   });
 
+  it("refuses an order that carries an outdated quote hash", async () => {
+    const cookie = await customerCookie();
+    // The customer states a value, gets a quote and then changes the value. The second quote is a
+    // different quote, so the hash of the first one must not accept it: the customer has to take
+    // the new quote, not the old one.
+    const first = await createQuoteHttp(cookie, [
+      { subtypeId: "tshirt_plain", quantity: 1, declaredValueKopeks: 300_000 },
+    ]);
+    expect(first.statusCode).toBe(200);
+    const firstQuote = first.json() as { id: string; quoteHash: string };
+
+    const second = await createQuoteHttp(cookie, [
+      { subtypeId: "tshirt_plain", quantity: 1, declaredValueKopeks: 500_000 },
+    ]);
+    expect(second.statusCode).toBe(200);
+    const secondQuote = second.json() as { id: string; quoteHash: string };
+    expect(secondQuote.quoteHash).not.toBe(firstQuote.quoteHash);
+
+    // The order takes the second quote but the hash of the first one.
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/orders",
+      headers: { cookie, "idempotency-key": `order-${rid()}` },
+      payload: {
+        quoteId: secondQuote.id,
+        acceptedQuoteHash: firstQuote.quoteHash,
+        termsVersion: catalog.termsVersion,
+      },
+    });
+    expect(response.statusCode).toBe(409);
+    const body = response.json() as { error?: { code?: string; message?: string } };
+    expect(body.error?.code).toBe("CONFLICT_VERSION");
+    expect(body.error?.message).toBe("QUOTE_HASH_MISMATCH");
+
+    // The quote itself stays usable with its own hash.
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/api/v1/orders",
+      headers: { cookie, "idempotency-key": `order-${rid()}` },
+      payload: {
+        quoteId: secondQuote.id,
+        acceptedQuoteHash: secondQuote.quoteHash,
+        termsVersion: catalog.termsVersion,
+      },
+    });
+    expect(accepted.statusCode).toBe(200);
+  });
+
   it("refuses a negative declared value with a validation error", async () => {
     const cookie = await customerCookie();
     const response = await createQuoteHttp(cookie, [
