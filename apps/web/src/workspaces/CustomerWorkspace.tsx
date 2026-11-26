@@ -41,6 +41,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { CardHeader } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Input } from "../components/ui/Field";
 import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { CustomerMoneyPanel } from "./analytics-panels";
 import {
@@ -110,7 +111,19 @@ type QuoteDto = {
   addressId?: string;
   termsVersion?: string;
   lines: QuoteLineDto[];
+  /** The declaration the customer made, with the value they stated for each piece. */
+  declaredItems?: DeclaredItemDto[];
   replayed?: boolean;
+};
+
+/** One declared piece: what it is, how many, and what the customer said it is worth. */
+type DeclaredItemDto = {
+  subtypeId: string;
+  category: string;
+  label: string;
+  quantity: number;
+  /** The customer's declaration in kopeks. `null` means "the customer stated no value". */
+  declaredValueKopeks?: number | null;
 };
 
 type HoldDto = {
@@ -153,7 +166,11 @@ type OrderDetailDto = {
     declaredValueKopeks: number;
     status: string;
     createdAt: string;
+    /** Free-form condition record; it carries how the courier settled the declared value. */
+    conditionJson?: Record<string, unknown> | null;
   }>;
+  /** What the customer declared at order time — straight out of the immutable quote. */
+  declaredItems?: DeclaredItemDto[];
   containers: Array<{ id: string; code: string; kind: string; sealSerial: string | null; weightGrams: number }>;
   adjustments: Array<{
     id: string;
@@ -185,7 +202,7 @@ type RepeatDto = {
   originalAddressId?: string | null;
   addressAvailable?: boolean;
   lines: Array<{ serviceId: string; tier: "economy" | "protected"; quantity: number; unit: string }>;
-  declaredItems: Array<{ subtypeId: string; category: string; label: string; quantity: number }>;
+  declaredItems: Array<{ subtypeId: string; category: string; label: string; quantity: number; declaredValueKopeks?: number | null }>;
   note: string;
 };
 
@@ -337,6 +354,44 @@ function forgetQuoteId(): void {
   } catch {
     // Same as above: nothing to clean up.
   }
+}
+
+/**
+ * The customer types rubles, the API stores kopeks.
+ *
+ * The declared value is optional — a customer may hand things over without saying what
+ * they are worth — but a typed value has to be a sane number of rubles: the API accepts
+ * whole kopeks only and rejects anything else, so the form refuses it before the request.
+ */
+function parseDeclaredValueRub(raw: string): { kopeks: number | null; error: string | null } {
+  const trimmed = raw.trim().replace(",", ".");
+  if (!trimmed) return { kopeks: null, error: null };
+  const value = Number(trimmed);
+  if (!Number.isFinite(value)) {
+    return { kopeks: null, error: "Ценность должна быть числом" };
+  }
+  if (value < 0) {
+    return { kopeks: null, error: "Ценность не может быть отрицательной" };
+  }
+  return { kopeks: Math.round(value * 100), error: null };
+}
+
+/** Kopeks back to the rubles the customer typed, so a repeated order keeps the value. */
+function kopeksToRubInput(kopeks: number | null | undefined): string {
+  if (kopeks === null || kopeks === undefined) return "";
+  return String(kopeks / 100);
+}
+
+/**
+ * How the courier settled the value the customer declared for a piece: confirmed, or a
+ * discrepancy when the courier recorded a different value. The intake keeps the answer in
+ * the free-form condition record of the accepted garment.
+ */
+function declaredValueSettlement(
+  condition: Record<string, unknown> | null | undefined,
+): "confirmed" | "discrepancy" | null {
+  const value = condition?.declaredValueSettlement;
+  return value === "confirmed" || value === "discrepancy" ? value : null;
 }
 
 const NOTIFICATIONS_PAGE_SIZE = 100;
@@ -561,6 +616,10 @@ function NewOrderTab({
   const [tier, setTier] = useState<"economy" | "protected">("economy");
   const [quantity, setQuantity] = useState("1000");
   const [declared, setDeclared] = useState<PickedGarment[]>([]);
+  // The value the customer states for each piece, in rubles as typed. It is kept next to
+  // the picked rows rather than inside them, because the picker itself knows nothing about
+  // money — it only picks icons and counts.
+  const [declaredValues, setDeclaredValues] = useState<Record<string, string>>({});
   // The landing page offers an individual visit outside the house schedule for an extra fee.
   // The API has always priced it; without this switch the customer could not buy what was
   // advertised, so the offer and the product have to meet.
@@ -604,9 +663,11 @@ function NewOrderTab({
       quantity,
       offSchedulePickup,
       offScheduleDelivery,
-      declared: tier === "protected" ? declared.map((d) => [d.subtypeId, d.quantity]) : [],
+      declared: tier === "protected"
+        ? declared.map((d) => [d.subtypeId, d.quantity, declaredValues[d.subtypeId] ?? ""])
+        : [],
     }),
-    [buildingId, addressId, pickupWindowId, deliveryWindowId, serviceId, tier, quantity, offSchedulePickup, offScheduleDelivery, declared],
+    [buildingId, addressId, pickupWindowId, deliveryWindowId, serviceId, tier, quantity, offSchedulePickup, offScheduleDelivery, declared, declaredValues],
   );
   const quoteStale = Boolean(quote && quoteFingerprint !== formFingerprint);
   const quoteExpired = quote ? new Date(quote.expiresAt).getTime() <= now : false;
@@ -815,6 +876,20 @@ function NewOrderTab({
       notify({ kind: "error", text: "Выберите дом, окна забора и доставки и услугу" });
       return;
     }
+    // The declared value is the customer's own statement about a piece. It is optional, but a
+    // typed value has to be a sane number — the API accepts whole kopeks only, so the form
+    // refuses a broken number instead of letting the request fail.
+    const declaredRows = declared.map((item) => ({
+      subtypeId: item.subtypeId,
+      label: item.label,
+      quantity: item.quantity,
+      parsed: parseDeclaredValueRub(declaredValues[item.subtypeId] ?? ""),
+    }));
+    const brokenValue = declaredRows.find(row => row.parsed.error);
+    if (brokenValue) {
+      notify({ kind: "error", text: `${brokenValue.label}: ${brokenValue.parsed.error}` });
+      return;
+    }
     const reqId = ++quoteReqRef.current;
     const requestFingerprint = formFingerprint;
     const priorReservationIds = [pickupHold?.reservationId, deliveryHold?.reservationId].filter(
@@ -837,8 +912,14 @@ function NewOrderTab({
           lines: [{ serviceId, tier, quantity: parsedQuantity, unit }],
           // The declaration travels inside the immutable quote, so the courier's
           // acceptance can be reconciled against exactly what the customer saw.
-          ...(tier === "protected" && declared.length > 0
-            ? { declaredItems: declared.map((item) => ({ subtypeId: item.subtypeId, quantity: item.quantity })) }
+          ...(tier === "protected" && declaredRows.length > 0
+            ? {
+              declaredItems: declaredRows.map(row => ({
+                subtypeId: row.subtypeId,
+                quantity: row.quantity,
+                ...(row.parsed.kopeks !== null ? { declaredValueKopeks: row.parsed.kopeks } : {}),
+              })),
+            }
             : {}),
           ...(priorReservationIds.length > 0 ? { releaseReservationIds: priorReservationIds } : {}),
         },
@@ -898,6 +979,11 @@ function NewOrderTab({
         icon: subtype?.icon ?? "tshirt",
       };
     }));
+    // The value the customer stated last time travels with the repeated order: the repeat is
+    // a new quote with a new price, but the customer does not have to declare the value again.
+    setDeclaredValues(Object.fromEntries(
+      repeat.declaredItems.map(item => [item.subtypeId, kopeksToRubInput(item.declaredValueKopeks)]),
+    ));
     quoteReqRef.current += 1;
     setQuote(null);
     setQuoteFingerprint(null);
@@ -1270,7 +1356,25 @@ function NewOrderTab({
               value={declared}
               onChange={setDeclared}
               title="Что сдаёте"
-              hint="Тариф «Защищённый» ведёт поштучную опись. Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Курьер увидит ваш список и сверит его с тем, что принял."
+              hint="Тариф «Защищённый» ведёт поштучную опись. Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Укажите ценность вещи, если хотите заявить её: курьер увидит ваш список, сверит его с тем, что принял, и подтвердит ценность или запишет расхождение."
+              renderExtra={item => (
+                <span className="garment-row-fields">
+                  <Input
+                    type="number"
+                    min={0}
+                    // Rubles, and kopecks are allowed: the API stores whole kopeks, so the
+                    // form rounds what the customer typed.
+                    step="any"
+                    placeholder="ценность не заявлена"
+                    value={declaredValues[item.subtypeId] ?? ""}
+                    onChange={event => setDeclaredValues(prev => ({
+                      ...prev,
+                      [item.subtypeId]: event.target.value,
+                    }))}
+                    aria-label={`Заявленная ценность: ${item.label}`}
+                  />
+                </span>
+              )}
             />
           </div>
         ) : (
@@ -1439,6 +1543,26 @@ function NewOrderTab({
               <span>Итого по расчёту</span>
               <strong className="mono">{money(quote.totalKopeks)}</strong>
             </div>
+            {quote.declaredItems && quote.declaredItems.length > 0 && (
+              <>
+                <h4 className="section-title">Заявленная ценность</h4>
+                <div className="data-list">
+                  {quote.declaredItems.map(item => (
+                    <div className="data-row" key={item.subtypeId}>
+                      <span>{item.label} × {item.quantity}</span>
+                      <span className="mono">
+                        {item.declaredValueKopeks === null || item.declaredValueKopeks === undefined
+                          ? "не заявлена"
+                          : money(item.declaredValueKopeks)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="muted u-mt-8px">
+                  Ценность входит в неизменяемый расчёт: курьер подтвердит её при приёме вещей или запишет расхождение.
+                </p>
+              </>
+            )}
             <p className="muted u-mt-8px">
               Тариф версии <span className="mono">{quote.tariffVersionId}</span> · расчёт действителен до{" "}
               <span className="mono">{dt(quote.expiresAt)}</span>
@@ -2130,6 +2254,23 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
 
           <section className="panel">
             <h3 className="panel-title u-mb-10px">Состав заказа</h3>
+            {detail.declaredItems && detail.declaredItems.length > 0 && (
+              <>
+                <h4 className="section-title">Вы заявили</h4>
+                <div className="data-list">
+                  {detail.declaredItems.map(item => (
+                    <div className="data-row" key={item.subtypeId}>
+                      <span>{item.label} × {item.quantity}</span>
+                      <span className="mono">
+                        {item.declaredValueKopeks === null || item.declaredValueKopeks === undefined
+                          ? "ценность не заявлена"
+                          : money(item.declaredValueKopeks)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             {detail.garments.length === 0 ? (
               <p className="muted">Поштучный учёт вещей по этому заказу не ведётся (эконом-тариф).</p>
             ) : (
@@ -2140,18 +2281,32 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                       <th>Код</th>
                       <th>Категория</th>
                       <th>Описание</th>
+                      <th>Ценность</th>
                       <th>Статус</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {detail.garments.map((garment) => (
-                      <tr key={garment.id}>
-                        <td className="mono">{garment.itemCode}</td>
-                        <td>{garment.category}</td>
-                        <td>{garment.description}</td>
-                        <td>{stateLabel(GARMENT_STATUS_LABELS, garment.status)}</td>
-                      </tr>
-                    ))}
+                    {detail.garments.map((garment) => {
+                      const settlement = declaredValueSettlement(garment.conditionJson);
+                      return (
+                        <tr key={garment.id}>
+                          <td className="mono">{garment.itemCode}</td>
+                          <td>{garment.category}</td>
+                          <td>{garment.description}</td>
+                          <td>
+                            <span className="mono">
+                              {garment.declaredValueKopeks === null || garment.declaredValueKopeks === undefined
+                                ? "—"
+                                : money(garment.declaredValueKopeks)}
+                            </span>
+                            {settlement === "discrepancy" ? (
+                              <Badge tone="warn">расхождение с заявленным</Badge>
+                            ) : null}
+                          </td>
+                          <td>{stateLabel(GARMENT_STATUS_LABELS, garment.status)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

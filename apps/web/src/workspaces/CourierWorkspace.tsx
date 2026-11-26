@@ -142,6 +142,8 @@ type DeclaredItemView = {
   label: string;
   category: string;
   quantity: number;
+  /** What the customer stated the piece is worth. `null` means "no value declared". */
+  declaredValueKopeks?: number | null;
 };
 
 type IntakeMode = "economy_bag" | "protected_items" | "mixed";
@@ -359,6 +361,10 @@ function normalizeOrder(raw: unknown): OrderDetails | null {
       label: String(d.label ?? d.subtypeId ?? "Вещь"),
       category: String(d.category ?? ""),
       quantity: Number(d.quantity ?? 0),
+      // The customer's own declaration of the value — the reference the courier confirms
+      // or contradicts at intake.
+      declaredValueKopeks:
+        typeof d.declaredValueKopeks === "number" ? d.declaredValueKopeks : null,
     }))
     .filter(d => d.subtypeId.length > 0);
 
@@ -774,6 +780,26 @@ export function CourierWorkspace({
     setIntakeMode(requiredIntakeMode ?? "economy_bag");
   }, [selectedStop?.stopId, requiredIntakeMode]);
 
+  // The customer's declaration arrives together with the order. A piece picked before the
+  // order loaded gets the declared value filled in as soon as the declaration is known —
+  // the courier confirms it or writes a different one, but never starts from a blank field.
+  useEffect(() => {
+    const declared = orderDetails?.declaredItems ?? [];
+    if (!declared.length || picked.length === 0) return;
+    setItemMeta(prev => {
+      const next = { ...prev };
+      let changed = false;
+      for (const item of picked) {
+        if (next[item.subtypeId]) continue;
+        const kopeks = declared.find(entry => entry.subtypeId === item.subtypeId)?.declaredValueKopeks;
+        if (typeof kopeks !== "number") continue;
+        next[item.subtypeId] = { declaredValueRub: String(kopeks / 100), note: "" };
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [orderDetails, picked]);
+
   const syncQueue = useCallback(async () => {
     if (syncingRef.current || !actorScope || !deviceId) return;
     if (!isOnline) {
@@ -1108,14 +1134,30 @@ export function CourierWorkspace({
     }
   };
 
+  /** What the customer declared for a piece — the reference the courier confirms or contradicts. */
+  const customerDeclaredKopeks = (subtypeId: string): number | null => {
+    const declared = (orderDetails?.declaredItems ?? []).find(item => item.subtypeId === subtypeId);
+    const kopeks = declared?.declaredValueKopeks;
+    return typeof kopeks === "number" ? kopeks : null;
+  };
+
+  /** The same value in the rubles the courier types into the intake form. */
+  const customerDeclaredRub = (subtypeId: string): string => {
+    const kopeks = customerDeclaredKopeks(subtypeId);
+    return kopeks === null ? "" : String(kopeks / 100);
+  };
+
   const handlePickedChange = (next: PickedGarment[]) => {
     setPicked(next);
     setItemMeta(prev => {
       const kept: Record<string, IntakeItemMeta> = {};
       for (const item of next) {
-        // The declared value is not invented: it stays empty unless the customer declared one
-        // (the quote carries it) or the courier writes it down explicitly.
-        kept[item.subtypeId] = prev[item.subtypeId] ?? { declaredValueRub: "", note: "" };
+        // The declared value is not invented: it starts as what the customer declared
+        // (the quote carries it) and stays empty when the customer declared nothing.
+        const existing = prev[item.subtypeId];
+        kept[item.subtypeId] = existing
+          ? existing
+          : { declaredValueRub: customerDeclaredRub(item.subtypeId), note: "" };
       }
       return kept;
     });
@@ -1194,6 +1236,13 @@ export function CourierWorkspace({
             trimmedDeclared && Number.isFinite(parsedDeclared) && parsedDeclared >= 0
               ? Math.round(parsedDeclared * 100)
               : undefined;
+          // The value has one author — the customer — and one confirmation point — this intake.
+          // So the courier either confirms the declared value or records a different one; a
+          // cleared field is a discrepancy as well, because nothing confirmed the declaration.
+          const customerKopeks = customerDeclaredKopeks(item.subtypeId);
+          const settlement = customerKopeks === null
+            ? undefined
+            : declaredValueKopeks === customerKopeks ? "confirmed" : "discrepancy";
           for (let piece = 0; piece < item.quantity; piece += 1) {
             index += 1;
             const entry: Record<string, unknown> = {
@@ -1202,6 +1251,7 @@ export function CourierWorkspace({
               subtypeId: item.subtypeId,
               description: meta.note.trim() || item.label,
               ...(declaredValueKopeks !== undefined ? { declaredValueKopeks } : {}),
+              ...(settlement ? { declaredValueSettlement: settlement } : {}),
             };
             if (intakeEvidenceIds.length > 0) {
               entry.evidenceAssetIds = intakeEvidenceIds;
@@ -1438,6 +1488,12 @@ export function CourierWorkspace({
                                 <span className="garment-picked-qty">
                                   принято {acceptedQuantity}
                                 </span>
+                                <span className="garment-picked-qty">
+                                  ценность{" "}
+                                  {declared.declaredValueKopeks === null || declared.declaredValueKopeks === undefined
+                                    ? "не заявлена"
+                                    : money(declared.declaredValueKopeks)}
+                                </span>
                                 {diff === 0 ? (
                                   <Badge tone="ok">совпадает</Badge>
                                 ) : (
@@ -1456,29 +1512,54 @@ export function CourierWorkspace({
                       value={picked}
                       onChange={handlePickedChange}
                       title="Что приняли"
-                      hint="Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Ценность вносите только если клиент её заявил: поле остаётся пустым, если клиент ценность не объявлял."
-                      renderExtra={item => (
-                        <span className="garment-row-fields">
-                          <input
-                            type="number"
-                            min={0}
-                            step={100}
-                            placeholder="не заявлена"
-                            value={itemMeta[item.subtypeId]?.declaredValueRub ?? ""}
-                            onChange={e =>
-                              handleMetaChange(item.subtypeId, "declaredValueRub", e.target.value)
-                            }
-                            aria-label={`Объявленная ценность: ${item.label}`}
-                          />
-                          <input
-                            type="text"
-                            placeholder="дефекты, если есть"
-                            value={itemMeta[item.subtypeId]?.note ?? ""}
-                            onChange={e => handleMetaChange(item.subtypeId, "note", e.target.value)}
-                            aria-label={`Примечание: ${item.label}`}
-                          />
-                        </span>
-                      )}
+                      hint="Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Ценность подставляется из описи клиента: если она совпадает, вы её подтверждаете, если нет — записываете расхождение."
+                      renderExtra={item => {
+                        const customerKopeks = customerDeclaredKopeks(item.subtypeId);
+                        const typed = (itemMeta[item.subtypeId]?.declaredValueRub ?? "").trim();
+                        const typedValue = typed ? Number(typed.replace(",", ".")) : NaN;
+                        const typedKopeks = Number.isFinite(typedValue) && typedValue >= 0
+                          ? Math.round(typedValue * 100)
+                          : undefined;
+                        // The settlement is shown while the courier types: a value that differs
+                        // from the declaration is a discrepancy, not a quiet overwrite.
+                        const settlement = customerKopeks === null
+                          ? null
+                          : typedKopeks === customerKopeks ? "confirmed" : "discrepancy";
+                        return (
+                          <span className="garment-row-fields">
+                            <span className="muted">
+                              клиент заявил: {customerKopeks === null ? "не заявлена" : money(customerKopeks)}
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              // The value comes from the customer's declaration and may carry
+                              // kopecks. A step the typed value does not match would make the
+                              // browser refuse the whole intake form.
+                              step="any"
+                              placeholder="не заявлена"
+                              value={itemMeta[item.subtypeId]?.declaredValueRub ?? ""}
+                              onChange={e =>
+                                handleMetaChange(item.subtypeId, "declaredValueRub", e.target.value)
+                              }
+                              aria-label={`Объявленная ценность: ${item.label}`}
+                            />
+                            <input
+                              type="text"
+                              placeholder="дефекты, если есть"
+                              value={itemMeta[item.subtypeId]?.note ?? ""}
+                              onChange={e => handleMetaChange(item.subtypeId, "note", e.target.value)}
+                              aria-label={`Примечание: ${item.label}`}
+                            />
+                            {settlement === "confirmed" ? (
+                              <Badge tone="ok">подтверждено</Badge>
+                            ) : null}
+                            {settlement === "discrepancy" ? (
+                              <Badge tone="warn">расхождение</Badge>
+                            ) : null}
+                          </span>
+                        );
+                      }}
                     />
                   </div>
                 )}
