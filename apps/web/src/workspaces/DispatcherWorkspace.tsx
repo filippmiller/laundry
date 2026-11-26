@@ -16,7 +16,7 @@ import {
   stateLabel,
 } from "../labels";
 import { ChronometryPanel, ChurnPanel, ItemMixPanel } from "./analytics-panels";
-import { PickupQueuePanel } from "./ops-panels";
+import { PickupQueuePanel, StuckOrdersPanel } from "./ops-panels";
 import { Badge, type BadgeTone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -87,7 +87,6 @@ type CapacityMismatch = {
   stored: number;
   actual: number;
 };
-
 const PARTNER_ASSIGNABLE_STATES = new Set([
   "confirmed",
   "scheduled",
@@ -883,6 +882,9 @@ export function DispatcherWorkspace({
 
       {/* 9. Клиенты, у которых доставка не состоялась */}
       <ChurnPanel notify={notify} refreshToken={refreshNonce} />
+
+      {/* 10. Заказы, которые застряли: у них теперь есть владелец и причина */}
+      <StuckOrdersPanel notify={notify} refreshToken={refreshNonce} />
 
     </div>
   );
