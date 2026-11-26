@@ -109,6 +109,10 @@ jobs:
         run: npm run verify:wave8:ui
         env:
           APP_URL: http://127.0.0.1:3000
+      - name: Mobile layout regression (16 combinations of viewport, zoom and role)
+        run: npm run verify:mobile
+        env:
+          APP_URL: http://127.0.0.1:3000
       - name: API log
         if: failure()
         run: cat /tmp/laundry-api.log
