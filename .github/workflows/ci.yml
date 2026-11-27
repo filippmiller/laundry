@@ -115,6 +115,8 @@ jobs:
         run: npm run verify:mobile
         env:
           APP_URL: http://127.0.0.1:3000
+      - name: Wave 9 mounted behavioral & negative-control suite (Chromium)
+        run: npm run verify:wave9:mounted
       - name: Write CI provenance summary
         if: always()
         run: |
@@ -145,6 +147,7 @@ jobs:
             temp/ci-artifacts/ci-provenance.json
             docs/evidence/wave7/
             docs/evidence/wave8/
+            docs/evidence/wave9/
             temp/audit-shots/mobile-fix/measurements.json
       - name: API log
         if: failure()

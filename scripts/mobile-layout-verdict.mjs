@@ -48,13 +48,43 @@ export function evaluateMobileResults(results) {
         );
       }
       if (
-        r.drawer.railRect &&
-        (r.drawer.railRect.width <= 0 ||
-          r.drawer.railRect.left < -2 ||
-          (typeof r.layoutWidth === "number" && r.drawer.railRect.left >= r.layoutWidth))
+        !r.drawer.railRect ||
+        typeof r.drawer.railRect.width !== "number" ||
+        typeof r.drawer.railRect.height !== "number" ||
+        r.drawer.railRect.width <= 0 ||
+        r.drawer.railRect.height <= 0 ||
+        r.drawer.railRect.left < -2 ||
+        (typeof r.layoutWidth === "number" && r.drawer.railRect.left >= r.layoutWidth)
       ) {
         failures.push(
-          `${r.tag}: the drawer stayed offscreen while open (railRect=${JSON.stringify(r.drawer.railRect)})`,
+          `${r.tag}: the drawer stayed offscreen or collapsed while open (railRect=${JSON.stringify(r.drawer.railRect ?? null)})`,
+        );
+      }
+      if (
+        !r.drawer.railVisibility ||
+        r.drawer.railVisibility.display === "none" ||
+        r.drawer.railVisibility.visibility !== "visible" ||
+        typeof r.drawer.railVisibility.opacity !== "number" ||
+        r.drawer.railVisibility.opacity <= 0 ||
+        r.drawer.railVisibility.checkVisibility === false
+      ) {
+        failures.push(
+          `${r.tag}: the drawer is not visible while open (railVisibility=${JSON.stringify(r.drawer.railVisibility ?? null)})`,
+        );
+      }
+      if (
+        !r.drawer.railViewportIntersection ||
+        r.drawer.railViewportIntersection.width <= 0 ||
+        r.drawer.railViewportIntersection.height <= 0 ||
+        r.drawer.railViewportIntersection.area <= 0
+      ) {
+        failures.push(
+          `${r.tag}: the drawer has no visible area intersecting the viewport (intersection=${JSON.stringify(r.drawer.railViewportIntersection ?? null)})`,
+        );
+      }
+      if (r.drawer.railNavHitOk !== true) {
+        failures.push(
+          `${r.tag}: no navigation item inside the open drawer is reachable (${r.drawer.railNavHitReason ?? "missing nav hit-test evidence"})`,
         );
       }
       if (r.drawer.closeTimedOut || r.drawer.railOpenAfterClose !== "false") {

@@ -26,9 +26,22 @@ export function evaluateMoneyRefreshCheck(input) {
     serverAfterPayableKopeks = null,
     expectedAfterDisputedText = null,
     expectedAfterPayableText = null,
+    failedRequests = [],
+    malformedAnalyticsCount = 0,
+    pendingRequestsAtClose = 0,
   } = input;
 
   const reasons = [];
+
+  if (Array.isArray(failedRequests) && failedRequests.length > 0) {
+    reasons.push(`aborted or failed finance requests during observation (${failedRequests.join(", ")})`);
+  }
+  if (typeof malformedAnalyticsCount === "number" && malformedAnalyticsCount > 0) {
+    reasons.push(`analytics response body failed JSON parsing (${malformedAnalyticsCount} time(s))`);
+  }
+  if (typeof pendingRequestsAtClose === "number" && pendingRequestsAtClose > 0) {
+    reasons.push(`${pendingRequestsAtClose} finance request(s) were still unfinished when observation closed`);
+  }
 
   if (resolveStatuses.length !== 1 || resolveStatuses[0] < 200 || resolveStatuses[0] >= 300) {
     reasons.push(

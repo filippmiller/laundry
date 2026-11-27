@@ -45,6 +45,7 @@
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { evaluateMobileResults } from "./mobile-layout-verdict.mjs";
 
 const BASE = process.env.APP_URL ?? "http://127.0.0.1:3010";
@@ -187,6 +188,71 @@ async function measure(page) {
     const brandRect = rect(brand);
     const railRect = rect(rail);
 
+    // (a0) full visibility, 2-axis viewport intersection, and nav-item hit-test for the rail (LND-W9-R2-04)
+    const railStyle = rail ? getComputedStyle(rail) : null;
+    const railVisibility =
+      rail && railStyle
+        ? {
+            display: railStyle.display,
+            visibility: railStyle.visibility,
+            opacity: Number.parseFloat(railStyle.opacity),
+            checkVisibility:
+              typeof rail.checkVisibility === "function"
+                ? rail.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+                : railStyle.display !== "none" &&
+                  railStyle.visibility === "visible" &&
+                  Number.parseFloat(railStyle.opacity) > 0,
+          }
+        : null;
+    const railViewportIntersection = railRect
+      ? (() => {
+          const ixLeft = Math.max(0, railRect.left);
+          const ixTop = Math.max(0, railRect.top);
+          const ixRight = Math.min(window.innerWidth, railRect.right);
+          const ixBottom = Math.min(window.innerHeight, railRect.bottom);
+          const width = Math.max(0, Math.round(ixRight - ixLeft));
+          const height = Math.max(0, Math.round(ixBottom - ixTop));
+          return { width, height, area: width * height };
+        })()
+      : null;
+
+    let railNavHitOk = false;
+    let railNavHitReason = "no enabled navigation item found inside .rail";
+    let railNavRect = null;
+    if (rail && railRect) {
+      const navItem = rail.querySelector(
+        ".rail__item:not([disabled]), nav button:not([disabled]), nav a[href]",
+      );
+      if (navItem) {
+        const nr = navItem.getBoundingClientRect();
+        railNavRect = {
+          left: Math.round(nr.left),
+          top: Math.round(nr.top),
+          width: Math.round(nr.width),
+          height: Math.round(nr.height),
+        };
+        const clipLeft = Math.max(0, railRect.left, nr.left);
+        const clipTop = Math.max(0, railRect.top, nr.top);
+        const clipRight = Math.min(window.innerWidth, railRect.right, nr.right);
+        const clipBottom = Math.min(window.innerHeight, railRect.bottom, nr.bottom);
+        if (clipRight - clipLeft <= 0 || clipBottom - clipTop <= 0) {
+          railNavHitOk = false;
+          railNavHitReason = `navigation item has no visible clipped area inside rail/viewport (navRect=${JSON.stringify(railNavRect)})`;
+        } else {
+          const cx = Math.round((clipLeft + clipRight) / 2);
+          const cy = Math.round((clipTop + clipBottom) / 2);
+          const hitEl = document.elementFromPoint(cx, cy);
+          if (hitEl && (hitEl === navItem || navItem.contains(hitEl))) {
+            railNavHitOk = true;
+            railNavHitReason = null;
+          } else {
+            railNavHitOk = false;
+            railNavHitReason = `elementFromPoint(${cx},${cy}) hit ${hitEl ? `${hitEl.tagName.toLowerCase()}.${hitEl.className || "-"}` : "null"} instead of the navigation item`;
+          }
+        }
+      }
+    }
+
     // (a) is the brand covered by the topbar?
     let brandHit = null;
     let brandHitCoveredByTopbar = false;
@@ -223,7 +289,19 @@ async function measure(page) {
       horizontalOverflow: doc.scrollWidth > window.innerWidth,
       clientWidth: doc.clientWidth,
       brandRect: brandRect && { left: Math.round(brandRect.left), top: Math.round(brandRect.top) },
-      railRect: railRect && { left: Math.round(railRect.left), width: Math.round(railRect.width) },
+      railRect: railRect && {
+        left: Math.round(railRect.left),
+        top: Math.round(railRect.top),
+        right: Math.round(railRect.right),
+        bottom: Math.round(railRect.bottom),
+        width: Math.round(railRect.width),
+        height: Math.round(railRect.height),
+      },
+      railVisibility,
+      railViewportIntersection,
+      railNavHitOk,
+      railNavHitReason,
+      railNavRect,
       brandHit,
       brandHitCoveredByTopbar,
       indicatorRect:
@@ -427,11 +505,11 @@ function judgeSticky(sticky) {
  * offset when a late panel changes the layout above the reading position —
  * both move the number while the visible content stays where it was.
  */
-async function measureDrawer(page, { toggle, layoutWidth, tag }) {
+async function measureDrawer(page, { toggle, layoutWidth, tag, outDir = OUT }) {
   const attempts = 3;
   let drawer = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    drawer = await measureDrawerOnce(page, { toggle, layoutWidth, tag });
+    drawer = await measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir });
     // The witness was lost: the workspace re-rendered the element under the
     // viewport, so the measurement has to be taken again on the new content.
     // A witness that was never there is not a reason to keep measuring — it
@@ -442,7 +520,7 @@ async function measureDrawer(page, { toggle, layoutWidth, tag }) {
   return drawer;
 }
 
-async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
+async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT }) {
   await page.evaluate(() => window.scrollTo({ top: 600, behavior: "instant" }));
   await waitForQuietPage(page);
 
@@ -498,7 +576,10 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   const openWait = await waitForRailState(page, "true");
   await setPhase(page, "open");
   await waitForSettledPage(page, 600);
-  await page.screenshot({ path: path.join(OUT, `after-${tag}-drawer.png`) });
+  if (outDir) {
+    await mkdir(outDir, { recursive: true });
+    await page.screenshot({ path: path.join(outDir, `after-${tag}-drawer.png`) });
+  }
   const drawer = await measure(page);
   drawer.railOpenBefore = railOpenBefore;
   drawer.openTimedOut = openWait.timedOut;
@@ -621,7 +702,9 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
     anchorAfterWheel,
     anchorClosed,
   });
-  await page.screenshot({ path: path.join(OUT, `after-${tag}-drawer-closed.png`) });
+  if (outDir) {
+    await page.screenshot({ path: path.join(outDir, `after-${tag}-drawer-closed.png`) });
+  }
   return drawer;
 }
 
@@ -739,7 +822,13 @@ async function run() {
   process.exit(failures.length ? 1 : 0);
 }
 
-run().catch(err => {
-  console.error(err);
-  process.exit(2);
-});
+export { installActivityMeter, measure, measureDrawer };
+
+const invokedDirectly = process.argv[1]
+  && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (invokedDirectly) {
+  run().catch(err => {
+    console.error(err);
+    process.exit(2);
+  });
+}

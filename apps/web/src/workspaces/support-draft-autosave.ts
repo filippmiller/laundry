@@ -103,8 +103,14 @@ type ThreadRecord = {
   saveQueued: boolean;
   /** The revision of the text in the reply box. Every keystroke raises it by one. */
   revision: number;
-  /** The server must not keep this draft any more — it was sent, or the thread was closed. */
-  dropDraft: boolean;
+  /** Monotonic generation of openThread() loads for this thread. */
+  loadEpoch: number;
+  /** Monotonic count of server-confirmed writes (PUT/DELETE) for this thread. */
+  writeCompletedEpoch: number;
+  /** Monotonic generator for explicit cleanup intents (markSent / discardDraft). */
+  intentEpoch: number;
+  /** Non-zero when the server must not keep the sent/closed draft; holds the intent epoch. */
+  dropDraftEpoch: number;
   /** The write that failed last, so it is not repeated in a loop. */
   failedAction: "put" | "delete" | null;
 };
@@ -200,7 +206,10 @@ export function createSupportDraftController(opts: {
       saving: false,
       saveQueued: false,
       revision: 0,
-      dropDraft: false,
+      loadEpoch: 0,
+      writeCompletedEpoch: 0,
+      intentEpoch: 0,
+      dropDraftEpoch: 0,
       failedAction: null,
     };
     records.set(threadId, record);
@@ -219,21 +228,20 @@ export function createSupportDraftController(opts: {
    */
   const pendingAction = (record: ThreadRecord): "put" | "delete" | null => {
     const trimmed = record.body.trim();
-    if (record.dropDraft && record.loadSettled && (!record.serverKnown || record.savedBody !== "")) {
-      // The server must not keep the sent answer. The newer text of the box replaces it in the
-      // write that follows this removal.
-      //
-      // The removal is sent even when the client does not know what the server holds — the load
-      // of the draft failed, so the server state is unknown. The intent is explicit here (the
-      // answer was sent, or the thread was closed) and the removal is idempotent, so a draft that
-      // the operator never saw cannot be destroyed by accident: it is the answer that was already
-      // sent, and it must not come back as a draft. The load must have settled: a removal that
-      // overtakes the load would destroy a draft nobody ever touched.
+    if (trimmed) {
+      // Non-empty text replaces whatever draft the server may hold. While a cleanup intent is
+      // still active (`dropDraftEpoch !== 0`), we still issue PUT even if the text happens to
+      // match `savedBody`, so the server confirmation explicitly retires the cleanup generation.
+      return trimmed === record.savedBody && record.dropDraftEpoch === 0 ? null : "put";
+    }
+    if (record.dropDraftEpoch !== 0 && record.loadSettled && (!record.serverKnown || record.savedBody !== "")) {
+      // The server must not keep the sent answer. The removal is sent even when the client does
+      // not know what the server holds (after a failed load) because the intent is explicit and
+      // idempotent. The load must have settled first so a removal never overtakes an in-flight GET.
       return "delete";
     }
-    if (trimmed) return trimmed === record.savedBody ? null : "put";
     // An empty box only asks for a DELETE when the client knows that the server holds a draft.
-    // After a failed load the server state is unknown, so nothing is deleted.
+    // After a failed load without explicit cleanup intent, nothing is deleted.
     return record.serverKnown && record.savedBody !== "" ? "delete" : null;
   };
 
@@ -307,6 +315,8 @@ export function createSupportDraftController(opts: {
       return;
     }
     const trimmed = record.body.trim();
+    const startedDropEpoch = record.dropDraftEpoch;
+    const startedRevision = record.revision;
     record.saving = true;
     record.status = "saving";
     record.error = null;
@@ -319,18 +329,27 @@ export function createSupportDraftController(opts: {
           body: { body: trimmed },
         });
         record.savedBody = trimmed;
-        if (trimmed) {
-          // The server holds the text of the box now: it replaced the draft it may have held,
-          // so there is nothing left to drop.
-          record.dropDraft = false;
+        if (trimmed && record.dropDraftEpoch === startedDropEpoch) {
+          // The server holds the replacement text now, retiring only the cleanup generation that
+          // existed when this PUT started (never a newer send/discard).
+          record.dropDraftEpoch = 0;
         }
       } else {
         await opts.api(`/support/threads/${record.threadId}/draft`, { method: "DELETE" });
         record.savedBody = "";
-        // Cleanup is complete: clear `dropDraft` so a future failed GET on a re-opened
-        // thread cannot re-issue a stale DELETE and erase a draft saved in another tab.
-        record.dropDraft = false;
+        // Retire only the cleanup generation that this DELETE covered; a newer send/discard
+        // stays armed, and a later failed GET on a re-opened thread cannot re-issue a stale DELETE.
+        if (record.dropDraftEpoch === startedDropEpoch) {
+          record.dropDraftEpoch = 0;
+        }
+        // If no further edits arrived while DELETE was in flight and the box is empty, reset
+        // `edited` so a future re-open does not treat the empty box as a local deletion of a
+        // newer draft saved in another tab.
+        if (record.revision === startedRevision && record.body.trim() === "") {
+          record.edited = false;
+        }
       }
+      record.writeCompletedEpoch += 1;
       record.serverKnown = true;
       record.error = null;
       record.errorScope = null;
@@ -380,14 +399,21 @@ export function createSupportDraftController(opts: {
     const record = ensureRecord(threadId);
     activeThreadId = threadId;
     clearTimer(record);
-    // A running write keeps the confirmed state of the server: forgetting it here would make the
-    // client issue a write that contradicts what the server has already accepted.
-    const writeRunning = record.saving;
+    // Capture read/write generations before starting GET so a late response from an older
+    // openThread or one overtaken by a PUT/DELETE can never restore stale text or clear a save error.
+    const myLoadEpoch = ++record.loadEpoch;
+    const startWriteCompletedEpoch = record.writeCompletedEpoch;
+    const startedDuringWrite = record.saving;
+    const startDropEpoch = record.dropDraftEpoch;
     record.loadSettled = false;
-    if (!writeRunning) record.serverKnown = false;
+    if (!startedDuringWrite && record.errorScope !== "save") {
+      record.serverKnown = false;
+    }
+    if (record.errorScope !== "save") {
+      record.error = null;
+      record.errorScope = null;
+    }
     record.status = "loading";
-    record.error = null;
-    record.errorScope = null;
     emit();
 
     let stored = "";
@@ -397,24 +423,41 @@ export function createSupportDraftController(opts: {
         | null;
       stored = typeof draft?.body === "string" ? draft.body : "";
     } catch (err) {
-      // A failed load is not an empty draft. Without the stored text there is nothing that may be
-      // deleted — UNLESS the operator already explicitly sent the message or closed the thread
-      // (`dropDraft === true`), in which case the pending cleanup must execute now (LND-W9-RET-05).
-      if (disposed) return;
+      // Ignore superseded loads completely.
+      if (disposed || myLoadEpoch !== record.loadEpoch) return;
       record.loadSettled = true;
-      if (record.dropDraft) {
-        record.error = null;
-        record.errorScope = null;
-        requestWrite(record);
-        record.status = computeStatus(record);
-        emit();
+      const staleAgainstWrite =
+        startedDuringWrite ||
+        record.saving ||
+        record.writeCompletedEpoch !== startWriteCompletedEpoch;
+      if (staleAgainstWrite) {
+        // A write was already running or completed while this GET was in flight: do not
+        // clobber confirmed server state or raise a spurious load error.
+        if (!record.saving) {
+          reconcile(record);
+        } else {
+          record.status = computeStatus(record);
+          emit();
+        }
+        return;
+      }
+      if (record.dropDraftEpoch !== 0) {
+        // Explicit cleanup intent (send/close) survives GET failure and executes via reconcile
+        // (respecting failedAction so a failed DELETE never replays in a loop).
+        if (record.errorScope !== "save") {
+          record.error = null;
+          record.errorScope = null;
+        }
+        reconcile(record);
         return;
       }
       if (record.edited && record.body.trim()) {
         // The operator already typed new text before GET failed: persist it via PUT instead
         // of stranding the reply in load-error without saving.
-        record.error = null;
-        record.errorScope = null;
+        if (record.errorScope !== "save") {
+          record.error = null;
+          record.errorScope = null;
+        }
         scheduleSave(record);
         record.status = computeStatus(record);
         emit();
@@ -427,26 +470,47 @@ export function createSupportDraftController(opts: {
       opts.onError?.(record.error);
       return;
     }
-    if (disposed) return;
+    if (disposed || myLoadEpoch !== record.loadEpoch) return;
 
     record.loadSettled = true;
-    if (!record.saving) {
-      // The load tells what the server holds right now. A running write keeps its own
-      // confirmation instead: overwriting it would contradict what the server already accepted.
+    const staleAgainstWrite =
+      startedDuringWrite ||
+      record.saving ||
+      record.writeCompletedEpoch !== startWriteCompletedEpoch;
+    if (!staleAgainstWrite) {
+      // Fresh GET with no overlapping or completed write: accept server state.
       record.serverKnown = true;
       record.savedBody = stored.trim();
+      if (record.savedBody === "" && record.dropDraftEpoch === startDropEpoch) {
+        // Server already has no draft and no newer send/discard happened while GET was in flight.
+        record.dropDraftEpoch = 0;
+      }
+      // A locally typed answer or an active cleanup intent always wins over the stored draft.
+      if (record.dropDraftEpoch === 0 && !record.edited) {
+        record.body = stored;
+      }
     }
-    // A locally typed answer wins over the stored one: a late response never overwrites the work
-    // of the operator. The stored text of a dropped draft is stale — it is the answer that was
-    // already sent — and must not come back into the box.
-    if (!record.dropDraft && !record.edited) record.body = stored;
-    record.error = null;
-    record.errorScope = null;
-    if (record.dropDraft) {
-      // The server must not keep the sent answer: the cleanup goes out at once instead of
-      // waiting for the debounce.
-      requestWrite(record);
-    } else if (pendingAction(record)) {
+    if (record.errorScope !== "save") {
+      record.error = null;
+      record.errorScope = null;
+    }
+    if (record.dropDraftEpoch !== 0) {
+      // Explicit cleanup goes out immediately via reconcile (respecting failedAction).
+      if (!record.saving) {
+        reconcile(record);
+      } else {
+        record.status = computeStatus(record);
+        emit();
+      }
+      return;
+    }
+    if (record.errorScope === "save") {
+      // Preserve an active save error and retry policy instead of replaying a failed write.
+      record.status = computeStatus(record);
+      emit();
+      return;
+    }
+    if (pendingAction(record)) {
       scheduleSave(record);
     } else {
       clearTimer(record);
@@ -466,10 +530,9 @@ export function createSupportDraftController(opts: {
     record.edited = true;
     record.error = null;
     record.errorScope = null;
-    if (body.trim()) {
-      // The new text replaces the draft the server may still hold.
-      record.dropDraft = false;
-    }
+    record.failedAction = null;
+    // Note: do NOT clear `dropDraftEpoch` on keystroke (LND-W9-R2-02). Cleanup intent is retired
+    // only after a confirmed DELETE or a confirmed replacement PUT on the server.
     if (!record.loadSettled) {
       // The stored draft is still on its way: nothing is written before it is known, so a DELETE
       // can never destroy a draft the operator never saw.
@@ -506,9 +569,21 @@ export function createSupportDraftController(opts: {
       return;
     }
     if (sentRevision !== record.revision) {
-      // The operator typed something newer while the message was on its way: the newer text
-      // stays in the box and replaces the sent answer on the server. The pending autosave timer
-      // must survive — it is what saves the newer text.
+      // The operator changed the box while the message was on its way. Still record cleanup
+      // intent for the sent draft so clearing the box before POST ack or before PUT confirmation
+      // cannot strand the old draft on the server if GET fails.
+      record.dropDraftEpoch = ++record.intentEpoch;
+      if (!record.body.trim()) {
+        clearTimer(record);
+        record.edited = false;
+        record.error = null;
+        record.errorScope = null;
+        record.failedAction = null;
+        record.status = computeStatus(record);
+        emit();
+        requestWrite(record);
+        return;
+      }
       if (pendingAction(record) && record.timer === null) scheduleSave(record);
       return;
     }
@@ -516,9 +591,10 @@ export function createSupportDraftController(opts: {
     clearTimer(record);
     record.body = "";
     record.edited = false;
-    record.dropDraft = true;
+    record.dropDraftEpoch = ++record.intentEpoch;
     record.error = null;
     record.errorScope = null;
+    record.failedAction = null;
     record.status = computeStatus(record);
     emit();
     // The cleanup must not wait for the debounce, but it must not overtake a running write.
@@ -531,9 +607,10 @@ export function createSupportDraftController(opts: {
     clearTimer(record);
     record.body = "";
     record.edited = false;
-    record.dropDraft = true;
+    record.dropDraftEpoch = ++record.intentEpoch;
     record.error = null;
     record.errorScope = null;
+    record.failedAction = null;
     record.status = computeStatus(record);
     emit();
     requestWrite(record);

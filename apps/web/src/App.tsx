@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MotionConfig } from "motion/react";
 import { api } from "./api";
 import {
@@ -10,7 +10,11 @@ import {
 } from "./auth-logout";
 import "./styles.css";
 import { DemoConfig, Me, Notice } from "./types";
-import { SCROLL_RESTORE_ATTEMPTS, decideScrollRestore } from "./scroll-restoration";
+import {
+  SCROLL_RESTORE_ATTEMPTS,
+  SCROLL_RESTORE_TOLERANCE_PX,
+  decideScrollRestore,
+} from "./scroll-restoration";
 import { Shell } from "./components/Shell";
 import { Router } from "./components/Router";
 import { Button } from "./components/ui";
@@ -31,6 +35,48 @@ function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceKey | null>(null);
+  // The scroll position belongs to the workspace and lives in `history.state` as well as in a ref
+  // so it survives both SPA navigation and reloads (P2-03, P2-04, LND-W9-R2-03).
+  const scrollOffsetsRef = useRef<Record<string, number>>({});
+  // Monotonic navigation generation so A -> B -> A transitions and mount callbacks are uniquely
+  // bound to the exact visit (LND-W9-R2-03).
+  const [navGen, setNavGen] = useState(0);
+  const navGenRef = useRef(0);
+  const [mountedVisit, setMountedVisit] = useState<{ workspace: WorkspaceKey; navGen: number } | null>(null);
+  const isRestoringRef = useRef(false);
+  const activeWorkspaceRef = useRef<WorkspaceKey | null>(null);
+  const mountedVisitRef = useRef<{ workspace: WorkspaceKey; navGen: number } | null>(null);
+
+  const persistScrollOffsetsToHistory = useCallback((expectedWorkspace: WorkspaceKey) => {
+    if (typeof window === "undefined") return;
+    if (workspaceFromHash(window.location.hash) !== expectedWorkspace) return;
+    const state = (window.history.state ?? {}) as Record<string, unknown>;
+    window.history.replaceState(
+      { ...state, scrollOffsets: { ...scrollOffsetsRef.current } },
+      "",
+    );
+  }, []);
+
+  const activateWorkspace = useCallback((next: WorkspaceKey | null) => {
+    const prev = activeWorkspaceRef.current;
+    if (prev && prev !== next && !isRestoringRef.current && mountedVisitRef.current?.workspace === prev) {
+      scrollOffsetsRef.current[prev] = window.scrollY;
+      persistScrollOffsetsToHistory(prev);
+    }
+    const nextGen = navGenRef.current + 1;
+    navGenRef.current = nextGen;
+    activeWorkspaceRef.current = next;
+    isRestoringRef.current = next !== null;
+    setNavGen(nextGen);
+    setActiveWorkspace(next);
+  }, [persistScrollOffsetsToHistory]);
+
+  const handleWorkspaceMounted = useCallback((key: WorkspaceKey | null, gen: number) => {
+    if (gen !== navGenRef.current) return;
+    const nextMounted = key ? { workspace: key, navGen: gen } : null;
+    mountedVisitRef.current = nextMounted;
+    setMountedVisit(nextMounted);
+  }, []);
   // The session is restored asynchronously; until it settles we must not paint
   // the sign-in screen, or a signed-in user sees it flash on every reload.
   const [booting, setBooting] = useState(true);
@@ -115,23 +161,29 @@ function App() {
   const available = useMemo(() => workspacesForRoles(me?.roles ?? []), [me?.roles]);
   useEffect(() => {
     if (!me) {
-      setActiveWorkspace(null);
+      activateWorkspace(null);
       return;
     }
     const options = workspacesForRoles(me.roles);
     if (options.length === 0) {
-      setActiveWorkspace(null);
+      activateWorkspace(null);
       return;
     }
     const fromHash = workspaceFromHash(window.location.hash);
     if (fromHash && options.some(item => item.key === fromHash)) {
-      setActiveWorkspace(fromHash);
+      if (activeWorkspaceRef.current !== fromHash) {
+        activateWorkspace(fromHash);
+      }
       return;
     }
     const fallback = options[0].key;
-    setActiveWorkspace(fallback);
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${fallback}`);
-  }, [me]);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${window.location.search}#/${fallback}`,
+    );
+    activateWorkspace(fallback);
+  }, [me, activateWorkspace]);
 
   useEffect(() => {
     if (!me) return;
@@ -139,21 +191,22 @@ function App() {
     function onHashChange() {
       const fromHash = workspaceFromHash(window.location.hash);
       if (fromHash && options.some(item => item.key === fromHash)) {
-        setActiveWorkspace(fromHash);
+        if (fromHash === activeWorkspaceRef.current) return;
+        const stored = (window.history.state as { scrollOffsets?: Record<string, number> } | null)?.scrollOffsets;
+        if (stored) {
+          // Fill any missing entries from history.state without clobbering fresher in-memory offsets.
+          for (const [k, v] of Object.entries(stored)) {
+            if (typeof scrollOffsetsRef.current[k] !== "number" && typeof v === "number") {
+              scrollOffsetsRef.current[k] = v;
+            }
+          }
+        }
+        activateWorkspace(fromHash);
       }
     }
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
-  }, [me]);
-
-  // The scroll position belongs to the workspace: a user who leaves the finance cabinet for the
-  // dispatcher and comes back expects to land where they were. The native browser restoration
-  // cannot help — the workspace content is fetched after the document is painted, so at
-  // restoration time the document is still short.
-  //
-  // The offsets live in `history.state` and not only in a React ref: a history entry survives a
-  // reload, so the position is restored after a reload as well (P2-03, P2-04).
-  const scrollOffsetsRef = useRef<Record<string, number>>({});
+  }, [me, activateWorkspace]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -161,22 +214,27 @@ function App() {
     if (stored) scrollOffsetsRef.current = { ...stored };
   }, []);
 
-  // The current offset is written into the history entry while the user scrolls, so that a reload
-  // or a Back navigation finds it again.
+  // The current offset is written into the history entry while the user scrolls on a settled,
+  // mounted workspace — never during exit animations, lazy loading, or pending restoration.
   useEffect(() => {
     if (typeof window === "undefined") return;
     let frame = 0;
+    const effectGen = navGen;
     function onScroll() {
       if (frame) return;
       frame = window.requestAnimationFrame(() => {
         frame = 0;
-        if (!activeWorkspace) return;
+        if (
+          !activeWorkspace ||
+          effectGen !== navGenRef.current ||
+          isRestoringRef.current ||
+          mountedVisitRef.current?.workspace !== activeWorkspace ||
+          mountedVisitRef.current?.navGen !== effectGen
+        ) {
+          return;
+        }
         scrollOffsetsRef.current[activeWorkspace] = window.scrollY;
-        const state = (window.history.state ?? {}) as Record<string, unknown>;
-        window.history.replaceState(
-          { ...state, scrollOffsets: { ...scrollOffsetsRef.current } },
-          "",
-        );
+        persistScrollOffsetsToHistory(activeWorkspace);
       });
     }
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -184,7 +242,7 @@ function App() {
       window.removeEventListener("scroll", onScroll);
       if (frame) window.cancelAnimationFrame(frame);
     };
-  }, [activeWorkspace]);
+  }, [activeWorkspace, navGen, persistScrollOffsetsToHistory]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("scrollRestoration" in window.history)) return;
@@ -194,68 +252,232 @@ function App() {
     };
   }, []);
 
-  // After a reload the stored offset is restored explicitly: the workspace content arrives after
-  // the first paint, so the document is still short when the browser would have restored it.
-  //
-  // Two rules keep the restoration from stealing the place the reader has chosen: the document
-  // has to be tall enough to hold the offset, and a reader who has already scrolled somewhere else
-  // keeps their position (see `decideScrollRestore`).
+  // Restore the remembered reading position only after the target workspace for this exact
+  // navigation generation has mounted (past AnimatePresence exit and Suspense fallback).
+  // Uses an elapsed-time deadline so ResizeObserver bursts cannot exhaust retries early, and
+  // verifies achieved scrollY after layout before resuming scroll persistence (LND-W9-R2-03).
   useEffect(() => {
     if (!activeWorkspace) return;
+    if (!mountedVisit || mountedVisit.workspace !== activeWorkspace || mountedVisit.navGen !== navGen) {
+      return;
+    }
     const target = scrollOffsetsRef.current[activeWorkspace];
-    if (typeof target !== "number" || target <= 0) return;
-    let attempts = 0;
+    const hasTarget = typeof target === "number" && Number.isFinite(target) && target > 0;
+
+    // Reset to top on the newly mounted target workspace so Back/Forward never carries over
+    // the leaving workspace's non-zero scrollY as false user input.
+    let programmaticReset = true;
+    window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+    // Clear programmaticReset on next frame after scroll event settles.
+    const resetClearFrame = window.requestAnimationFrame(() => {
+      programmaticReset = false;
+    });
+
+    if (!hasTarget) {
+      isRestoringRef.current = false;
+      persistScrollOffsetsToHistory(activeWorkspace);
+      return () => {
+        window.cancelAnimationFrame(resetClearFrame);
+      };
+    }
+
+    const totalBudgetMs = SCROLL_RESTORE_ATTEMPTS * 120;
+    const deadline = Date.now() + totalBudgetMs;
     let settled = false;
+    let userInterrupted = false;
+    let verifyingTarget = false;
+    let stabilizing = false;
+    let lastKnownHeight = document.documentElement.scrollHeight;
+    let stabilizeQuietTimer = 0;
     let timer = 0;
+    let verifyFrame = 0;
+    let resizeObserver: ResizeObserver | null = null;
+
+    const cleanupListeners = () => {
+      window.removeEventListener("wheel", onUserInput);
+      window.removeEventListener("touchmove", onUserInput);
+      window.removeEventListener("keydown", onUserKeyDown);
+      window.removeEventListener("scroll", onPendingScroll);
+      if (timer) window.clearInterval(timer);
+      if (stabilizeQuietTimer) window.clearTimeout(stabilizeQuietTimer);
+      if (verifyFrame) window.cancelAnimationFrame(verifyFrame);
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+    };
+
+    const finish = (cancelledByUser: boolean) => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      isRestoringRef.current = false;
+      if (cancelledByUser) {
+        scrollOffsetsRef.current[activeWorkspace] = window.scrollY;
+      }
+      persistScrollOffsetsToHistory(activeWorkspace);
+    };
+
+    const scheduleStabilizeDone = () => {
+      if (stabilizeQuietTimer) window.clearTimeout(stabilizeQuietTimer);
+      // Wait for async top panels to finish expanding (browser scroll-anchoring can otherwise
+      // push scrollY down by >1000px right after the initial scrollTo).
+      const remaining = Math.max(0, deadline - Date.now());
+      const waitMs = Math.min(450, remaining);
+      if (waitMs <= 0) {
+        finish(false);
+        return;
+      }
+      stabilizeQuietTimer = window.setTimeout(() => {
+        stabilizeQuietTimer = 0;
+        if (!settled && !userInterrupted) {
+          if (Math.abs(window.scrollY - target) > SCROLL_RESTORE_TOLERANCE_PX) {
+            window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
+          }
+          finish(false);
+        }
+      }, waitMs);
+    };
+
+    const isInsideOverlay = (eventTarget: EventTarget | null): boolean =>
+      eventTarget instanceof Element && Boolean(eventTarget.closest(".rail, dialog[open]"));
+
+    const isEditableTarget = (eventTarget: EventTarget | null): boolean =>
+      eventTarget instanceof Element &&
+      Boolean(eventTarget.closest('input, textarea, select, [contenteditable="true"]'));
+
+    const SCROLL_KEYS = new Set([
+      "ArrowDown",
+      "ArrowUp",
+      "PageDown",
+      "PageUp",
+      "Home",
+      "End",
+      " ",
+      "Spacebar",
+    ]);
+
+    function onUserInput(event: Event) {
+      if (settled || isInsideOverlay(event.target)) return;
+      userInterrupted = true;
+      finish(true);
+    }
+
+    function onUserKeyDown(event: KeyboardEvent) {
+      if (settled || !SCROLL_KEYS.has(event.key)) return;
+      if (isInsideOverlay(event.target) || isEditableTarget(event.target)) return;
+      userInterrupted = true;
+      finish(true);
+    }
+
+    function onPendingScroll() {
+      // Any non-zero scroll while waiting (outside our programmatic reset/restore) indicates
+      // genuine user scrolling such as dragging the native scrollbar.
+      if (settled || programmaticReset || verifyingTarget) return;
+      if (stabilizing) {
+        // During post-restore stabilization, a scrollY shift accompanied by a document height
+        // change is browser scroll-anchoring from async panels expanding above the viewport;
+        // re-pin to target. Without a height change, treat as genuine scrollbar drag.
+        const currentHeight = document.documentElement.scrollHeight;
+        if (currentHeight !== lastKnownHeight) {
+          lastKnownHeight = currentHeight;
+          window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
+          scheduleStabilizeDone();
+          return;
+        }
+        if (Math.abs(window.scrollY - target) > SCROLL_RESTORE_TOLERANCE_PX) {
+          userInterrupted = true;
+          finish(true);
+        }
+        return;
+      }
+      if (Math.abs(window.scrollY) > SCROLL_RESTORE_TOLERANCE_PX) {
+        userInterrupted = true;
+        finish(true);
+      }
+    }
+
+    window.addEventListener("wheel", onUserInput, { passive: true });
+    window.addEventListener("touchmove", onUserInput, { passive: true });
+    window.addEventListener("keydown", onUserKeyDown);
+    window.addEventListener("scroll", onPendingScroll, { passive: true });
 
     const tryRestore = () => {
-      if (settled) return;
-      attempts += 1;
+      if (settled || userInterrupted || verifyingTarget) return;
+      if (stabilizing) {
+        const currentHeight = document.documentElement.scrollHeight;
+        if (currentHeight !== lastKnownHeight) {
+          lastKnownHeight = currentHeight;
+          if (Math.abs(window.scrollY - target) > SCROLL_RESTORE_TOLERANCE_PX) {
+            window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
+          }
+          scheduleStabilizeDone();
+        }
+        return;
+      }
+      const remainingMs = Math.max(0, deadline - Date.now());
+      const attemptsLeft = remainingMs > 0 ? Math.max(1, Math.ceil(remainingMs / 120)) : 0;
       const decision = decideScrollRestore({
         target,
-        currentScrollY: window.scrollY,
+        currentScrollY: 0,
         documentHeight: document.documentElement.scrollHeight,
         viewportHeight: window.innerHeight,
-        attemptsLeft: SCROLL_RESTORE_ATTEMPTS - attempts,
+        attemptsLeft,
       });
       if (decision === "wait") return;
-      settled = true;
-      if (timer) window.clearInterval(timer);
-      if (decision === "restore") {
-        // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, so `auto` would glide
-        // to the remembered position — and the glide keeps running over a position the reader has
-        // already chosen. One jump at a known moment is easier to reason about than an animation
-        // that competes with the reader.
-        window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
+      if (decision === "skip") {
+        finish(false);
+        return;
       }
+      // Apply instant jump and verify achieved scrollY on the next frame, then stabilize across
+      // async panel expansions so Chromium scroll-anchoring does not push the restored offset.
+      verifyingTarget = true;
+      window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
+      verifyFrame = window.requestAnimationFrame(() => {
+        verifyFrame = 0;
+        if (settled || userInterrupted) return;
+        const achieved = window.scrollY;
+        if (Math.abs(achieved - target) <= SCROLL_RESTORE_TOLERANCE_PX) {
+          verifyingTarget = false;
+          stabilizing = true;
+          lastKnownHeight = document.documentElement.scrollHeight;
+          scheduleStabilizeDone();
+        } else {
+          // Layout clamped or shifted before settling: keep waiting within the deadline.
+          verifyingTarget = false;
+          if (Date.now() >= deadline) {
+            finish(false);
+          }
+        }
+      });
     };
 
-    // Unified restoration path for both reload and workspace switch (C-01): never issue an
-    // unchecked immediate `scrollTo(target)` that gets clamped while the workspace is still short
-    // and then tricks `decideScrollRestore` into thinking the reader scrolled away.
-    const frame = window.requestAnimationFrame(tryRestore);
+    const initialFrame = window.requestAnimationFrame(tryRestore);
     timer = window.setInterval(tryRestore, 120);
+    if (typeof ResizeObserver === "function") {
+      resizeObserver = new ResizeObserver(() => {
+        tryRestore();
+      });
+      resizeObserver.observe(document.documentElement);
+    }
     return () => {
       settled = true;
-      window.cancelAnimationFrame(frame);
-      window.clearInterval(timer);
+      window.cancelAnimationFrame(resetClearFrame);
+      window.cancelAnimationFrame(initialFrame);
+      cleanupListeners();
     };
-  }, [activeWorkspace]);
+  }, [activeWorkspace, navGen, mountedVisit, persistScrollOffsetsToHistory]);
 
   function selectWorkspace(key: WorkspaceKey) {
     if (key === activeWorkspace) return;
-    // Remember where the current workspace was before leaving it.
-    if (activeWorkspace) {
+    // Remember where the current workspace was BEFORE changing the URL hash (LND-W9-R2-03).
+    if (activeWorkspace && !isRestoringRef.current && mountedVisitRef.current?.workspace === activeWorkspace) {
       scrollOffsetsRef.current[activeWorkspace] = window.scrollY;
+      persistScrollOffsetsToHistory(activeWorkspace);
     }
-    setActiveWorkspace(key);
     const nextHash = `#/${key}`;
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
-    // Always start the newly selected workspace at 0; if it has a remembered offset, the unified
-    // `useEffect` above restores it as soon as the document can hold it without partial clamping.
-    window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+    activateWorkspace(key);
   }
 
   function handleAuthenticated(nextMe: Me, roleHint?: string) {
@@ -266,8 +488,12 @@ function App() {
       const options = workspacesForRoles(nextMe.roles);
       const preferred = options.find(ws => ws.roles.includes(roleHint));
       if (preferred) {
-        setActiveWorkspace(preferred.key);
-        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/${preferred.key}`);
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `${window.location.pathname}${window.location.search}#/${preferred.key}`,
+        );
+        activateWorkspace(preferred.key);
       }
     }
     setMe(nextMe);
@@ -279,7 +505,7 @@ function App() {
     setPendingLogout(true);
     setLogoutError(null);
     setMe(null);
-    setActiveWorkspace(null);
+    activateWorkspace(null);
     setNotice(null);
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     await attemptServerLogout();
@@ -344,6 +570,8 @@ function App() {
             demo={demo}
             setNotice={setNotice}
             activeWorkspace={activeWorkspace}
+            navGen={navGen}
+            onWorkspaceMounted={handleWorkspaceMounted}
           />
         )}
       </Shell>

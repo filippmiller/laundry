@@ -27,11 +27,11 @@
 import { chromium } from "playwright";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateMoneyRefreshCheck } from "./verify-wave8-ui-verdict.mjs";
+import { observeMoneyRefresh } from "./verify-wave8-ui-money.mjs";
 
 let APP = process.env.APP_URL ?? "http://localhost:5173";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -39,18 +39,18 @@ const EVIDENCE_DIR = resolve(REPO_ROOT, process.env.VERIFY_EVIDENCE_DIR ?? "docs
 
 const results = [];
 
-function record(id, name, status, detail) {
-  results.push({ id, name, status, detail });
+function record(id, name, status, detail, meta = undefined) {
+  results.push(meta ? { id, name, status, detail, meta } : { id, name, status, detail });
   console.log(`CHECK ${id} ${name}: ${status} — ${detail}`);
 }
-function pass(id, name, detail) {
-  record(id, name, "PASS", detail);
+function pass(id, name, detail, meta = undefined) {
+  record(id, name, "PASS", detail, meta);
 }
-function skip(id, name, detail) {
-  record(id, name, "SKIP", detail);
+function skip(id, name, detail, meta = undefined) {
+  record(id, name, "SKIP", detail, meta);
 }
-function fail(id, name, detail) {
-  record(id, name, "FAIL", detail);
+function fail(id, name, detail, meta = undefined) {
+  record(id, name, "FAIL", detail, meta);
 }
 
 /**
@@ -67,12 +67,14 @@ function codeIdentity() {
       return null;
     }
   };
-  const status = git(["status", "--porcelain"]) ?? "";
-  const changed = status.split(/\r?\n/).filter(Boolean);
+  // Use NUL-delimited `-uall` so untracked directories are never collapsed and every individual
+  // untracked file is hashed deterministically (LND-W9-R2-E01).
+  const rawStatusZ = git(["status", "--porcelain", "-z", "-uall"]) ?? "";
+  const changed = rawStatusZ.split("\0").filter(Boolean);
   const diff = git(["diff", "HEAD"]) ?? "";
   const untracked = changed
     .filter(line => line.startsWith("?? "))
-    .map(line => line.slice(3).trim())
+    .map(line => line.slice(3))
     .sort();
   const untrackedHash = createHash("sha256");
   for (const rel of untracked) {
@@ -88,7 +90,7 @@ function codeIdentity() {
     codeTree: git(["rev-parse", "HEAD^{tree}"]),
     branch: git(["rev-parse", "--abbrev-ref", "HEAD"]),
     dirty: changed.length > 0,
-    changedFiles: changed.map(line => line.slice(0, 2).trim() + " " + line.slice(3).trim()),
+    changedFiles: changed.map(line => line.slice(0, 2).trim() + " " + line.slice(3)),
     diffSha256: createHash("sha256").update(diff, "utf8").digest("hex"),
     untrackedSha256: untracked.length > 0 ? untrackedHash.digest("hex") : null,
   };
@@ -113,16 +115,45 @@ async function describeApp(url) {
       : assets.length > 0
         ? "built-app-from-dist/web"
         : "unknown";
-    const uniqueAssets = [...new Set(assets)];
+    const uniqueAssets = [...new Set(assets)].sort();
     const bundleManifest = {};
     const distIndex = resolve(REPO_ROOT, "dist/web/index.html");
     if (existsSync(distIndex) && statSync(distIndex).isFile()) {
       bundleManifest["dist/web/index.html"] = createHash("sha256").update(readFileSync(distIndex)).digest("hex");
     }
+    const distAssetsDir = resolve(REPO_ROOT, "dist/web/assets");
+    if (existsSync(distAssetsDir) && statSync(distAssetsDir).isDirectory()) {
+      for (const entry of readdirSync(distAssetsDir).sort()) {
+        const abs = resolve(distAssetsDir, entry);
+        if (statSync(abs).isFile()) {
+          bundleManifest[`dist/web/assets/${entry}`] = createHash("sha256").update(readFileSync(abs)).digest("hex");
+        }
+      }
+    }
+    const servedHtmlSha256 = createHash("sha256").update(html, "utf8").digest("hex");
+    const servedAssetsSha256 = {};
+    let allAssetsMatched =
+      kind === "built-app-from-dist/web" &&
+      res.status === 200 &&
+      typeof bundleManifest["dist/web/index.html"] === "string" &&
+      servedHtmlSha256 === bundleManifest["dist/web/index.html"];
     for (const asset of uniqueAssets) {
-      const localPath = resolve(REPO_ROOT, "dist/web", asset.replace(/^\/+/, ""));
-      if (existsSync(localPath) && statSync(localPath).isFile()) {
-        bundleManifest[`dist/web${asset}`] = createHash("sha256").update(readFileSync(localPath)).digest("hex");
+      try {
+        const assetRes = await fetch(new URL(asset, url));
+        const bytes = Buffer.from(await assetRes.arrayBuffer());
+        const sha256 = createHash("sha256").update(bytes).digest("hex");
+        servedAssetsSha256[asset] = { httpStatus: assetRes.status, sha256 };
+        const distKey = `dist/web${asset}`;
+        if (assetRes.status !== 200 || bundleManifest[distKey] !== sha256) {
+          allAssetsMatched = false;
+        }
+      } catch (assetErr) {
+        servedAssetsSha256[asset] = {
+          httpStatus: null,
+          sha256: null,
+          error: assetErr instanceof Error ? assetErr.message : String(assetErr),
+        };
+        allAssetsMatched = false;
       }
     }
     return {
@@ -134,8 +165,10 @@ async function describeApp(url) {
           ? `the served HTML loads the built asset(s) ${uniqueAssets.slice(0, 3).join(", ")}`
           : "the served HTML names neither /@vite/client nor a built asset",
       servedAssets: uniqueAssets,
-      servedHtmlSha256: createHash("sha256").update(html, "utf8").digest("hex"),
+      servedHtmlSha256,
+      servedAssetsSha256,
       bundleManifestSha256: bundleManifest,
+      servedMatchesDist: uniqueAssets.length > 0 ? allAssetsMatched : false,
     };
   } catch (err) {
     return {
@@ -143,6 +176,10 @@ async function describeApp(url) {
       httpStatus: null,
       detectedBy: `the address did not answer: ${err instanceof Error ? err.message : String(err)}`,
       servedAssets: [],
+      servedHtmlSha256: null,
+      servedAssetsSha256: {},
+      bundleManifestSha256: {},
+      servedMatchesDist: false,
     };
   }
 }
@@ -247,6 +284,10 @@ async function spawnStand(code) {
     detectedBy: app.detectedBy,
     httpStatus: app.httpStatus,
     servedAssets: app.servedAssets,
+    servedHtmlSha256: app.servedHtmlSha256,
+    servedAssetsSha256: app.servedAssetsSha256,
+    bundleManifestSha256: app.bundleManifestSha256,
+    servedMatchesDist: app.servedMatchesDist,
     pid: child.pid,
     port,
     requestedPort,
@@ -263,6 +304,7 @@ async function spawnStand(code) {
       branch: code.branch,
       dirty: code.dirty,
       diffSha256: code.diffSha256,
+      untrackedSha256: code.untrackedSha256,
     },
     // The bundle that was served: a build that is older than the sources is a different app, and
     // the receipt has to let a reader see that.
@@ -314,6 +356,10 @@ async function externalStandIdentity(code) {
     detectedBy: app.detectedBy,
     httpStatus: app.httpStatus,
     servedAssets: app.servedAssets,
+    servedHtmlSha256: app.servedHtmlSha256,
+    servedAssetsSha256: app.servedAssetsSha256,
+    bundleManifestSha256: app.bundleManifestSha256,
+    servedMatchesDist: app.servedMatchesDist,
     // The tree on disk is NOT the tree the answering process was started from — that is exactly
     // what cannot be observed from the outside, and the receipt has to say so.
     codeOnDisk: {
@@ -322,6 +368,7 @@ async function externalStandIdentity(code) {
       branch: code.branch,
       dirty: code.dirty,
       diffSha256: code.diffSha256,
+      untrackedSha256: code.untrackedSha256,
     },
     note: "the process identity of an externally started stand cannot be proven from the outside — run with VERIFY_SPAWN_APP=1 to let the script start the app it checks",
   };
@@ -692,41 +739,8 @@ async function main() {
     const beforeDisputedText = await readMoneyMetric("Оспорено");
     const beforePayableText = await readMoneyMetric("К выплате");
 
-    const financeRequests = [];
-    const resolveStatuses = [];
-    const overviewStatuses = [];
-    const analyticsStatuses = [];
-    let latestAnalyticsPayload = null;
-
-    const onRequest = request => {
-      const url = new URL(request.url());
-      if (url.pathname.startsWith("/api/v1/finance/")) {
-        financeRequests.push(url.pathname);
-      }
-    };
-    const onResponse = async response => {
-      const url = new URL(response.url());
-      if (
-        response.request().method() === "POST" &&
-        /^\/api\/v1\/finance\/partner-disputes\/[^/]+\/resolve$/.test(url.pathname)
-      ) {
-        resolveStatuses.push(response.status());
-      } else if (url.pathname === "/api/v1/finance/overview") {
-        overviewStatuses.push(response.status());
-      } else if (url.pathname === "/api/v1/finance/analytics") {
-        analyticsStatuses.push(response.status());
-        if (response.ok()) {
-          latestAnalyticsPayload = await response.json().catch(() => null);
-        }
-      }
-    };
-    financePage.on("request", onRequest);
-    financePage.on("response", onResponse);
-
     const resolveButton = financePage.getByRole("button", { name: "Решить" }).first();
     if (!(await resolveButton.count())) {
-      financePage.off("request", onRequest);
-      financePage.off("response", onResponse);
       skip(
         "LND-R5-UI-5",
         "resolving a dispute refreshes the sums of the open workspace",
@@ -737,69 +751,29 @@ async function main() {
       const reasonBox = financePage.getByPlaceholder("Например: вес принят по факту, оспариваемое начисление снято");
       await reasonBox.waitFor({ state: "visible", timeout: 10_000 });
       await reasonBox.fill("Волна 8: спор закрыт на живой стенде.");
-      const waitResolve = financePage
-        .waitForResponse(
-          res =>
-            res.request().method() === "POST" &&
-            /^\/api\/v1\/finance\/partner-disputes\/[^/]+\/resolve$/.test(new URL(res.url()).pathname),
-          { timeout: 15_000 },
-        )
-        .catch(() => null);
-      const waitOverview = financePage
-        .waitForResponse(
-          res => new URL(res.url()).pathname === "/api/v1/finance/overview",
-          { timeout: 15_000 },
-        )
-        .catch(() => null);
-      const waitAnalytics = financePage
-        .waitForResponse(
-          res => new URL(res.url()).pathname === "/api/v1/finance/analytics",
-          { timeout: 15_000 },
-        )
-        .catch(() => null);
-      await financePage.getByRole("button", { name: "Закрыть спор" }).click();
-      await Promise.all([waitResolve, waitOverview, waitAnalytics]);
-      // Allow DOM to commit and catch any delayed duplicate refresh requests.
-      await financePage.waitForTimeout(1_500);
-      financePage.off("request", onRequest);
-      financePage.off("response", onResponse);
 
-      const overviewCalls = financeRequests.filter(path => path === "/api/v1/finance/overview").length;
-      const analyticsCalls = financeRequests.filter(path => path === "/api/v1/finance/analytics").length;
-      const afterDisputedText = await readMoneyMetric("Оспорено");
-      const afterPayableText = await readMoneyMetric("К выплате");
-      const afterPayables = latestAnalyticsPayload?.payables ?? null;
-      const beforePayables = beforeAnalytics?.payables ?? null;
-
-      const verdict = evaluateMoneyRefreshCheck({
-        resolveStatuses,
-        overviewCalls,
-        overviewStatuses,
-        analyticsCalls,
-        analyticsStatuses,
+      const { verdict, verdictInput, observation } = await observeMoneyRefresh(financePage, {
+        beforeAnalytics,
         beforeDisputedText,
-        afterDisputedText,
         beforePayableText,
-        afterPayableText,
-        serverBeforeDisputedKopeks: beforePayables?.disputedKopeks ?? null,
-        serverAfterDisputedKopeks: afterPayables?.disputedKopeks ?? null,
-        serverBeforePayableKopeks: beforePayables?.payableKopeks ?? null,
-        serverAfterPayableKopeks: afterPayables?.payableKopeks ?? null,
-        expectedAfterDisputedText: formatRub(afterPayables?.disputedKopeks),
-        expectedAfterPayableText: formatRub(afterPayables?.payableKopeks),
+        readMoneyMetric,
+        formatRub,
+        triggerResolve: () => financePage.getByRole("button", { name: "Закрыть спор" }).click(),
       });
 
       if (verdict.ok) {
         pass(
           "LND-R5-UI-5",
           "resolving a dispute refreshes the sums of the open workspace",
-          `POST resolve=${resolveStatuses.join(",")}, /finance/overview=${overviewCalls} (${overviewStatuses.join(",")}), /finance/analytics=${analyticsCalls} (${analyticsStatuses.join(",")}); DOM Оспорено: "${beforeDisputedText}" -> "${afterDisputedText}", К выплате: "${beforePayableText}" -> "${afterPayableText}"`,
+          `POST resolve=${verdictInput.resolveStatuses.join(",")}, /finance/overview=${verdictInput.overviewCalls} (${verdictInput.overviewStatuses.join(",")}), /finance/analytics=${verdictInput.analyticsCalls} (${verdictInput.analyticsStatuses.join(",")}); DOM Оспорено: "${beforeDisputedText}" -> "${verdictInput.afterDisputedText}", К выплате: "${beforePayableText}" -> "${verdictInput.afterPayableText}"; window=${observation.duplicateWindowMs}ms, pendingAtClose=${observation.pendingRequestsAtClose}`,
+          { observation },
         );
       } else {
         fail(
           "LND-R5-UI-5",
           "resolving a dispute refreshes the sums of the open workspace",
-          `${verdict.reasons.join("; ")} (requests: ${financeRequests.join(", ") || "none"})`,
+          `${verdict.reasons.join("; ")} (requests: ${observation.financeRequests.join(", ") || "none"}, pendingAtClose=${observation.pendingRequestsAtClose})`,
+          { observation },
         );
       }
     }
@@ -887,6 +861,7 @@ async function main() {
     ``,
     `- Web app: \`${APP}\` (${stand.kind})`,
     `- App detected by: ${stand.detectedBy}`,
+    `- Served HTML SHA-256: \`${stand.servedHtmlSha256 ?? "unavailable"}\` (matches dist/web: ${String(Boolean(stand.servedMatchesDist))}, manifest entries: ${Object.keys(stand.bundleManifestSha256 ?? {}).length})`,
     `- Browser: Chromium (Playwright)`,
     `- Code: \`${report.code.codeSha}\` tree \`${report.code.codeTree}\` on \`${report.code.branch}\``,
     `- Working tree: ${report.code.dirty ? `DIRTY — ${report.code.changedFiles.length} path(s)` : "clean"}`,

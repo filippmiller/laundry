@@ -359,6 +359,171 @@ describe("LND-W9-RET-05: support draft cleanup runs when GET fails after markSen
     expect(calls[1].body).toEqual({ body: "Новый ответ до падения GET" });
     expect(controller.getSnapshot().status).toBe("saved");
   });
+
+  it("LND-W9-R2-01: late GET from refresh after DELETE never restores sent text or saved badge", async () => {
+    const get1 = deferred<{ body: string } | null>();
+    const get2 = deferred<{ body: string } | null>();
+    const delGate = deferred<null>();
+    let getCount = 0;
+    const calls: Array<{ path: string; method: string; body?: unknown }> = [];
+    const api: SupportDraftApiFn = async (path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push({ path, method, body: options?.body });
+      if (method === "GET") {
+        getCount += 1;
+        return getCount === 1 ? get1.promise : get2.promise;
+      }
+      if (method === "DELETE") return delGate.promise;
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+
+    const open1 = controller.openThread("t-r2-01");
+    get1.resolve({ body: "already sent reply" });
+    await open1;
+    expect(controller.getSnapshot().body).toBe("already sent reply");
+
+    // Send message -> markSent starts DELETE; refresh calls openThread -> GET2 starts while DELETE is in flight.
+    controller.markSent("t-r2-01", controller.getSnapshot().revision);
+    const open2 = controller.openThread("t-r2-01");
+
+    // DELETE finishes first on the server.
+    delGate.resolve(null);
+    await settle();
+
+    // Stale GET2 (which read pre-delete state) arrives after DELETE completed.
+    get2.resolve({ body: "already sent reply" });
+    await open2;
+    await settle();
+
+    expect(controller.getSnapshot().body).toBe("");
+    expect(controller.getSnapshot().savedBody).toBe("");
+    expect(controller.getSnapshot().status).toBe("clean");
+    expect(calls.map(c => c.method)).toEqual(["GET", "DELETE", "GET"]);
+  });
+
+  it("LND-W9-R2-01: out-of-order overlapping GETs ignore the older response and error", async () => {
+    const get1 = deferred<{ body: string } | null>();
+    const get2 = deferred<{ body: string } | null>();
+    let getCount = 0;
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      if (method === "GET") {
+        getCount += 1;
+        return getCount === 1 ? get1.promise : get2.promise;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+
+    const p1 = controller.openThread("t-overlap");
+    const p2 = controller.openThread("t-overlap");
+    get2.resolve({ body: "Newer draft" });
+    await p2;
+    expect(controller.getSnapshot().body).toBe("Newer draft");
+    expect(controller.getSnapshot().status).toBe("saved");
+
+    get1.resolve({ body: "Older stale draft" });
+    await p1;
+    await settle();
+    expect(controller.getSnapshot().body).toBe("Newer draft");
+    expect(controller.getSnapshot().status).toBe("saved");
+  });
+
+  it("LND-W9-R2-01: overlapping GET after failed DELETE preserves save error and never replays DELETE", async () => {
+    const get1 = deferred<{ body: string } | null>();
+    const get2 = deferred<{ body: string } | null>();
+    const del1 = deferred<null>();
+    let getCount = 0;
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") {
+        getCount += 1;
+        return getCount === 1 ? get1.promise : get2.promise;
+      }
+      if (method === "DELETE") return del1.promise;
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+
+    const p1 = controller.openThread("t-failed-del");
+    get1.resolve({ body: "Old draft" });
+    await p1;
+
+    controller.markSent("t-failed-del", controller.getSnapshot().revision);
+    const p2 = controller.openThread("t-failed-del");
+
+    del1.reject(new Error("DELETE 500"));
+    await settle();
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("save");
+
+    get2.resolve({ body: "Old draft" });
+    await p2;
+    await settle();
+
+    // Must NOT replay DELETE automatically; save error stays visible for explicit retry.
+    expect(calls).toEqual(["GET", "DELETE", "GET"]);
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("save");
+  });
+
+  it("LND-W9-R2-02: send -> type -> clear -> failed GET still executes pending DELETE", async () => {
+    const getGate = deferred<{ body: string } | null>();
+    const calls: Array<{ method: string; body?: unknown }> = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push({ method, body: options?.body });
+      if (method === "GET") return getGate.promise;
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+
+    const opening = controller.openThread("t-r2-02");
+    controller.setBody("already sent reply");
+    const sentRev = controller.getSnapshot().revision;
+    controller.markSent("t-r2-02", sentRev);
+
+    // Operator types a temporary next reply and clears it before initial GET fails.
+    controller.setBody("temporary next reply");
+    controller.setBody("");
+
+    getGate.reject(new Error("502 Bad Gateway"));
+    await opening;
+    await settle();
+
+    expect(calls.map(c => c.method)).toEqual(["GET", "DELETE"]);
+    expect(controller.getSnapshot().body).toBe("");
+    expect(controller.getSnapshot().status).toBe("clean");
+  });
+
+  it("LND-W9-R2-02: submit -> clear before markSent -> failed GET still executes pending DELETE", async () => {
+    const getGate = deferred<{ body: string } | null>();
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") return getGate.promise;
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+
+    const opening = controller.openThread("t-r2-02-preclear");
+    controller.setBody("sent while get pending");
+    const sentRev = controller.getSnapshot().revision;
+    // Operator clears the box before POST returns and calls markSent(sentRev).
+    controller.setBody("");
+    controller.markSent("t-r2-02-preclear", sentRev);
+
+    getGate.reject(new Error("502 Bad Gateway"));
+    await opening;
+    await settle();
+
+    expect(calls).toEqual(["GET", "DELETE"]);
+    expect(controller.getSnapshot().status).toBe("clean");
+  });
 });
 
 describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden toggle, missing topbar, and transient drift", () => {
@@ -383,6 +548,11 @@ describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden tog
       openTimedOut: false,
       railOpenAfterClose: "false",
       closeTimedOut: false,
+      railRect: { left: 0, top: 0, right: 264, bottom: 820, width: 264, height: 820 },
+      railVisibility: { display: "flex", visibility: "visible", opacity: 1, checkVisibility: true },
+      railViewportIntersection: { width: 264, height: 820, area: 216480 },
+      railNavHitOk: true,
+      railNavHitReason: null as string | null,
       brandHitCoveredByTopbar: false,
       scrollBehindMoved: false,
       anchorMovedByWheel: false,
@@ -434,9 +604,31 @@ describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden tog
 
   it("fails when the drawer reports open but stays offscreen", () => {
     const r = validMobileResult();
-    (r.drawer as Record<string, unknown>).railRect = { left: -280, width: 280 };
+    r.drawer.railRect = { left: -280, top: 0, right: 0, bottom: 820, width: 280, height: 820 };
+    r.drawer.railViewportIntersection = { width: 0, height: 820, area: 0 };
     const { failures } = evaluateMobileResults([r]);
-    expect(failures.some(f => f.includes("stayed offscreen"))).toBe(true);
+    expect(failures.some(f => f.includes("stayed offscreen") || f.includes("no visible area"))).toBe(true);
+  });
+
+  it("LND-W9-R2-04: fails when the open drawer has visibility:hidden, zero height, vertical offscreen, or covered nav", () => {
+    const hidden = validMobileResult();
+    hidden.drawer.railVisibility = { display: "flex", visibility: "hidden", opacity: 1, checkVisibility: false };
+    expect(evaluateMobileResults([hidden]).failures.some(f => f.includes("not visible"))).toBe(true);
+
+    const zeroH = validMobileResult();
+    zeroH.drawer.railRect = { left: 0, top: 0, right: 264, bottom: 0, width: 264, height: 0 };
+    zeroH.drawer.railViewportIntersection = { width: 264, height: 0, area: 0 };
+    expect(evaluateMobileResults([zeroH]).failures.some(f => f.includes("collapsed"))).toBe(true);
+
+    const vertOff = validMobileResult();
+    vertOff.drawer.railRect = { left: 0, top: -900, right: 264, bottom: -80, width: 264, height: 820 };
+    vertOff.drawer.railViewportIntersection = { width: 264, height: 0, area: 0 };
+    expect(evaluateMobileResults([vertOff]).failures.some(f => f.includes("no visible area"))).toBe(true);
+
+    const covered = validMobileResult();
+    covered.drawer.railNavHitOk = false;
+    covered.drawer.railNavHitReason = "elementFromPoint hit div.overlay instead of the navigation item";
+    expect(evaluateMobileResults([covered]).failures.some(f => f.includes("reachable"))).toBe(true);
   });
 
   it("fails on a transient reading-line shift even if the settled anchor returned", () => {
@@ -512,5 +704,28 @@ describe("LND-W9-RET-07: UI-5 money refresh verdict requires 2xx, both panels on
     });
     expect(res.ok).toBe(false);
     expect(res.reasons.some(r => r.includes('DOM "Оспорено"'))).toBe(true);
+  });
+
+  it("LND-W9-R2-05: fails on aborted finance request, malformed analytics JSON, or pending request at close", () => {
+    const aborted = evaluateMoneyRefreshCheck({
+      ...validInput(),
+      failedRequests: ["GET /api/v1/finance/analytics (net::ERR_ABORTED)"],
+    });
+    expect(aborted.ok).toBe(false);
+    expect(aborted.reasons.some(r => r.includes("aborted or failed"))).toBe(true);
+
+    const malformed = evaluateMoneyRefreshCheck({
+      ...validInput(),
+      malformedAnalyticsCount: 1,
+    });
+    expect(malformed.ok).toBe(false);
+    expect(malformed.reasons.some(r => r.includes("failed JSON parsing"))).toBe(true);
+
+    const pending = evaluateMoneyRefreshCheck({
+      ...validInput(),
+      pendingRequestsAtClose: 1,
+    });
+    expect(pending.ok).toBe(false);
+    expect(pending.reasons.some(r => r.includes("still unfinished"))).toBe(true);
   });
 });
