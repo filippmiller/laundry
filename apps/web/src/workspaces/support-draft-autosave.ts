@@ -370,11 +370,6 @@ export function createSupportDraftController(opts: {
       // The write that failed is remembered: it must not be repeated in a loop, but a write of
       // another kind — the removal of a draft the server still holds — is still needed.
       record.failedAction = action;
-      if (action === "put") {
-        // An ambiguous PUT may have committed on the server before its response was lost:
-        // do not treat the server as confirmed-empty when a subsequent markSent/discardDraft runs.
-        record.serverKnown = false;
-      }
       emit();
       opts.onError?.(record.error);
       // The failed write leaves the server in an unknown state: the difference between the box
@@ -584,7 +579,11 @@ export function createSupportDraftController(opts: {
       return;
     }
     const serverAlreadyEmpty =
-      record.loadSettled && !record.saving && record.serverKnown && record.savedBody === "";
+      record.loadSettled &&
+      !record.saving &&
+      record.serverKnown &&
+      record.savedBody === "" &&
+      record.failedAction !== "put";
     if (sentRevision !== record.revision) {
       // The operator changed the box while the message was on its way. Still record cleanup
       // intent for the sent draft (unless the server is already confirmed empty) so clearing the
@@ -624,7 +623,11 @@ export function createSupportDraftController(opts: {
     const record = records.get(threadId);
     if (!record) return;
     const serverAlreadyEmpty =
-      record.loadSettled && !record.saving && record.serverKnown && record.savedBody === "";
+      record.loadSettled &&
+      !record.saving &&
+      record.serverKnown &&
+      record.savedBody === "" &&
+      record.failedAction !== "put";
     clearTimer(record);
     record.body = "";
     record.edited = false;

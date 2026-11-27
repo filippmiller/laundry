@@ -329,10 +329,15 @@ createRoot(document.getElementById("root")).render(<SupportClaimsWorkspace notif
         const box = page.getByRole("textbox", { name: "Ответ клиенту" });
         await box.waitFor({ state: "visible" });
 
-        const initialGetRoute = await firstGetReady.promise;
+        const withTimeout = (p, label, ms = 10_000) =>
+          Promise.race([
+            p,
+            new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out waiting for ${label}`)), ms)),
+          ]);
+        const initialGetRoute = await withTimeout(firstGetReady.promise, "initial GET /draft");
         await box.fill("already sent reply");
         await page.getByRole("button", { name: "Отправить", exact: true }).click();
-        await listRefreshReady.promise;
+        await withTimeout(listRefreshReady.promise, "thread list refresh GET");
         await box.fill("temporary next reply");
         await box.fill("");
 

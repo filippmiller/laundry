@@ -287,6 +287,7 @@ function App() {
     let userInterrupted = false;
     let verifyingTarget = false;
     let stabilizing = false;
+    let expectedScrollY = 0;
     let lastKnownHeight = document.documentElement.scrollHeight;
     let stabilizeQuietTimer = 0;
     let timer = 0;
@@ -377,33 +378,34 @@ function App() {
     }
 
     function onPendingScroll() {
-      // Any non-zero scroll while waiting (outside our programmatic reset/restore) indicates
-      // genuine user scrolling such as dragging the native scrollbar.
+      // Any non-zero scroll while waiting (outside our programmatic reset/restore and layout
+      // clamps) indicates genuine user scrolling such as dragging the native scrollbar.
       if (settled || programmaticReset || verifyingTarget) return;
+      const currentHeight = document.documentElement.scrollHeight;
+      const maxOffset = Math.max(0, currentHeight - window.innerHeight);
+      if (maxOffset < target - SCROLL_RESTORE_TOLERANCE_PX && window.scrollY <= maxOffset + SCROLL_RESTORE_TOLERANCE_PX) {
+        // The document is physically clamped below `target`: never treat clamped scrollY as
+        // user scrollbar input, even across multiple consecutive shrinks/clamps.
+        lastKnownHeight = currentHeight;
+        expectedScrollY = Math.min(expectedScrollY, maxOffset);
+        stabilizing = false;
+        return;
+      }
       if (stabilizing) {
-        // If the document is currently too short to hold `target`, any scrollY at or below
-        // `maxOffset` is a layout clamp rather than user scrollbar input — even if a ResizeObserver
-        // or interval tick updated `lastKnownHeight` before the browser delivered the scroll event.
-        const currentHeight = document.documentElement.scrollHeight;
-        const maxOffset = Math.max(0, currentHeight - window.innerHeight);
-        if (maxOffset < target - SCROLL_RESTORE_TOLERANCE_PX) {
-          lastKnownHeight = currentHeight;
-          stabilizing = false;
-          return;
-        }
         if (currentHeight !== lastKnownHeight) {
           lastKnownHeight = currentHeight;
+          expectedScrollY = target;
           window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
           scheduleStabilizeDone();
           return;
         }
-        if (Math.abs(window.scrollY - target) > SCROLL_RESTORE_TOLERANCE_PX) {
+        if (Math.abs(window.scrollY - expectedScrollY) > SCROLL_RESTORE_TOLERANCE_PX) {
           userInterrupted = true;
           finish(true);
         }
         return;
       }
-      if (Math.abs(window.scrollY) > SCROLL_RESTORE_TOLERANCE_PX) {
+      if (Math.abs(window.scrollY - expectedScrollY) > SCROLL_RESTORE_TOLERANCE_PX) {
         userInterrupted = true;
         finish(true);
       }
@@ -444,6 +446,7 @@ function App() {
       // Apply instant jump and verify achieved scrollY on the next frame, then stabilize across
       // async panel expansions so Chromium scroll-anchoring does not push the restored offset.
       verifyingTarget = true;
+      expectedScrollY = target;
       window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
       verifyFrame = window.requestAnimationFrame(() => {
         verifyFrame = 0;

@@ -149,8 +149,10 @@ export async function observeMoneyRefresh(page, opts) {
           .text()
           .catch(() => null)
           .finally(() => {
+            const now = Date.now();
             resolveSettled = true;
-            if (postCompletedAt === null) postCompletedAt = Date.now();
+            if (now > overallDeadline) deadlineExceeded = true;
+            if (postCompletedAt === null) postCompletedAt = now;
           }),
       );
       return;
@@ -167,6 +169,7 @@ export async function observeMoneyRefresh(page, opts) {
           .text()
           .catch(() => null)
           .finally(() => {
+            if (Date.now() > overallDeadline) deadlineExceeded = true;
             overviewSettled = true;
           }),
       );
@@ -184,6 +187,7 @@ export async function observeMoneyRefresh(page, opts) {
           } else {
             await response.text().catch(() => null);
           }
+          if (Date.now() > overallDeadline) deadlineExceeded = true;
           analyticsSettled = true;
         })(),
       );
@@ -204,7 +208,7 @@ export async function observeMoneyRefresh(page, opts) {
       if (resolveSettled && overviewSettled && analyticsSettled) {
         break;
       }
-      await page.waitForTimeout(50);
+      await page.waitForTimeout(Math.min(50, Math.max(1, overallDeadline - Date.now())));
     }
     await awaitWithTimeout(Promise.allSettled(bodyPromises.slice()), overallDeadline - Date.now());
     bodiesSettledAt = Date.now();
