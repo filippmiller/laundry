@@ -370,6 +370,11 @@ export function createSupportDraftController(opts: {
       // The write that failed is remembered: it must not be repeated in a loop, but a write of
       // another kind — the removal of a draft the server still holds — is still needed.
       record.failedAction = action;
+      if (action === "put" && record.dropDraftEpoch !== 0) {
+        // markSent/discardDraft arrived while this PUT was in flight and the PUT outcome is
+        // ambiguous: mark server state unknown so reconcile() issues the pending DELETE now.
+        record.serverKnown = false;
+      }
       emit();
       opts.onError?.(record.error);
       // The failed write leaves the server in an unknown state: the difference between the box

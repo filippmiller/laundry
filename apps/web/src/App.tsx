@@ -397,13 +397,17 @@ function App() {
         return;
       }
       if (stabilizing) {
-        if (currentHeight !== lastKnownHeight) {
+        // Browser scroll-anchoring shifts scrollY when async panels above the viewport EXPAND
+        // (`currentHeight > lastKnownHeight`). On a shrink where `scrollY` is not clamped to
+        // `maxOffset`, a shift away from `expectedScrollY` is genuine user scrolling.
+        if (currentHeight > lastKnownHeight) {
           lastKnownHeight = currentHeight;
           expectedScrollY = target;
           window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
           scheduleStabilizeDone();
           return;
         }
+        lastKnownHeight = currentHeight;
         if (Math.abs(window.scrollY - expectedScrollY) > SCROLL_RESTORE_TOLERANCE_PX) {
           userInterrupted = true;
           finish(true);

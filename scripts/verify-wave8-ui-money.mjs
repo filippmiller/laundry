@@ -227,9 +227,17 @@ export async function observeMoneyRefresh(page, opts) {
     const domDeadline = Math.min(overallDeadline, Date.now() + 3_000);
     if (normExpDisputed && normExpPayable) {
       let domReconciledInTime = false;
+      const readMetricBounded = (label, untilMs) => {
+        const ms = Math.max(0, untilMs - Date.now());
+        if (ms === 0) return Promise.resolve(null);
+        return Promise.race([
+          readMoneyMetric(label),
+          new Promise(resolve => setTimeout(() => resolve(null), ms)),
+        ]);
+      };
       while (Date.now() <= domDeadline) {
-        const curDisputed = normalizeMoneyText(await readMoneyMetric("Оспорено"));
-        const curPayable = normalizeMoneyText(await readMoneyMetric("К выплате"));
+        const curDisputed = normalizeMoneyText(await readMetricBounded("Оспорено", domDeadline));
+        const curPayable = normalizeMoneyText(await readMetricBounded("К выплате", domDeadline));
         if (curDisputed === normExpDisputed && curPayable === normExpPayable) {
           if (Date.now() <= domDeadline) {
             domReconciledInTime = true;
