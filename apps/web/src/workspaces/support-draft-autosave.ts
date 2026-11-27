@@ -578,16 +578,18 @@ export function createSupportDraftController(opts: {
       if (pendingAction(record)) scheduleSave(record);
       return;
     }
+    const hadAmbiguousPut = record.failedAction === "put";
     const serverAlreadyEmpty =
       record.loadSettled &&
       !record.saving &&
       record.serverKnown &&
       record.savedBody === "" &&
-      record.failedAction !== "put";
+      !hadAmbiguousPut;
     if (sentRevision !== record.revision) {
       // The operator changed the box while the message was on its way. Still record cleanup
       // intent for the sent draft (unless the server is already confirmed empty) so clearing the
       // box before POST ack or before PUT confirmation cannot strand the old draft on the server.
+      if (hadAmbiguousPut) record.serverKnown = false;
       if (!serverAlreadyEmpty) {
         record.dropDraftEpoch = ++record.intentEpoch;
       }
@@ -609,6 +611,7 @@ export function createSupportDraftController(opts: {
     clearTimer(record);
     record.body = "";
     record.edited = false;
+    if (hadAmbiguousPut) record.serverKnown = false;
     record.dropDraftEpoch = serverAlreadyEmpty ? 0 : ++record.intentEpoch;
     record.error = null;
     record.errorScope = null;
@@ -622,15 +625,17 @@ export function createSupportDraftController(opts: {
   const discardDraft = (threadId: string) => {
     const record = records.get(threadId);
     if (!record) return;
+    const hadAmbiguousPut = record.failedAction === "put";
     const serverAlreadyEmpty =
       record.loadSettled &&
       !record.saving &&
       record.serverKnown &&
       record.savedBody === "" &&
-      record.failedAction !== "put";
+      !hadAmbiguousPut;
     clearTimer(record);
     record.body = "";
     record.edited = false;
+    if (hadAmbiguousPut) record.serverKnown = false;
     record.dropDraftEpoch = serverAlreadyEmpty ? 0 : ++record.intentEpoch;
     record.error = null;
     record.errorScope = null;

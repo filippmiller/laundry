@@ -378,16 +378,21 @@ function App() {
     }
 
     function onPendingScroll() {
-      // Any non-zero scroll while waiting (outside our programmatic reset/restore and layout
-      // clamps) indicates genuine user scrolling such as dragging the native scrollbar.
+      // Any non-zero scroll while waiting (outside our programmatic reset/restore and browser
+      // clamps to `maxOffset`) indicates genuine user scrolling such as dragging the scrollbar.
       if (settled || programmaticReset || verifyingTarget) return;
       const currentHeight = document.documentElement.scrollHeight;
       const maxOffset = Math.max(0, currentHeight - window.innerHeight);
-      if (maxOffset < target - SCROLL_RESTORE_TOLERANCE_PX && window.scrollY <= maxOffset + SCROLL_RESTORE_TOLERANCE_PX) {
-        // The document is physically clamped below `target`: never treat clamped scrollY as
-        // user scrollbar input, even across multiple consecutive shrinks/clamps.
+      const clampedToMax =
+        maxOffset < expectedScrollY - SCROLL_RESTORE_TOLERANCE_PX &&
+        Math.abs(window.scrollY - maxOffset) <= SCROLL_RESTORE_TOLERANCE_PX;
+      if (clampedToMax) {
+        // The browser clamped `expectedScrollY` down to the new `maxOffset`: never treat this
+        // clamp as user input, even across multiple consecutive shrinks. A native scrollbar drag
+        // to any other position (e.g. 160px when maxOffset is 260px) does NOT match `clampedToMax`
+        // and still cancels restoration immediately.
         lastKnownHeight = currentHeight;
-        expectedScrollY = Math.min(expectedScrollY, maxOffset);
+        expectedScrollY = maxOffset;
         stabilizing = false;
         return;
       }

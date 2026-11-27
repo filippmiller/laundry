@@ -226,13 +226,22 @@ export async function observeMoneyRefresh(page, opts) {
     const normExpPayable = normalizeMoneyText(expectedAfterPayableText);
     const domDeadline = Math.min(overallDeadline, Date.now() + 3_000);
     if (normExpDisputed && normExpPayable) {
-      while (Date.now() < domDeadline) {
+      let domReconciledInTime = false;
+      while (Date.now() <= domDeadline) {
         const curDisputed = normalizeMoneyText(await readMoneyMetric("Оспорено"));
         const curPayable = normalizeMoneyText(await readMoneyMetric("К выплате"));
         if (curDisputed === normExpDisputed && curPayable === normExpPayable) {
+          if (Date.now() <= domDeadline) {
+            domReconciledInTime = true;
+          }
           break;
         }
-        await page.waitForTimeout(50);
+        const remaining = domDeadline - Date.now();
+        if (remaining <= 0) break;
+        await page.waitForTimeout(Math.min(50, remaining));
+      }
+      if (!domReconciledInTime) {
+        deadlineExceeded = true;
       }
     }
 
