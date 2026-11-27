@@ -16,6 +16,13 @@ import {
   XCircle,
 } from "lucide-react";
 import { api, ApiError, DemoConfig, dt, money, newKey } from "../api";
+import {
+  createBucketPaginationGuard,
+  EMPTY_BUCKET_BUSY,
+  type BucketBusyMap,
+  type BucketPaginationGuard,
+  type FinanceBucketKey,
+} from "./finance-bucket-pagination";
 import { DocumentKind, DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
 import { Badge } from "../components/ui/Badge";
@@ -219,18 +226,17 @@ export function FinanceWorkspace({
   const [drift, setDrift] = useState<DriftItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [loadingMoreBuckets, setLoadingMoreBuckets] = useState<BucketBusyMap>(EMPTY_BUCKET_BUSY);
   const [refreshNonce, setRefreshNonce] = useState(0);
-  /**
-   * Whether the workspace has already loaded once. The first load must not move the refresh
-   * token: the panels mounted with it have just fetched, and a new token would ask the server
-   * for the same figures a second time.
-   */
-  const financeLoadedRef = useRef(false);
   // The generation of the reloads of the workspace: a late answer of an older reload must not
   // replace the fresh numbers (see the request generation module).
   const generationRef = useRef<RequestGeneration | null>(null);
   if (generationRef.current === null) generationRef.current = createRequestGeneration();
   const generation = generationRef.current;
+  // Ownership of paginated payout / credit-note bucket appends across full refreshes (RET-01).
+  const bucketGuardRef = useRef<BucketPaginationGuard | null>(null);
+  if (bucketGuardRef.current === null) bucketGuardRef.current = createBucketPaginationGuard();
+  const bucketGuard = bucketGuardRef.current;
   const [pendingRefundKopeks, setPendingRefundKopeks] = useState(0);
 
   const [printDoc, setPrintDoc] = useState<{ kind: DocumentKind; id: string } | null>(null);
@@ -367,11 +373,21 @@ export function FinanceWorkspace({
     [getChargebacksController],
   );
 
-  const loadFinance = useCallback(async () => {
+  const loadFinance = useCallback(async (mode: "bootstrap" | "refresh" = "refresh") => {
     // Every reload belongs to a generation: the workspace can be reloaded while a previous reload
     // is still running (the money bus, the refresh token and the panel of the workspace all ask
     // for it), and a late answer of an older reload must not replace the fresh numbers.
     const token = generation.beginFresh();
+    // Invalidate any in-flight paginated bucket appends before starting the full refresh (RET-01).
+    bucketGuard.invalidateAll();
+    setLoadingMoreBuckets(EMPTY_BUCKET_BUSY);
+    // Distinguish bootstrap from mutation/explicit refresh (RET-02): on initial mount the child
+    // panels already fetch with token 0, so bootstrap keeps the token unchanged. Any mutation or
+    // money-bus refresh increments the token immediately regardless of whether the first overview
+    // has finished or failed.
+    if (mode === "refresh") {
+      setRefreshNonce(n => n + 1);
+    }
     setLoading(true);
     try {
       const [ov, rec, dr] = await Promise.all([
@@ -381,12 +397,9 @@ export function FinanceWorkspace({
         refreshChargebacks(),
       ]);
       if (!generation.isCurrent(token)) return;
-      // The panels below fetch their own numbers with the refresh token. The token must change
-      // only when the numbers really changed: on the first load the panels have just fetched with
-      // the token they were mounted with, and a new token would ask the server for the very same
-      // figures a second time.
-      if (financeLoadedRef.current) setRefreshNonce(n => n + 1);
-      financeLoadedRef.current = true;
+      // Also invalidate any append that started while this full refresh was in flight.
+      bucketGuard.invalidateAll();
+      setLoadingMoreBuckets(EMPTY_BUCKET_BUSY);
       setOverview(ov ?? {});
       if (ov?.partnerPayoutsActive) {
         setPayoutActiveBucket(ov.partnerPayoutsActive);
@@ -426,10 +439,10 @@ export function FinanceWorkspace({
     } finally {
       if (generation.isCurrent(token)) setLoading(false);
     }
-  }, [refreshChargebacks, notify, generation]);
+  }, [refreshChargebacks, notify, generation, bucketGuard]);
 
   useEffect(() => {
-    void loadFinance();
+    void loadFinance("bootstrap");
   }, [loadFinance]);
 
   // A dispute that was settled in this workspace changes the money: the sums, the overview and
@@ -439,7 +452,7 @@ export function FinanceWorkspace({
   useEffect(
     () =>
       subscribeToPartnerMoneyRefresh(() => {
-        void loadFinance();
+        void loadFinance("refresh");
       }),
     [loadFinance],
   );
@@ -728,11 +741,14 @@ export function FinanceWorkspace({
   const loadMorePayouts = async (bucket: "active" | "history") => {
     const current = bucket === "active" ? payoutActiveBucket : payoutHistoryBucket;
     if (!current.nextCursor) return;
-    setBusyAction(`payouts-more-${bucket}`);
+    const bucketKey: FinanceBucketKey = bucket === "active" ? "payouts:active" : "payouts:history";
+    const token = bucketGuard.beginAppend(bucketKey);
+    setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: true }));
     try {
       const page = await api<PaginatedBucket<PartnerPayoutItem>>(
         `/finance/partner-payouts?bucket=${bucket}&limit=50&cursor=${encodeURIComponent(current.nextCursor)}`,
       );
+      if (!bucketGuard.isCurrent(token)) return;
       const merge = (prev: PaginatedBucket<PartnerPayoutItem>): PaginatedBucket<PartnerPayoutItem> => {
         const seen = new Set(prev.items.map(i => i.id));
         const nextItems = [...prev.items, ...page.items.filter(i => !seen.has(i.id))];
@@ -747,20 +763,26 @@ export function FinanceWorkspace({
       if (bucket === "active") setPayoutActiveBucket(merge);
       else setPayoutHistoryBucket(merge);
     } catch (err) {
+      if (!bucketGuard.isCurrent(token)) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusyAction(null);
+      if (bucketGuard.isCurrent(token)) {
+        setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: false }));
+      }
     }
   };
 
   const loadMoreCreditNotes = async (bucket: "active" | "history") => {
     const current = bucket === "active" ? creditNoteActiveBucket : creditNoteHistoryBucket;
     if (!current.nextCursor) return;
-    setBusyAction(`credit-notes-more-${bucket}`);
+    const bucketKey: FinanceBucketKey = bucket === "active" ? "creditNotes:active" : "creditNotes:history";
+    const token = bucketGuard.beginAppend(bucketKey);
+    setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: true }));
     try {
       const page = await api<PaginatedBucket<PartnerCreditNoteItem>>(
         `/finance/partner-credit-notes?bucket=${bucket}&limit=50&cursor=${encodeURIComponent(current.nextCursor)}`,
       );
+      if (!bucketGuard.isCurrent(token)) return;
       const merge = (prev: PaginatedBucket<PartnerCreditNoteItem>): PaginatedBucket<PartnerCreditNoteItem> => {
         const seen = new Set(prev.items.map(i => i.id));
         const nextItems = [...prev.items, ...page.items.filter(i => !seen.has(i.id))];
@@ -775,9 +797,12 @@ export function FinanceWorkspace({
       if (bucket === "active") setCreditNoteActiveBucket(merge);
       else setCreditNoteHistoryBucket(merge);
     } catch (err) {
+      if (!bucketGuard.isCurrent(token)) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusyAction(null);
+      if (bucketGuard.isCurrent(token)) {
+        setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: false }));
+      }
     }
   };
 
@@ -1527,7 +1552,7 @@ export function FinanceWorkspace({
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={busyAction === `payouts-more-${payoutTab}`}
+                  disabled={loadingMoreBuckets[payoutTab === "active" ? "payouts:active" : "payouts:history"]}
                   onClick={() => void loadMorePayouts(payoutTab)}
                 >
                   Загрузить ещё ({visiblePayoutBucket.items.length} из {visiblePayoutBucket.totalCount})
@@ -1611,7 +1636,7 @@ export function FinanceWorkspace({
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={busyAction === `credit-notes-more-${creditNoteTab}`}
+                  disabled={loadingMoreBuckets[creditNoteTab === "active" ? "creditNotes:active" : "creditNotes:history"]}
                   onClick={() => void loadMoreCreditNotes(creditNoteTab)}
                 >
                   Загрузить ещё ({visibleCreditNoteBucket.items.length} из {visibleCreditNoteBucket.totalCount})

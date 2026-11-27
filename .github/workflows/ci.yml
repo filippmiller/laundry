@@ -115,6 +115,37 @@ jobs:
         run: npm run verify:mobile
         env:
           APP_URL: http://127.0.0.1:3000
+      - name: Write CI provenance summary
+        if: always()
+        run: |
+          mkdir -p temp/ci-artifacts
+          node -e '
+            const fs = require("node:fs");
+            const { execFileSync } = require("node:child_process");
+            const git = args => execFileSync("git", args, { encoding: "utf8" }).trim();
+            const provenance = {
+              generatedAt: new Date().toISOString(),
+              runId: process.env.GITHUB_RUN_ID ?? null,
+              runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+              githubSha: process.env.GITHUB_SHA ?? null,
+              githubRef: process.env.GITHUB_REF ?? null,
+              headRef: process.env.GITHUB_HEAD_REF ?? null,
+              checkoutSha: git(["rev-parse", "HEAD"]),
+              checkoutTree: git(["rev-parse", "HEAD^{tree}"]),
+            };
+            fs.writeFileSync("temp/ci-artifacts/ci-provenance.json", JSON.stringify(provenance, null, 2) + "\n");
+          '
+      - name: Upload verification receipts and mobile measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-verification-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            temp/ci-artifacts/ci-provenance.json
+            docs/evidence/wave7/
+            docs/evidence/wave8/
+            temp/audit-shots/mobile-fix/measurements.json
       - name: API log
         if: failure()
         run: cat /tmp/laundry-api.log

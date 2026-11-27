@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { LogOut, Menu, UserRound, X } from "lucide-react";
 import { ROLE_LABELS, stateLabel } from "../labels";
-import { decideScrollGuard, shouldLockScroll } from "../scroll-lock";
+import { decideScrollGuard, shouldLockScroll, type WitnessState } from "../scroll-lock";
 import type { Me, Notice } from "../types";
 import type { WorkspaceDef, WorkspaceKey } from "../workspaces/registry";
 import { Badge } from "./ui/Badge";
@@ -39,6 +39,7 @@ export function Shell({
   const toggleRef = useRef<HTMLButtonElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const wasOpenRef = useRef(false);
+  const restoreFocusToToggleOnProfileCloseRef = useRef(false);
 
   const active = workspaces.find(item => item.key === activeWorkspace) ?? null;
 
@@ -68,9 +69,11 @@ export function Shell({
     }
     if (!railOpen && wasOpenRef.current) {
       wasOpenRef.current = false;
-      toggleRef.current?.focus({ preventScroll: true });
+      if (!profileOpen) {
+        toggleRef.current?.focus({ preventScroll: true });
+      }
     }
-  }, [railOpen, isMobile]);
+  }, [railOpen, isMobile, profileOpen]);
 
   // Escape closes the drawer (focus restoration is handled by the effect above).
   useEffect(() => {
@@ -120,26 +123,59 @@ export function Shell({
   // a scroll container, which stops the sticky topbar and tab strip from
   // sticking: they go away together with the content (M-3).
   useEffect(() => {
-    if (!isMobile || !railOpen) return;
+    if (!isMobile || !railOpen || profileOpen) return;
     const drawer = railRef.current;
 
     const insideDrawer = (target: EventTarget | null): boolean =>
       !!drawer && target instanceof Node && drawer.contains(target);
 
+    const insideDialog = (target: EventTarget | null): boolean =>
+      target instanceof Element && Boolean(target.closest("dialog[open]"));
+
+    // Native <a> links activate on Enter and scroll the page on Space, so exclude links
+    // from the Space exemption while keeping buttons and form controls functional.
+    const isInteractiveKeyboardTarget = (target: EventTarget | null): boolean =>
+      target instanceof Element &&
+      Boolean(
+        target.closest(
+          'button, input, textarea, select, summary, [role="button"], [contenteditable="true"]',
+        ),
+      );
+
     function onWheel(event: WheelEvent) {
-      if (shouldLockScroll({ kind: "wheel", insideDrawer: insideDrawer(event.target) })) {
+      if (
+        shouldLockScroll({
+          kind: "wheel",
+          insideDrawer: insideDrawer(event.target),
+          insideDialog: insideDialog(event.target),
+        })
+      ) {
         event.preventDefault();
       }
     }
 
     function onTouchMove(event: TouchEvent) {
-      if (shouldLockScroll({ kind: "touchmove", insideDrawer: insideDrawer(event.target) })) {
+      if (
+        shouldLockScroll({
+          kind: "touchmove",
+          insideDrawer: insideDrawer(event.target),
+          insideDialog: insideDialog(event.target),
+        })
+      ) {
         event.preventDefault();
       }
     }
 
     function onKeyDown(event: KeyboardEvent) {
-      if (shouldLockScroll({ kind: "keydown", key: event.key, insideDrawer: insideDrawer(event.target) })) {
+      if (
+        shouldLockScroll({
+          kind: "keydown",
+          key: event.key,
+          insideDrawer: insideDrawer(event.target),
+          insideDialog: insideDialog(event.target),
+          interactiveTarget: isInteractiveKeyboardTarget(event.target),
+        })
+      ) {
         event.preventDefault();
       }
     }
@@ -149,21 +185,25 @@ export function Shell({
     function onScroll() {
       const witness = witnessRef.current;
       const witnessTop = witnessTopRef.current;
-      // A witness that left the page cannot witness anything: without it the
-      // guard has no proof that the content moved, and a guess would move the
-      // page under the reader.
-      const witnessMoved =
-        witness && witness.isConnected && witnessTop !== null
-          ? Math.abs(witness.getBoundingClientRect().top - witnessTop) > 1
-          : false;
+      // Separate confirmed browser compensation ("held"), real content shift
+      // ("moved"), and lost witness ("missing") so a missing witness never
+      // silently updates the locked offset (LND-W9-RET-03).
+      const witnessState: WitnessState =
+        !witness || !witness.isConnected || witnessTop === null
+          ? "missing"
+          : Math.abs(witness.getBoundingClientRect().top - witnessTop) > 1
+            ? "moved"
+            : "held";
       const maxOffset = document.documentElement.scrollHeight - window.innerHeight;
       const action = decideScrollGuard({
         current: window.scrollY,
         locked: lockedOffsetRef.current,
         maxOffset,
-        witnessMoved,
+        witness: witnessState,
       });
-      if (action.kind === "restore") {
+      if (action.kind === "adopt") {
+        lockedOffsetRef.current = action.top;
+      } else if (action.kind === "restore") {
         lockedOffsetRef.current = action.top;
         // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, and `auto`
         // follows it — the page would glide instead of holding its place.
@@ -188,7 +228,7 @@ export function Shell({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("scroll", onScroll);
     };
-  }, [railOpen, isMobile]);
+  }, [railOpen, isMobile, profileOpen]);
 
   function selectWorkspace(key: WorkspaceKey) {
     onSelectWorkspace(key);
@@ -284,7 +324,16 @@ export function Shell({
                 variant="quiet"
                 block
                 leadingIcon={<UserRound size={16} aria-hidden="true" />}
-                onClick={() => setProfileOpen(true)}
+                onClick={() => {
+                  // Hand off modal ownership cleanly: close the mobile drawer without letting
+                  // its close effect steal focus from the opening dialog (LND-W9-RET-04).
+                  if (railOpen) {
+                    restoreFocusToToggleOnProfileCloseRef.current = true;
+                    wasOpenRef.current = false;
+                    setRailOpen(false);
+                  }
+                  setProfileOpen(true);
+                }}
               >
                 Мои данные и сессии
               </Button>
@@ -366,7 +415,17 @@ export function Shell({
         ) : null}
       </ToastRegion>
 
-      <ProfilePanel open={profileOpen} onClose={() => setProfileOpen(false)} notify={setNotice} />
+      <ProfilePanel
+        open={profileOpen}
+        onClose={() => {
+          setProfileOpen(false);
+          if (restoreFocusToToggleOnProfileCloseRef.current) {
+            restoreFocusToToggleOnProfileCloseRef.current = false;
+            requestAnimationFrame(() => toggleRef.current?.focus({ preventScroll: true }));
+          }
+        }}
+        notify={setNotice}
+      />
     </div>
   );
 }

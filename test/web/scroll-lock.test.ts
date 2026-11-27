@@ -100,12 +100,18 @@ describe("the guard that puts the offset back", () => {
     ).toEqual({ kind: "restore", top: 0 });
   });
 
-  it("does not fight the compensation of the browser", () => {
+  it("adopts the offset after confirmed browser compensation instead of fighting it", () => {
     // The offset moved, but the content the user reads did not: the browser
-    // compensated the offset itself. Putting the offset back would move the
-    // content — the jump the guard has to prevent.
+    // compensated the offset itself. Adopting the compensated offset preserves
+    // the reading line on any subsequent scroll (LND-W9-RET-03).
     expect(
-      decideScrollGuard({ current: 900, locked: 600, maxOffset: 4000, witnessMoved: false }),
+      decideScrollGuard({ current: 900, locked: 600, maxOffset: 4000, witness: "held" }),
+    ).toEqual({ kind: "adopt", top: 900 });
+  });
+
+  it("holds without updating locked offset when the witness is missing", () => {
+    expect(
+      decideScrollGuard({ current: 900, locked: 600, maxOffset: 4000, witness: "missing" }),
     ).toEqual({ kind: "hold" });
   });
 });

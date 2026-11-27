@@ -205,7 +205,11 @@ function App() {
     const target = scrollOffsetsRef.current[activeWorkspace];
     if (typeof target !== "number" || target <= 0) return;
     let attempts = 0;
-    const timer = window.setInterval(() => {
+    let settled = false;
+    let timer = 0;
+
+    const tryRestore = () => {
+      if (settled) return;
       attempts += 1;
       const decision = decideScrollRestore({
         target,
@@ -215,7 +219,8 @@ function App() {
         attemptsLeft: SCROLL_RESTORE_ATTEMPTS - attempts,
       });
       if (decision === "wait") return;
-      window.clearInterval(timer);
+      settled = true;
+      if (timer) window.clearInterval(timer);
       if (decision === "restore") {
         // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, so `auto` would glide
         // to the remembered position — and the glide keeps running over a position the reader has
@@ -223,11 +228,22 @@ function App() {
         // that competes with the reader.
         window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
       }
-    }, 120);
-    return () => window.clearInterval(timer);
+    };
+
+    // Unified restoration path for both reload and workspace switch (C-01): never issue an
+    // unchecked immediate `scrollTo(target)` that gets clamped while the workspace is still short
+    // and then tricks `decideScrollRestore` into thinking the reader scrolled away.
+    const frame = window.requestAnimationFrame(tryRestore);
+    timer = window.setInterval(tryRestore, 120);
+    return () => {
+      settled = true;
+      window.cancelAnimationFrame(frame);
+      window.clearInterval(timer);
+    };
   }, [activeWorkspace]);
 
   function selectWorkspace(key: WorkspaceKey) {
+    if (key === activeWorkspace) return;
     // Remember where the current workspace was before leaving it.
     if (activeWorkspace) {
       scrollOffsetsRef.current[activeWorkspace] = window.scrollY;
@@ -237,17 +253,9 @@ function App() {
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
-    // Restore the offset of the workspace we are coming back to.
-    const target = scrollOffsetsRef.current[key];
-    // `instant`, not `auto`: the document sets `scroll-behavior: smooth`, so `auto` would glide to
-    // the remembered position — and the glide keeps running over a position the reader has already
-    // chosen. The workspace switch follows the same rule as the restoration after a reload: one
-    // jump at a known moment, no animation that competes with the reader.
-    if (typeof target === "number" && target > 0) {
-      requestAnimationFrame(() => window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior }));
-    } else {
-      window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
-    }
+    // Always start the newly selected workspace at 0; if it has a remembered offset, the unified
+    // `useEffect` above restores it as soon as the document can hold it without partial clamping.
+    window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
   }
 
   function handleAuthenticated(nextMe: Me, roleHint?: string) {

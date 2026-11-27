@@ -27,10 +27,11 @@
 import { chromium } from "playwright";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { evaluateMoneyRefreshCheck } from "./verify-wave8-ui-verdict.mjs";
 
 let APP = process.env.APP_URL ?? "http://localhost:5173";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -69,6 +70,19 @@ function codeIdentity() {
   const status = git(["status", "--porcelain"]) ?? "";
   const changed = status.split(/\r?\n/).filter(Boolean);
   const diff = git(["diff", "HEAD"]) ?? "";
+  const untracked = changed
+    .filter(line => line.startsWith("?? "))
+    .map(line => line.slice(3).trim())
+    .sort();
+  const untrackedHash = createHash("sha256");
+  for (const rel of untracked) {
+    const abs = resolve(REPO_ROOT, rel);
+    untrackedHash.update(rel + "\0", "utf8");
+    if (existsSync(abs) && statSync(abs).isFile()) {
+      untrackedHash.update(readFileSync(abs));
+    }
+    untrackedHash.update("\0", "utf8");
+  }
   return {
     codeSha: git(["rev-parse", "HEAD"]),
     codeTree: git(["rev-parse", "HEAD^{tree}"]),
@@ -76,6 +90,7 @@ function codeIdentity() {
     dirty: changed.length > 0,
     changedFiles: changed.map(line => line.slice(0, 2).trim() + " " + line.slice(3).trim()),
     diffSha256: createHash("sha256").update(diff, "utf8").digest("hex"),
+    untrackedSha256: untracked.length > 0 ? untrackedHash.digest("hex") : null,
   };
 }
 
@@ -98,15 +113,29 @@ async function describeApp(url) {
       : assets.length > 0
         ? "built-app-from-dist/web"
         : "unknown";
+    const uniqueAssets = [...new Set(assets)];
+    const bundleManifest = {};
+    const distIndex = resolve(REPO_ROOT, "dist/web/index.html");
+    if (existsSync(distIndex) && statSync(distIndex).isFile()) {
+      bundleManifest["dist/web/index.html"] = createHash("sha256").update(readFileSync(distIndex)).digest("hex");
+    }
+    for (const asset of uniqueAssets) {
+      const localPath = resolve(REPO_ROOT, "dist/web", asset.replace(/^\/+/, ""));
+      if (existsSync(localPath) && statSync(localPath).isFile()) {
+        bundleManifest[`dist/web${asset}`] = createHash("sha256").update(readFileSync(localPath)).digest("hex");
+      }
+    }
     return {
       kind,
       httpStatus: res.status,
       detectedBy: html.includes("/@vite/client")
         ? "the served HTML loads /@vite/client"
-        : assets.length > 0
-          ? `the served HTML loads the built asset(s) ${assets.slice(0, 3).join(", ")}`
+        : uniqueAssets.length > 0
+          ? `the served HTML loads the built asset(s) ${uniqueAssets.slice(0, 3).join(", ")}`
           : "the served HTML names neither /@vite/client nor a built asset",
-      servedAssets: [...new Set(assets)],
+      servedAssets: uniqueAssets,
+      servedHtmlSha256: createHash("sha256").update(html, "utf8").digest("hex"),
+      bundleManifestSha256: bundleManifest,
     };
   } catch (err) {
     return {
@@ -635,16 +664,69 @@ async function main() {
     }
 
     // --- resolving a dispute must refresh the money of the open workspace ---------------------
+    // Wait for initial finance loads to settle before attaching mutation counters (LND-W9-RET-07).
+    await financePage.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+    const moneySection = financePage.locator('section[aria-labelledby="finance-money-heading"]');
+    await moneySection.waitFor({ state: "visible", timeout: 15_000 });
+
+    const readMoneyMetric = async label => {
+      return moneySection.evaluate((section, targetLabel) => {
+        const tiles = Array.from(section.querySelectorAll(".stat-tile"));
+        for (const tile of tiles) {
+          const labelEl = tile.querySelector(".stat-label");
+          if (labelEl?.textContent?.trim() !== targetLabel) continue;
+          const valEl = tile.querySelector(".stat-value");
+          if (valEl && valEl.textContent) return valEl.textContent.trim();
+        }
+        return null;
+      }, label);
+    };
+
+    const formatRub = kopeks => {
+      if (typeof kopeks !== "number" || !Number.isFinite(kopeks)) return null;
+      return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB" }).format(kopeks / 100);
+    };
+
+    const beforeAnalyticsRes = await financePage.request.get(`${APP}/api/v1/finance/analytics`);
+    const beforeAnalytics = beforeAnalyticsRes.ok() ? await beforeAnalyticsRes.json() : null;
+    const beforeDisputedText = await readMoneyMetric("Оспорено");
+    const beforePayableText = await readMoneyMetric("К выплате");
+
     const financeRequests = [];
-    financePage.on("request", request => {
+    const resolveStatuses = [];
+    const overviewStatuses = [];
+    const analyticsStatuses = [];
+    let latestAnalyticsPayload = null;
+
+    const onRequest = request => {
       const url = new URL(request.url());
       if (url.pathname.startsWith("/api/v1/finance/")) {
         financeRequests.push(url.pathname);
       }
-    });
+    };
+    const onResponse = async response => {
+      const url = new URL(response.url());
+      if (
+        response.request().method() === "POST" &&
+        /^\/api\/v1\/finance\/partner-disputes\/[^/]+\/resolve$/.test(url.pathname)
+      ) {
+        resolveStatuses.push(response.status());
+      } else if (url.pathname === "/api/v1/finance/overview") {
+        overviewStatuses.push(response.status());
+      } else if (url.pathname === "/api/v1/finance/analytics") {
+        analyticsStatuses.push(response.status());
+        if (response.ok()) {
+          latestAnalyticsPayload = await response.json().catch(() => null);
+        }
+      }
+    };
+    financePage.on("request", onRequest);
+    financePage.on("response", onResponse);
 
     const resolveButton = financePage.getByRole("button", { name: "Решить" }).first();
     if (!(await resolveButton.count())) {
+      financePage.off("request", onRequest);
+      financePage.off("response", onResponse);
       skip(
         "LND-R5-UI-5",
         "resolving a dispute refreshes the sums of the open workspace",
@@ -655,21 +737,69 @@ async function main() {
       const reasonBox = financePage.getByPlaceholder("Например: вес принят по факту, оспариваемое начисление снято");
       await reasonBox.waitFor({ state: "visible", timeout: 10_000 });
       await reasonBox.fill("Волна 8: спор закрыт на живой стенде.");
+      const waitResolve = financePage
+        .waitForResponse(
+          res =>
+            res.request().method() === "POST" &&
+            /^\/api\/v1\/finance\/partner-disputes\/[^/]+\/resolve$/.test(new URL(res.url()).pathname),
+          { timeout: 15_000 },
+        )
+        .catch(() => null);
+      const waitOverview = financePage
+        .waitForResponse(
+          res => new URL(res.url()).pathname === "/api/v1/finance/overview",
+          { timeout: 15_000 },
+        )
+        .catch(() => null);
+      const waitAnalytics = financePage
+        .waitForResponse(
+          res => new URL(res.url()).pathname === "/api/v1/finance/analytics",
+          { timeout: 15_000 },
+        )
+        .catch(() => null);
       await financePage.getByRole("button", { name: "Закрыть спор" }).click();
-      await financePage.waitForTimeout(3_000);
+      await Promise.all([waitResolve, waitOverview, waitAnalytics]);
+      // Allow DOM to commit and catch any delayed duplicate refresh requests.
+      await financePage.waitForTimeout(1_500);
+      financePage.off("request", onRequest);
+      financePage.off("response", onResponse);
+
       const overviewCalls = financeRequests.filter(path => path === "/api/v1/finance/overview").length;
       const analyticsCalls = financeRequests.filter(path => path === "/api/v1/finance/analytics").length;
-      if (overviewCalls > 0 || analyticsCalls > 0) {
+      const afterDisputedText = await readMoneyMetric("Оспорено");
+      const afterPayableText = await readMoneyMetric("К выплате");
+      const afterPayables = latestAnalyticsPayload?.payables ?? null;
+      const beforePayables = beforeAnalytics?.payables ?? null;
+
+      const verdict = evaluateMoneyRefreshCheck({
+        resolveStatuses,
+        overviewCalls,
+        overviewStatuses,
+        analyticsCalls,
+        analyticsStatuses,
+        beforeDisputedText,
+        afterDisputedText,
+        beforePayableText,
+        afterPayableText,
+        serverBeforeDisputedKopeks: beforePayables?.disputedKopeks ?? null,
+        serverAfterDisputedKopeks: afterPayables?.disputedKopeks ?? null,
+        serverBeforePayableKopeks: beforePayables?.payableKopeks ?? null,
+        serverAfterPayableKopeks: afterPayables?.payableKopeks ?? null,
+        expectedAfterDisputedText: formatRub(afterPayables?.disputedKopeks),
+        expectedAfterPayableText: formatRub(afterPayables?.payableKopeks),
+      });
+
+      if (verdict.ok) {
         pass(
           "LND-R5-UI-5",
           "resolving a dispute refreshes the sums of the open workspace",
-          `after the decision the open workspace asked for /finance/overview ${overviewCalls} time(s) and /finance/analytics ${analyticsCalls} time(s) — no manual refresh was pressed`,
+          `POST resolve=${resolveStatuses.join(",")}, /finance/overview=${overviewCalls} (${overviewStatuses.join(",")}), /finance/analytics=${analyticsCalls} (${analyticsStatuses.join(",")}); DOM Оспорено: "${beforeDisputedText}" -> "${afterDisputedText}", К выплате: "${beforePayableText}" -> "${afterPayableText}"`,
         );
       } else {
         fail(
           "LND-R5-UI-5",
           "resolving a dispute refreshes the sums of the open workspace",
-          `after the decision no /finance/overview or /finance/analytics request was made (requests: ${financeRequests.join(", ") || "none"}) — the sums stay stale until a manual refresh`,
+          `${verdict.reasons.join("; ")} (requests: ${financeRequests.join(", ") || "none"})`,
         );
       }
     }

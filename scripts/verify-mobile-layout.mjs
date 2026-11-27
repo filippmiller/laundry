@@ -45,6 +45,7 @@
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { evaluateMobileResults } from "./mobile-layout-verdict.mjs";
 
 const BASE = process.env.APP_URL ?? "http://127.0.0.1:3010";
 const OUT = path.resolve("temp/audit-shots/mobile-fix");
@@ -84,6 +85,9 @@ function installActivityMeter() {
   const meter = { mutations: 0, resizes: 0, scrolls: 0 };
   window.__activity = meter;
   window.__samples = [];
+  window.__anchorBaselineTop = null;
+  window.__anchorDrifts = [];
+  window.__maxAnchorDriftWhileOpen = 0;
   const observer = new MutationObserver(records => {
     meter.mutations += records.length;
   });
@@ -103,6 +107,23 @@ function installActivityMeter() {
     if (y !== lastY) {
       window.__samples.push({ t: performance.now(), from: lastY, y, phase: window.__phase ?? null });
       lastY = y;
+    }
+    const phase = window.__phase ?? null;
+    if (
+      window.__anchorBaselineTop !== null &&
+      (phase === "opening" || phase === "open" || phase === "wheel" || phase === "closing")
+    ) {
+      const anchor = document.querySelector("[data-mobile-probe-anchor]");
+      if (anchor) {
+        const top = Math.round(anchor.getBoundingClientRect().top);
+        const drift = Math.abs(top - window.__anchorBaselineTop);
+        if (drift > window.__maxAnchorDriftWhileOpen) {
+          window.__maxAnchorDriftWhileOpen = drift;
+        }
+        if (drift > 2) {
+          window.__anchorDrifts.push({ t: performance.now(), phase, top, drift, y });
+        }
+      }
     }
     requestAnimationFrame(tick);
   };
@@ -227,6 +248,7 @@ async function measure(page) {
         body: getComputedStyle(document.body).overflow,
       },
       scrollY: window.scrollY,
+      hasTopbar: Boolean(topbar),
       railOpen: document.querySelector(".app-shell")?.getAttribute("data-rail-open"),
     };
   });
@@ -275,15 +297,21 @@ async function waitForQuietPage(page, quietMs = QUIET_MS) {
   return waitForSettledPage(page, quietMs);
 }
 
-/** Waits until the drawer reports itself as open or closed. */
+/** Waits until the drawer reports itself as open or closed. Never swallows timeouts (LND-W9-RET-06). */
 async function waitForRailState(page, state) {
-  await page
-    .waitForFunction(
+  try {
+    await page.waitForFunction(
       expected => document.querySelector(".app-shell")?.getAttribute("data-rail-open") === expected,
       state,
       { timeout: 5000 },
-    )
-    .catch(() => {});
+    );
+    return { ok: true, timedOut: false };
+  } catch {
+    const actual = await page.evaluate(
+      () => document.querySelector(".app-shell")?.getAttribute("data-rail-open") ?? null,
+    );
+    return { ok: false, timedOut: true, actual };
+  }
 }
 
 /**
@@ -422,6 +450,14 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   // opened. Everything that happened before it (a late panel, the restoration
   // of a remembered position) belongs to the page, not to the drawer.
   const anchorBefore = await pickAnchor(page);
+  const railOpenBefore = await page.evaluate(
+    () => document.querySelector(".app-shell")?.getAttribute("data-rail-open") ?? null,
+  );
+  await page.evaluate(baseline => {
+    window.__anchorBaselineTop = baseline;
+    window.__anchorDrifts = [];
+    window.__maxAnchorDriftWhileOpen = 0;
+  }, anchorBefore.ok ? anchorBefore.top : null);
   const scrollAtClick = await page.evaluate(() => window.scrollY);
   const stickyBefore = await readSticky(page);
   const sampleMark = await page.evaluate(() => window.__samples.length);
@@ -439,15 +475,35 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   if (!toggleBox) {
     throw new Error(`the menu button has no box at ${tag} — the drawer cannot be measured`);
   }
-  await page.mouse.click(
-    Math.round(toggleBox.x + toggleBox.width / 2),
-    Math.round(toggleBox.y + toggleBox.height / 2),
+  const clickX = Math.round(toggleBox.x + toggleBox.width / 2);
+  const clickY = Math.round(toggleBox.y + toggleBox.height / 2);
+  const toggleHit = await page.evaluate(
+    ({ x, y }) => {
+      if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
+        return { ok: false, reason: `toggle center (${x},${y}) is outside viewport ${window.innerWidth}x${window.innerHeight}` };
+      }
+      const el = document.elementFromPoint(x, y);
+      const btn = document.querySelector(".rail-toggle");
+      if (!btn || !el || (el !== btn && !btn.contains(el))) {
+        return {
+          ok: false,
+          reason: `elementFromPoint(${x},${y}) hit ${el ? `${el.tagName.toLowerCase()}.${el.className || "-"}` : "null"} instead of .rail-toggle`,
+        };
+      }
+      return { ok: true, reason: null };
+    },
+    { x: clickX, y: clickY },
   );
-  await waitForRailState(page, "true");
+  await page.mouse.click(clickX, clickY);
+  const openWait = await waitForRailState(page, "true");
   await setPhase(page, "open");
   await waitForSettledPage(page, 600);
   await page.screenshot({ path: path.join(OUT, `after-${tag}-drawer.png`) });
   const drawer = await measure(page);
+  drawer.railOpenBefore = railOpenBefore;
+  drawer.openTimedOut = openWait.timedOut;
+  drawer.toggleHitOk = toggleHit.ok;
+  drawer.toggleHitReason = toggleHit.reason;
   drawer.scrollAtClick = scrollAtClick;
   drawer.anchorBefore = anchorBefore.ok ? { top: anchorBefore.top, height: anchorBefore.height } : null;
   drawer.anchorMissing = !anchorBefore.ok;
@@ -469,13 +525,32 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
       ? null
       : Math.abs(anchorOpen.top - anchorBefore.top) <= 2;
 
-  // (d) the page behind the drawer must not scroll. The user scrolls with a
-  // wheel, not with scrollTo(): `overflow: hidden` blocks the user, while a
-  // programmatic jump is still allowed.
+  // (d) the page behind the drawer must not scroll. Aim the wheel at a point
+  // OUTSIDE `.rail` (exposed backdrop or topbar) so narrow viewports never
+  // land inside the scrollable drawer and skip exercising the background lock.
   const yBeforeWheel = await page.evaluate(() => window.scrollY);
   const anchorBeforeWheel = await readAnchor(page, "the anchor element disappeared before the wheel");
   await setPhase(page, "wheel");
-  await page.mouse.move(Math.round(layoutWidth * 0.8), 400);
+  const wheelPoint = await page.evaluate(width => {
+    const rail = document.querySelector(".rail");
+    const topbar = document.querySelector(".topbar");
+    const railRect = rail ? rail.getBoundingClientRect() : null;
+    const topbarRect = topbar ? topbar.getBoundingClientRect() : null;
+    if (railRect && railRect.right < width - 8) {
+      return {
+        x: Math.min(width - 4, Math.round(railRect.right + (width - railRect.right) / 2)),
+        y: Math.min(window.innerHeight - 20, Math.max(120, Math.round(window.innerHeight / 2))),
+      };
+    }
+    if (topbarRect && topbarRect.height > 4) {
+      return {
+        x: Math.round(width / 2),
+        y: Math.max(4, Math.round(topbarRect.top + topbarRect.height / 2)),
+      };
+    }
+    return { x: Math.round(width * 0.8), y: 400 };
+  }, layoutWidth);
+  await page.mouse.move(wheelPoint.x, wheelPoint.y);
   await page.mouse.wheel(0, 600);
   await page.waitForTimeout(350);
   drawer.scrollBehind = await page.evaluate(() => window.scrollY);
@@ -489,10 +564,17 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag }) {
   // Close again with Escape (the backdrop click lands on the drawer).
   await setPhase(page, "closing");
   await page.keyboard.press("Escape");
-  await waitForRailState(page, "false");
+  const closeWait = await waitForRailState(page, "false");
   await setPhase(page, "closed");
   await waitForSettledPage(page, 600);
+  drawer.closeTimedOut = closeWait.timedOut;
   drawer.scrollAfterClose = await page.evaluate(() => window.scrollY);
+  const driftSummary = await page.evaluate(() => ({
+    maxDrift: window.__maxAnchorDriftWhileOpen ?? 0,
+    drifts: (window.__anchorDrifts ?? []).slice(0, 20),
+  }));
+  drawer.maxAnchorDriftWhileOpen = driftSummary.maxDrift;
+  drawer.anchorDriftsWhileOpen = driftSummary.drifts;
   const anchorClosed = await readAnchor(page, "the anchor element disappeared after the drawer was closed");
   drawer.anchorClosed = anchorClosed.ok ? { top: anchorClosed.top, height: anchorClosed.height } : null;
   // The reading position has to come back to the place the user left it.
@@ -610,7 +692,7 @@ async function run() {
           drawer = await measureDrawer(page, { toggle, layoutWidth, tag });
         }
 
-        results.push({ tag, width, zoom, role, layoutWidth, target: target.kind, before, drawer });
+        results.push({ tag, width, zoom, role, layoutWidth, target: target.kind, hasToggle, before, drawer });
 
         console.log(
           `--- ${tag} (layout ${layoutWidth}px) ---`,
@@ -639,41 +721,7 @@ async function run() {
   await browser.close();
   await writeFile(path.join(OUT, "measurements.json"), JSON.stringify(results, null, 2));
 
-  const failures = [];
-  const notes = [];
-  for (const r of results) {
-    if (r.before.horizontalOverflow) failures.push(`${r.tag}: the document scrolls horizontally`);
-    if (r.before.tabCount > 0 && r.before.tabRows > 1) failures.push(`${r.tag}: the tab strip uses ${r.before.tabRows} rows`);
-    if (r.drawer?.brandHitCoveredByTopbar) failures.push(`${r.tag}: the topbar covers the brand of the drawer`);
-    if (r.drawer?.scrollBehindMoved) failures.push(`${r.tag}: the page behind the drawer scrolls`);
-    if (r.drawer?.anchorMovedByWheel === true) failures.push(`${r.tag}: the page behind the drawer scrolls`);
-    if (r.drawer?.anchorHeldWhileOpen === false) failures.push(`${r.tag}: the page behind the drawer jumps`);
-    if (r.drawer?.anchorRestored === false) failures.push(`${r.tag}: the scroll position is not restored`);
-    if (r.drawer?.topbarPinned === false) failures.push(`${r.tag}: the topbar does not stay pinned while the drawer is open`);
-    if (r.drawer?.tabBarPinned === false) failures.push(`${r.tag}: the tab strip does not stay pinned while the drawer is open`);
-    if (r.drawer && r.drawer.railOpenAfterClose !== "false") failures.push(`${r.tag}: the drawer did not close`);
-    if (r.zoom === 2 && r.before.titleInfo?.clamped) failures.push(`${r.tag}: the topbar title is clamped`);
-    // A witness that was not there is a failure of the combination: the probe
-    // could not measure what it certifies, and it says why.
-    for (const problem of r.drawer?.anchorProblems ?? []) {
-      failures.push(`${r.tag}: ${problem}`);
-    }
-    if (r.drawer?.movesWhileOpen?.length) {
-      const byPhase = r.drawer.movesByPhase ?? {};
-      // The verdict about the content is the anchor's, not the offset's: an
-      // offset move is harmless as long as the line the user reads stayed.
-      const held = r.drawer.anchorHeldWhileOpen;
-      const tail =
-        held === true
-          ? " — the content the user reads stayed where it was"
-          : held === false
-            ? " — the content the user reads jumped"
-            : "";
-      notes.push(
-        `${r.tag}: the offset number moved ${r.drawer.movesWhileOpen.length} time(s) while the drawer was open (opening: ${byPhase.opening ?? 0}, open: ${byPhase.open ?? 0})${tail}`,
-      );
-    }
-  }
+  const { failures, notes } = evaluateMobileResults(results);
 
   console.log("");
   console.log(

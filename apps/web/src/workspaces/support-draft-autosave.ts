@@ -327,6 +327,9 @@ export function createSupportDraftController(opts: {
       } else {
         await opts.api(`/support/threads/${record.threadId}/draft`, { method: "DELETE" });
         record.savedBody = "";
+        // Cleanup is complete: clear `dropDraft` so a future failed GET on a re-opened
+        // thread cannot re-issue a stale DELETE and erase a draft saved in another tab.
+        record.dropDraft = false;
       }
       record.serverKnown = true;
       record.error = null;
@@ -395,9 +398,28 @@ export function createSupportDraftController(opts: {
       stored = typeof draft?.body === "string" ? draft.body : "";
     } catch (err) {
       // A failed load is not an empty draft. Without the stored text there is nothing that may be
-      // deleted, so the reply box stays untouched and the operator is told about the failure.
+      // deleted — UNLESS the operator already explicitly sent the message or closed the thread
+      // (`dropDraft === true`), in which case the pending cleanup must execute now (LND-W9-RET-05).
       if (disposed) return;
       record.loadSettled = true;
+      if (record.dropDraft) {
+        record.error = null;
+        record.errorScope = null;
+        requestWrite(record);
+        record.status = computeStatus(record);
+        emit();
+        return;
+      }
+      if (record.edited && record.body.trim()) {
+        // The operator already typed new text before GET failed: persist it via PUT instead
+        // of stranding the reply in load-error without saving.
+        record.error = null;
+        record.errorScope = null;
+        scheduleSave(record);
+        record.status = computeStatus(record);
+        emit();
+        return;
+      }
       record.error = formatError(err);
       record.errorScope = "load";
       record.status = "error";

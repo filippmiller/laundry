@@ -31,8 +31,14 @@ export const SCROLL_LOCK_KEYS: readonly string[] = [
 
 /** The events that can scroll the page while the drawer is open. */
 export type ScrollLockInput =
-  | { kind: "wheel" | "touchmove"; insideDrawer: boolean }
-  | { kind: "keydown"; key: string; insideDrawer: boolean };
+  | { kind: "wheel" | "touchmove"; insideDrawer: boolean; insideDialog?: boolean }
+  | {
+      kind: "keydown";
+      key: string;
+      insideDrawer: boolean;
+      insideDialog?: boolean;
+      interactiveTarget?: boolean;
+    };
 
 /**
  * Should the event be prevented?
@@ -40,15 +46,37 @@ export type ScrollLockInput =
  * Inside the drawer nothing is frozen: the rail is its own scroll container
  * (`overflow-y: auto`) and the keyboard belongs to the menu — Space has to
  * activate the focused button, and the arrows have to move the menu.
+ *
+ * Inside an open top-layer `<dialog>` (e.g. «Мои данные и сессии») the dialog
+ * owns wheel, touch and keyboard input. Interactive controls outside the rail
+ * (such as the «Закрыть меню» button in the topbar) must also keep Space so
+ * keyboard users can activate them (LND-W9-RET-04).
  */
 export function shouldLockScroll(input: ScrollLockInput): boolean {
-  if (input.insideDrawer) return false;
-  if (input.kind === "keydown") return SCROLL_LOCK_KEYS.includes(input.key);
+  if (input.insideDrawer || input.insideDialog) return false;
+  if (input.kind === "keydown") {
+    if (input.key === " " && input.interactiveTarget) return false;
+    return SCROLL_LOCK_KEYS.includes(input.key);
+  }
   return true;
 }
 
+/**
+ * What happened to the reading-line witness element since the drawer opened:
+ * - `"held"`: the witness is still connected and its viewport `top` stayed within 1 px
+ *   (confirmed browser scroll-anchoring compensation).
+ * - `"moved"`: the witness is connected and its viewport `top` shifted by > 1 px
+ *   (real content movement — must be restored).
+ * - `"missing"`: no connected witness is available (cannot prove compensation;
+ *   do not silently adopt an unknown offset).
+ */
+export type WitnessState = "held" | "moved" | "missing";
+
 /** What the guard has to do with the offset of the page. */
-export type ScrollGuardAction = { kind: "hold" } | { kind: "restore"; top: number };
+export type ScrollGuardAction =
+  | { kind: "hold" }
+  | { kind: "adopt"; top: number }
+  | { kind: "restore"; top: number };
 
 /**
  * The offset of the page while the drawer is open.
@@ -63,24 +91,49 @@ export type ScrollGuardAction = { kind: "hold" } | { kind: "restore"; top: numbe
  * compensation of the browser: when a panel arrives above the reading
  * position, the browser moves the offset itself and leaves the content where
  * it was. Putting the offset back in that case would move the content — the
- * guard would cause the very jump it is there to prevent. So the guard waits
- * for the witness: the content the user reads has to have moved too.
+ * guard would cause the very jump it is there to prevent.
+ *
+ * When the witness confirms compensation (`witness === "held"`), the guard
+ * adopts the compensated offset (`{ kind: "adopt", top }`) so a subsequent
+ * external scroll restores to the compensated position rather than the stale
+ * pre-compensation offset (LND-W9-RET-03). When the witness is missing
+ * (`witness === "missing"`), the guard holds without updating `locked`.
  */
 export function decideScrollGuard({
   current,
   locked,
   maxOffset,
+  witness,
   witnessMoved,
 }: {
   current: number;
   locked: number;
   maxOffset: number;
-  witnessMoved: boolean;
+  witness?: WitnessState;
+  /** @deprecated Prefer `witness: "held" | "moved" | "missing"`. */
+  witnessMoved?: boolean;
 }): ScrollGuardAction {
-  const top = Math.max(0, Math.min(locked, Math.max(0, maxOffset)));
+  const clampedMax = Math.max(0, maxOffset);
+  const top = Math.max(0, Math.min(locked, clampedMax));
+  const state: WitnessState =
+    witness ?? (witnessMoved ? "moved" : "held");
   // A pixel of difference is not a drift: the browser reports fractional
   // offsets, and a fight over them would show as a trembling page.
-  if (Math.abs(current - top) <= 1) return { kind: "hold" };
-  if (!witnessMoved) return { kind: "hold" };
+  // However, if `locked` was clamped down to `top` (e.g., page shrank) while the
+  // witness confirmed the reading line held, adopt `top` so a later page growth
+  // does not restore the stale pre-shrink offset.
+  if (Math.abs(current - top) <= 1) {
+    if (state === "held" && Math.abs(locked - top) > 1) {
+      return { kind: "adopt", top };
+    }
+    return { kind: "hold" };
+  }
+
+  if (state === "held") {
+    return { kind: "adopt", top: Math.max(0, Math.min(current, clampedMax)) };
+  }
+  if (state === "missing") {
+    return { kind: "hold" };
+  }
   return { kind: "restore", top };
 }
