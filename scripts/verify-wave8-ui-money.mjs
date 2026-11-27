@@ -78,6 +78,15 @@ export async function observeMoneyRefresh(page, opts) {
   let overviewSettled = false;
   let analyticsSettled = false;
 
+  const readMetricBounded = (label, untilMs) => {
+    const ms = Math.max(0, untilMs - Date.now());
+    if (ms === 0) return Promise.resolve({ timedOut: true, value: null });
+    return Promise.race([
+      Promise.resolve(readMoneyMetric(label)).then(value => ({ timedOut: false, value })),
+      new Promise(resolve => setTimeout(() => resolve({ timedOut: true, value: null }), ms)),
+    ]);
+  };
+
   const trackBody = promise => {
     pendingBodyCount += 1;
     const tracked = promise.finally(() => {
@@ -227,17 +236,12 @@ export async function observeMoneyRefresh(page, opts) {
     const domDeadline = Math.min(overallDeadline, Date.now() + 3_000);
     if (normExpDisputed && normExpPayable) {
       let domReconciledInTime = false;
-      const readMetricBounded = (label, untilMs) => {
-        const ms = Math.max(0, untilMs - Date.now());
-        if (ms === 0) return Promise.resolve(null);
-        return Promise.race([
-          readMoneyMetric(label),
-          new Promise(resolve => setTimeout(() => resolve(null), ms)),
-        ]);
-      };
       while (Date.now() <= domDeadline) {
-        const curDisputed = normalizeMoneyText(await readMetricBounded("Оспорено", domDeadline));
-        const curPayable = normalizeMoneyText(await readMetricBounded("К выплате", domDeadline));
+        const disputedRead = await readMetricBounded("Оспорено", domDeadline);
+        const payableRead = await readMetricBounded("К выплате", domDeadline);
+        if (disputedRead.timedOut || payableRead.timedOut) break;
+        const curDisputed = normalizeMoneyText(disputedRead.value);
+        const curPayable = normalizeMoneyText(payableRead.value);
         if (curDisputed === normExpDisputed && curPayable === normExpPayable) {
           if (Date.now() <= domDeadline) {
             domReconciledInTime = true;
@@ -273,12 +277,19 @@ export async function observeMoneyRefresh(page, opts) {
     page.off("response", onResponse);
   }
 
-  const endedAt = Date.now();
   const pendingRequestsAtClose = inFlight.size + pendingBodyCount;
 
-  // 4. Re-read visible DOM totals at the end of the observation window.
-  const afterDisputedText = await readMoneyMetric("Оспорено");
-  const afterPayableText = await readMoneyMetric("К выплате");
+  // 4. Re-read visible DOM totals at the end of the observation window under a hard timeout,
+  //    then record `endedAt` so elapsed time includes the final reads.
+  const finalReadDeadline = Date.now() + 3_000;
+  const finalDisputedRead = await readMetricBounded("Оспорено", finalReadDeadline);
+  const finalPayableRead = await readMetricBounded("К выплате", finalReadDeadline);
+  if (finalDisputedRead.timedOut || finalPayableRead.timedOut) {
+    deadlineExceeded = true;
+  }
+  const afterDisputedText = finalDisputedRead.value;
+  const afterPayableText = finalPayableRead.value;
+  const endedAt = Date.now();
   const afterPayables = latestAnalyticsPayload?.payables ?? null;
   const beforePayables = beforeAnalytics?.payables ?? null;
 
