@@ -381,10 +381,16 @@ function App() {
       // genuine user scrolling such as dragging the native scrollbar.
       if (settled || programmaticReset || verifyingTarget) return;
       if (stabilizing) {
-        // During post-restore stabilization, a scrollY shift accompanied by a document height
-        // change is browser scroll-anchoring from async panels expanding above the viewport;
-        // re-pin to target. Without a height change, treat as genuine scrollbar drag.
+        // If the document is currently too short to hold `target`, any scrollY at or below
+        // `maxOffset` is a layout clamp rather than user scrollbar input — even if a ResizeObserver
+        // or interval tick updated `lastKnownHeight` before the browser delivered the scroll event.
         const currentHeight = document.documentElement.scrollHeight;
+        const maxOffset = Math.max(0, currentHeight - window.innerHeight);
+        if (maxOffset < target - SCROLL_RESTORE_TOLERANCE_PX) {
+          lastKnownHeight = currentHeight;
+          stabilizing = false;
+          return;
+        }
         if (currentHeight !== lastKnownHeight) {
           lastKnownHeight = currentHeight;
           window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });

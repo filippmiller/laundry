@@ -108,7 +108,8 @@ function codeIdentity() {
 async function describeApp(url) {
   try {
     const res = await fetch(url, { headers: { accept: "text/html" } });
-    const html = await res.text();
+    const htmlBytes = Buffer.from(await res.arrayBuffer());
+    const html = htmlBytes.toString("utf8");
     const assets = [...html.matchAll(/\/assets\/[^\s"'<>]+\.(?:js|css)/g)].map(match => match[0]);
     const kind = html.includes("/@vite/client")
       ? "vite-dev-server"
@@ -130,7 +131,7 @@ async function describeApp(url) {
         }
       }
     }
-    const servedHtmlSha256 = createHash("sha256").update(html, "utf8").digest("hex");
+    const servedHtmlSha256 = createHash("sha256").update(htmlBytes).digest("hex");
     const servedAssetsSha256 = {};
     // Verify EVERY asset in dist/web/assets (including lazy workspace chunks, not just entry
     // scripts referenced in index.html) over HTTP against the running server (LND-W9-R2-E01).

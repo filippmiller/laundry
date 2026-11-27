@@ -220,55 +220,56 @@ async function measure(page) {
     let railNavHitReason = "no enabled navigation item found inside .rail";
     let railNavRect = null;
     if (rail && railRect) {
-      const navItem = rail.querySelector(
-        ".rail__item:not([disabled]), nav button:not([disabled]), nav a[href]",
+      const navItems = Array.from(
+        rail.querySelectorAll(".rail__item:not([disabled]), nav button:not([disabled]), nav a[href]"),
       );
-      if (navItem) {
+      for (const navItem of navItems) {
         const nr = navItem.getBoundingClientRect();
-        railNavRect = {
+        const itemRect = {
           left: Math.round(nr.left),
           top: Math.round(nr.top),
           width: Math.round(nr.width),
           height: Math.round(nr.height),
         };
+        if (!railNavRect) railNavRect = itemRect;
         const clipLeft = Math.max(0, railRect.left, nr.left);
         const clipTop = Math.max(0, railRect.top, nr.top);
         const clipRight = Math.min(window.innerWidth, railRect.right, nr.right);
         const clipBottom = Math.min(window.innerHeight, railRect.bottom, nr.bottom);
         if (clipRight - clipLeft <= 0 || clipBottom - clipTop <= 0) {
-          railNavHitOk = false;
-          railNavHitReason = `navigation item has no visible clipped area inside rail/viewport (navRect=${JSON.stringify(railNavRect)})`;
-        } else {
-          const cx = Math.round((clipLeft + clipRight) / 2);
-          const cy = Math.round((clipTop + clipBottom) / 2);
-          const hitEl = document.elementFromPoint(cx, cy);
-          let navVisible =
-            typeof navItem.checkVisibility === "function"
-              ? navItem.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
-              : true;
-          for (let cur = navItem; cur && cur instanceof Element; cur = cur.parentElement) {
-            const st = getComputedStyle(cur);
-            if (
-              st.display === "none" ||
-              st.visibility !== "visible" ||
-              Number.parseFloat(st.opacity) <= 0
-            ) {
-              navVisible = false;
-              break;
-            }
-            if (cur === rail) break;
-          }
-          if (!navVisible) {
-            railNavHitOk = false;
-            railNavHitReason = "navigation item or its container is hidden (display/visibility/opacity)";
-          } else if (hitEl && (hitEl === navItem || navItem.contains(hitEl))) {
-            railNavHitOk = true;
-            railNavHitReason = null;
-          } else {
-            railNavHitOk = false;
-            railNavHitReason = `elementFromPoint(${cx},${cy}) hit ${hitEl ? `${hitEl.tagName.toLowerCase()}.${hitEl.className || "-"}` : "null"} instead of the navigation item`;
-          }
+          railNavHitReason = `navigation item has no visible clipped area inside rail/viewport (navRect=${JSON.stringify(itemRect)})`;
+          continue;
         }
+        const cx = Math.round((clipLeft + clipRight) / 2);
+        const cy = Math.round((clipTop + clipBottom) / 2);
+        const hitEl = document.elementFromPoint(cx, cy);
+        let navVisible =
+          typeof navItem.checkVisibility === "function"
+            ? navItem.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+            : true;
+        for (let cur = navItem; cur && cur instanceof Element; cur = cur.parentElement) {
+          const st = getComputedStyle(cur);
+          if (
+            st.display === "none" ||
+            st.visibility !== "visible" ||
+            Number.parseFloat(st.opacity) <= 0
+          ) {
+            navVisible = false;
+            break;
+          }
+          if (cur === rail) break;
+        }
+        if (!navVisible) {
+          railNavHitReason = "navigation item or its container is hidden (display/visibility/opacity)";
+          continue;
+        }
+        if (hitEl && (hitEl === navItem || navItem.contains(hitEl))) {
+          railNavHitOk = true;
+          railNavHitReason = null;
+          railNavRect = itemRect;
+          break;
+        }
+        railNavHitReason = `elementFromPoint(${cx},${cy}) hit ${hitEl ? `${hitEl.tagName.toLowerCase()}.${hitEl.className || "-"}` : "null"} instead of the navigation item`;
       }
     }
 
@@ -544,7 +545,7 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
   // even on shorter pages (avoids clamping to maxOffset where a downward wheel has nowhere to go).
   await page.evaluate(() => {
     const maxOffset = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-    const target = maxOffset > 20 ? Math.min(600, Math.max(10, Math.floor(maxOffset / 2))) : 0;
+    const target = maxOffset > 0 ? Math.min(600, Math.floor(maxOffset / 2)) : 0;
     window.scrollTo({ top: target, behavior: "instant" });
   });
   await waitForQuietPage(page);
@@ -659,7 +660,7 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
   await page.mouse.move(wheelPoint.x, wheelPoint.y);
   const wheelDeltaY = await page.evaluate(() => {
     const maxOffset = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-    return maxOffset - window.scrollY >= 20 ? 600 : -600;
+    return maxOffset - window.scrollY > 0 ? 600 : -600;
   });
   await page.mouse.wheel(0, wheelDeltaY);
   await page.waitForTimeout(350);

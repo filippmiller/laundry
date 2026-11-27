@@ -68,12 +68,12 @@ export async function observeMoneyRefresh(page, opts) {
   const observedPostMutationRequests = new Set();
   const bodyPromises = [];
 
-  let postSeen = false;
   let pendingBodyCount = 0;
   let latestAnalyticsPayload = null;
   let malformedAnalyticsCount = 0;
   let postCompletedAt = null;
   let bodiesSettledAt = null;
+  let deadlineExceeded = false;
   let resolveSettled = false;
   let overviewSettled = false;
   let analyticsSettled = false;
@@ -97,14 +97,15 @@ export async function observeMoneyRefresh(page, opts) {
     const pathname = url.pathname;
     if (!pathname.startsWith("/api/v1/finance/")) return;
     if (request.method() === "POST" && RESOLVE_PATH_RE.test(pathname)) {
-      postSeen = true;
       observedResolveRequests.add(request);
       inFlight.add(request);
       financeRequests.push(pathname);
       return;
     }
-    // Only correlate refresh requests initiated after the resolve POST started.
-    if (!postSeen) return;
+    // Only correlate refresh requests initiated AFTER the resolve POST finished (CDP
+    // `requestfinished` arrives before JS microtasks issue follow-up GETs, while GETs that
+    // raced while the POST body was still pending are excluded).
+    if (postCompletedAt === null) return;
     observedPostMutationRequests.add(request);
     inFlight.add(request);
     financeRequests.push(pathname);
@@ -112,6 +113,9 @@ export async function observeMoneyRefresh(page, opts) {
 
   const onRequestDone = request => {
     inFlight.delete(request);
+    if (observedResolveRequests.has(request) && postCompletedAt === null) {
+      postCompletedAt = Date.now();
+    }
   };
 
   const onRequestFailed = request => {
@@ -204,6 +208,11 @@ export async function observeMoneyRefresh(page, opts) {
     }
     await awaitWithTimeout(Promise.allSettled(bodyPromises.slice()), overallDeadline - Date.now());
     bodiesSettledAt = Date.now();
+    // Record deadline breach BEFORE the post-window drain so a late response completing during
+    // drain cannot turn a missed deadline into a false PASS.
+    if (!(resolveSettled && overviewSettled && analyticsSettled)) {
+      deadlineExceeded = true;
+    }
 
     // 2. Wait for visible DOM sums to reconcile to the parsed server totals (within remaining
     //    deadline, capped at 3000 ms after bodies settle so a frozen DOM fails cleanly).
@@ -274,6 +283,7 @@ export async function observeMoneyRefresh(page, opts) {
     failedRequests,
     malformedAnalyticsCount,
     pendingRequestsAtClose,
+    deadlineExceeded,
   };
 
   const verdict = evaluateMoneyRefreshCheck(verdictInput);
@@ -289,6 +299,7 @@ export async function observeMoneyRefresh(page, opts) {
       elapsedMs: endedAt - startedAt,
       duplicateWindowMs,
       deadlineMs,
+      deadlineExceeded,
       pendingRequestsAtClose,
       failedRequests,
       malformedAnalyticsCount,

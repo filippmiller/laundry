@@ -238,7 +238,15 @@ createRoot(document.getElementById("root")).render(<SupportClaimsWorkspace notif
         await page.waitForFunction(() => document.querySelector("textarea")?.value === "already sent reply");
 
         await page.getByRole("button", { name: "Отправить", exact: true }).click();
-        const [delRoute, lateGet] = await Promise.all([deleteReady.promise, refreshGetReady.promise]);
+        const withTimeout = (p, label, ms = 10_000) =>
+          Promise.race([
+            p,
+            new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out waiting for ${label}`)), ms)),
+          ]);
+        const [delRoute, lateGet] = await Promise.all([
+          withTimeout(deleteReady.promise, "DELETE /draft"),
+          withTimeout(refreshGetReady.promise, "refresh GET /draft"),
+        ]);
 
         serverDraft = null;
         const deletedRes = page.waitForResponse(
@@ -1212,7 +1220,12 @@ async function runMobileRestoreSuite(browser, appOrigin) {
       s.setDispatchHook(() => dispatchReqSeen.resolve());
 
       await s.selectWorkspaceViaDrawer("Диспетчерская");
-      await dispatchReqSeen.promise;
+      await Promise.race([
+        dispatchReqSeen.promise,
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error("timed out waiting for /dispatch/overview request")), 10_000),
+        ),
+      ]);
       await s.page.mouse.move(200, 400);
       await s.page.mouse.wheel(0, 120);
       await s.page.waitForTimeout(1800);

@@ -29,10 +29,14 @@ export function evaluateMoneyRefreshCheck(input) {
     failedRequests = [],
     malformedAnalyticsCount = 0,
     pendingRequestsAtClose = 0,
+    deadlineExceeded = false,
   } = input;
 
   const reasons = [];
 
+  if (deadlineExceeded) {
+    reasons.push("post-mutation responses did not settle within the configured observation deadline");
+  }
   if (Array.isArray(failedRequests) && failedRequests.length > 0) {
     reasons.push(`aborted or failed finance requests during observation (${failedRequests.join(", ")})`);
   }

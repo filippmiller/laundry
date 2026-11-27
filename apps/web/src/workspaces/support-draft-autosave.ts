@@ -370,6 +370,11 @@ export function createSupportDraftController(opts: {
       // The write that failed is remembered: it must not be repeated in a loop, but a write of
       // another kind — the removal of a draft the server still holds — is still needed.
       record.failedAction = action;
+      if (action === "put") {
+        // An ambiguous PUT may have committed on the server before its response was lost:
+        // do not treat the server as confirmed-empty when a subsequent markSent/discardDraft runs.
+        record.serverKnown = false;
+      }
       emit();
       opts.onError?.(record.error);
       // The failed write leaves the server in an unknown state: the difference between the box
