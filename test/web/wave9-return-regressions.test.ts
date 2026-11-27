@@ -524,6 +524,71 @@ describe("LND-W9-RET-05: support draft cleanup runs when GET fails after markSen
     expect(calls).toEqual(["GET", "DELETE"]);
     expect(controller.getSnapshot().status).toBe("clean");
   });
+
+  it("LND-W9-R2-01/GateB: concurrent discardDraft during DELETE or empty-server markSent never deletes a newer cross-tab draft on later failed GET", async () => {
+    const delGate = deferred<null>();
+    let getCount = 0;
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return { body: "first draft" };
+        throw new Error("502 Bad Gateway");
+      }
+      if (method === "DELETE") return delGate.promise;
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+
+    await controller.openThread("t-cross-tab");
+    controller.markSent("t-cross-tab", controller.getSnapshot().revision);
+    // Register a second cleanup intent while first DELETE is in flight.
+    controller.discardDraft("t-cross-tab");
+    delGate.resolve(null);
+    await settle();
+    expect(controller.getSnapshot().status).toBe("clean");
+
+    // Reopen later with a failing GET (e.g. another tab saved a new draft): must NOT send a 2nd DELETE.
+    await controller.openThread("t-cross-tab");
+    await settle();
+    expect(calls).toEqual(["GET", "DELETE", "GET"]);
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("load");
+  });
+
+  it("LND-W9-R2-02/GateB: failed PUT followed by reopen with failed GET does not auto-replay PUT", async () => {
+    let getCount = 0;
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return null;
+        throw new Error("502 Bad Gateway");
+      }
+      if (method === "PUT") throw new Error("PUT 500");
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+
+    await controller.openThread("t-no-replay-put");
+    controller.setBody("unsaved reply");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(calls).toEqual(["GET", "PUT"]);
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("save");
+
+    await controller.openThread("t-no-replay-put");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(calls).toEqual(["GET", "PUT", "GET"]);
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("save");
+  });
 });
 
 describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden toggle, missing topbar, and transient drift", () => {

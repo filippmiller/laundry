@@ -242,7 +242,26 @@ async function measure(page) {
           const cx = Math.round((clipLeft + clipRight) / 2);
           const cy = Math.round((clipTop + clipBottom) / 2);
           const hitEl = document.elementFromPoint(cx, cy);
-          if (hitEl && (hitEl === navItem || navItem.contains(hitEl))) {
+          let navVisible =
+            typeof navItem.checkVisibility === "function"
+              ? navItem.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+              : true;
+          for (let cur = navItem; cur && cur instanceof Element; cur = cur.parentElement) {
+            const st = getComputedStyle(cur);
+            if (
+              st.display === "none" ||
+              st.visibility !== "visible" ||
+              Number.parseFloat(st.opacity) <= 0
+            ) {
+              navVisible = false;
+              break;
+            }
+            if (cur === rail) break;
+          }
+          if (!navVisible) {
+            railNavHitOk = false;
+            railNavHitReason = "navigation item or its container is hidden (display/visibility/opacity)";
+          } else if (hitEl && (hitEl === navItem || navItem.contains(hitEl))) {
             railNavHitOk = true;
             railNavHitReason = null;
           } else {
@@ -521,7 +540,13 @@ async function measureDrawer(page, { toggle, layoutWidth, tag, outDir = OUT }) {
 }
 
 async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT }) {
-  await page.evaluate(() => window.scrollTo({ top: 600, behavior: "instant" }));
+  // Position at a mid-page offset so the background always has room to scroll in the wheel test
+  // even on shorter pages (avoids clamping to maxOffset where a downward wheel has nowhere to go).
+  await page.evaluate(() => {
+    const maxOffset = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const target = maxOffset > 20 ? Math.min(600, Math.max(10, Math.floor(maxOffset / 2))) : 0;
+    window.scrollTo({ top: target, behavior: "instant" });
+  });
   await waitForQuietPage(page);
 
   // The witness: the element the user is reading at the moment the menu is
@@ -632,7 +657,11 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
     return { x: Math.round(width * 0.8), y: 400 };
   }, layoutWidth);
   await page.mouse.move(wheelPoint.x, wheelPoint.y);
-  await page.mouse.wheel(0, 600);
+  const wheelDeltaY = await page.evaluate(() => {
+    const maxOffset = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    return maxOffset - window.scrollY >= 20 ? 600 : -600;
+  });
+  await page.mouse.wheel(0, wheelDeltaY);
   await page.waitForTimeout(350);
   drawer.scrollBehind = await page.evaluate(() => window.scrollY);
   drawer.scrollBehindMoved = drawer.scrollBehind !== yBeforeWheel;

@@ -132,12 +132,18 @@ async function describeApp(url) {
     }
     const servedHtmlSha256 = createHash("sha256").update(html, "utf8").digest("hex");
     const servedAssetsSha256 = {};
+    // Verify EVERY asset in dist/web/assets (including lazy workspace chunks, not just entry
+    // scripts referenced in index.html) over HTTP against the running server (LND-W9-R2-E01).
+    const manifestAssetPaths = Object.keys(bundleManifest)
+      .filter(k => k.startsWith("dist/web/assets/"))
+      .map(k => k.slice("dist/web".length));
+    const assetsToVerify = [...new Set([...uniqueAssets, ...manifestAssetPaths])].sort();
     let allAssetsMatched =
       kind === "built-app-from-dist/web" &&
       res.status === 200 &&
       typeof bundleManifest["dist/web/index.html"] === "string" &&
       servedHtmlSha256 === bundleManifest["dist/web/index.html"];
-    for (const asset of uniqueAssets) {
+    for (const asset of assetsToVerify) {
       try {
         const assetRes = await fetch(new URL(asset, url));
         const bytes = Buffer.from(await assetRes.arrayBuffer());
@@ -168,7 +174,7 @@ async function describeApp(url) {
       servedHtmlSha256,
       servedAssetsSha256,
       bundleManifestSha256: bundleManifest,
-      servedMatchesDist: uniqueAssets.length > 0 ? allAssetsMatched : false,
+      servedMatchesDist: assetsToVerify.length > 0 ? allAssetsMatched : false,
     };
   } catch (err) {
     return {

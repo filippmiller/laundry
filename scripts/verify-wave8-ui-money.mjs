@@ -16,10 +16,32 @@ function normalizeMoneyText(value) {
   return typeof value === "string" ? value.replace(/[\u00a0\u202f\s]+/g, " ").trim() : null;
 }
 
+function awaitWithTimeout(promise, ms) {
+  const wait = Math.max(0, ms);
+  if (wait === 0) return Promise.resolve();
+  return new Promise(resolve => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (!done) {
+        done = true;
+        resolve();
+      }
+    }, wait);
+    promise.finally(() => {
+      if (!done) {
+        done = true;
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+}
+
 /**
- * Observes a dispute resolution mutation in Chromium, awaiting full HTTP response bodies
- * (never returning on headers alone), waiting for visible DOM reconciliation against parsed
- * server totals, and observing a bounded post-mutation duplicate-detection window.
+ * Observes a dispute resolution mutation in Chromium, strictly associating each response with a
+ * request initiated at/after the resolve POST, awaiting full HTTP response bodies under a hard
+ * deadline (never hanging on a stalled body), waiting for visible DOM reconciliation against
+ * parsed server totals, and observing a bounded post-mutation duplicate-detection window.
  */
 export async function observeMoneyRefresh(page, opts) {
   const {
@@ -42,8 +64,12 @@ export async function observeMoneyRefresh(page, opts) {
   const analyticsStatuses = [];
   const failedRequests = [];
   const inFlight = new Set();
+  const observedResolveRequests = new Set();
+  const observedPostMutationRequests = new Set();
   const bodyPromises = [];
 
+  let postSeen = false;
+  let pendingBodyCount = 0;
   let latestAnalyticsPayload = null;
   let malformedAnalyticsCount = 0;
   let postCompletedAt = null;
@@ -52,6 +78,15 @@ export async function observeMoneyRefresh(page, opts) {
   let overviewSettled = false;
   let analyticsSettled = false;
 
+  const trackBody = promise => {
+    pendingBodyCount += 1;
+    const tracked = promise.finally(() => {
+      pendingBodyCount = Math.max(0, pendingBodyCount - 1);
+    });
+    bodyPromises.push(tracked);
+    return tracked;
+  };
+
   const onRequest = request => {
     let url;
     try {
@@ -59,9 +94,20 @@ export async function observeMoneyRefresh(page, opts) {
     } catch {
       return;
     }
-    if (!url.pathname.startsWith("/api/v1/finance/")) return;
+    const pathname = url.pathname;
+    if (!pathname.startsWith("/api/v1/finance/")) return;
+    if (request.method() === "POST" && RESOLVE_PATH_RE.test(pathname)) {
+      postSeen = true;
+      observedResolveRequests.add(request);
+      inFlight.add(request);
+      financeRequests.push(pathname);
+      return;
+    }
+    // Only correlate refresh requests initiated after the resolve POST started.
+    if (!postSeen) return;
+    observedPostMutationRequests.add(request);
     inFlight.add(request);
-    financeRequests.push(url.pathname);
+    financeRequests.push(pathname);
   };
 
   const onRequestDone = request => {
@@ -70,17 +116,20 @@ export async function observeMoneyRefresh(page, opts) {
 
   const onRequestFailed = request => {
     inFlight.delete(request);
+    if (!observedResolveRequests.has(request) && !observedPostMutationRequests.has(request)) {
+      return;
+    }
     let url;
     try {
       url = new URL(request.url());
     } catch {
       return;
     }
-    if (!url.pathname.startsWith("/api/v1/finance/")) return;
     failedRequests.push(`${request.method()} ${url.pathname} (${request.failure()?.errorText ?? "failed"})`);
   };
 
   const onResponse = response => {
+    const req = response.request();
     let url;
     try {
       url = new URL(response.url());
@@ -88,43 +137,52 @@ export async function observeMoneyRefresh(page, opts) {
       return;
     }
     const pathname = url.pathname;
-    const method = response.request().method();
 
-    if (method === "POST" && RESOLVE_PATH_RE.test(pathname)) {
+    if (observedResolveRequests.has(req)) {
       resolveStatuses.push(response.status());
-      const p = response
-        .text()
-        .catch(() => null)
-        .finally(() => {
-          resolveSettled = true;
-          if (postCompletedAt === null) postCompletedAt = Date.now();
-        });
-      bodyPromises.push(p);
-    } else if (pathname === "/api/v1/finance/overview") {
+      trackBody(
+        response
+          .text()
+          .catch(() => null)
+          .finally(() => {
+            resolveSettled = true;
+            if (postCompletedAt === null) postCompletedAt = Date.now();
+          }),
+      );
+      return;
+    }
+
+    // Strict 1-to-1 request-to-response association: ignore responses from pre-attachment or
+    // pre-POST requests so they can neither satisfy nor pollute post-mutation refresh counts.
+    if (!observedPostMutationRequests.has(req)) return;
+
+    if (pathname === "/api/v1/finance/overview") {
       overviewStatuses.push(response.status());
-      const p = response
-        .text()
-        .catch(() => null)
-        .finally(() => {
-          overviewSettled = true;
-        });
-      bodyPromises.push(p);
+      trackBody(
+        response
+          .text()
+          .catch(() => null)
+          .finally(() => {
+            overviewSettled = true;
+          }),
+      );
     } else if (pathname === "/api/v1/finance/analytics") {
       analyticsStatuses.push(response.status());
-      const p = (async () => {
-        if (response.ok()) {
-          try {
-            latestAnalyticsPayload = await response.json();
-          } catch {
-            malformedAnalyticsCount += 1;
-            latestAnalyticsPayload = null;
+      trackBody(
+        (async () => {
+          if (response.ok()) {
+            try {
+              latestAnalyticsPayload = await response.json();
+            } catch {
+              malformedAnalyticsCount += 1;
+              latestAnalyticsPayload = null;
+            }
+          } else {
+            await response.text().catch(() => null);
           }
-        } else {
-          await response.text().catch(() => null);
-        }
-        analyticsSettled = true;
-      })();
-      bodyPromises.push(p);
+          analyticsSettled = true;
+        })(),
+      );
     }
   };
 
@@ -137,14 +195,14 @@ export async function observeMoneyRefresh(page, opts) {
     await triggerResolve();
 
     // 1. Wait until resolve POST, overview GET, and analytics GET have all arrived AND their
-    //    full response bodies have finished reading (within overallDeadline).
+    //    full response bodies have finished reading, strictly bounded by overallDeadline.
     while (Date.now() < overallDeadline) {
       if (resolveSettled && overviewSettled && analyticsSettled) {
         break;
       }
       await page.waitForTimeout(50);
     }
-    await Promise.allSettled(bodyPromises.slice());
+    await awaitWithTimeout(Promise.allSettled(bodyPromises.slice()), overallDeadline - Date.now());
     bodiesSettledAt = Date.now();
 
     // 2. Wait for visible DOM sums to reconcile to the parsed server totals (within remaining
@@ -166,17 +224,18 @@ export async function observeMoneyRefresh(page, opts) {
     }
 
     // 3. Observe the explicit bounded duplicate-detection window measured from POST completion,
-    //    then wait briefly for any in-flight finance requests started inside that window to settle.
+    //    then drain any in-flight finance requests/bodies started inside that window under a
+    //    hard timeout so a stalled response body can never hang the gate.
     const windowAnchor = postCompletedAt ?? bodiesSettledAt;
     const duplicateUntil = windowAnchor + duplicateWindowMs;
     while (Date.now() < duplicateUntil) {
       await page.waitForTimeout(Math.min(100, Math.max(20, duplicateUntil - Date.now())));
     }
     const drainDeadline = Date.now() + 3_000;
-    while (inFlight.size > 0 && Date.now() < drainDeadline) {
+    while ((inFlight.size > 0 || pendingBodyCount > 0) && Date.now() < drainDeadline) {
       await page.waitForTimeout(50);
     }
-    await Promise.allSettled(bodyPromises.slice());
+    await awaitWithTimeout(Promise.allSettled(bodyPromises.slice()), drainDeadline - Date.now());
   } finally {
     page.off("request", onRequest);
     page.off("requestfinished", onRequestDone);
@@ -185,7 +244,7 @@ export async function observeMoneyRefresh(page, opts) {
   }
 
   const endedAt = Date.now();
-  const pendingRequestsAtClose = inFlight.size;
+  const pendingRequestsAtClose = inFlight.size + pendingBodyCount;
 
   // 4. Re-read visible DOM totals at the end of the observation window.
   const afterDisputedText = await readMoneyMetric("Оспорено");

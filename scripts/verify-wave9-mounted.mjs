@@ -1079,7 +1079,6 @@ async function createMobileAppPage(browser, origin, { installMeter = false, disp
 // ---------------------------------------------------------------------------
 async function runMobileRestoreSuite(browser, appOrigin) {
   const setupDispatcherAndFinance = async () => {
-    let dispatchDelayMs = 700;
     let onDispatchRequested = null;
     const session = await createMobileAppPage(browser, appOrigin, {
       dispatchDelayMs: 700,
@@ -1109,10 +1108,6 @@ async function runMobileRestoreSuite(browser, appOrigin) {
       setDispatchHook: fn => {
         onDispatchRequested = fn;
       },
-      getDelay: () => dispatchDelayMs,
-      setDelay: ms => {
-        dispatchDelayMs = ms;
-      },
     };
   };
 
@@ -1122,7 +1117,12 @@ async function runMobileRestoreSuite(browser, appOrigin) {
       await s.selectWorkspaceViaDrawer("Диспетчерская");
       await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
       await until(async () => Math.abs((await s.page.evaluate(() => window.scrollY)) - s.savedDispatcherY) <= 2, "rail return restore");
+      await s.page.waitForTimeout(600);
       const afterY = await s.page.evaluate(() => window.scrollY);
+      assert.ok(
+        Math.abs(afterY - s.savedDispatcherY) <= 2,
+        `rail return drifted after settle: expected ${s.savedDispatcherY}, got ${afterY}`,
+      );
       assert.deepEqual(s.pageErrors, []);
       return `expected=${s.savedDispatcherY}, actual=${afterY}, delta=${Math.abs(afterY - s.savedDispatcherY)}px`;
     } finally {

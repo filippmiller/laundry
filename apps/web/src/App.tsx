@@ -328,10 +328,18 @@ function App() {
       }
       stabilizeQuietTimer = window.setTimeout(() => {
         stabilizeQuietTimer = 0;
-        if (!settled && !userInterrupted) {
-          if (Math.abs(window.scrollY - target) > SCROLL_RESTORE_TOLERANCE_PX) {
-            window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
-          }
+        if (settled || userInterrupted) return;
+        if (Math.abs(window.scrollY - target) > SCROLL_RESTORE_TOLERANCE_PX) {
+          window.scrollTo({ top: target, behavior: "instant" as ScrollBehavior });
+        }
+        // Only finish if the target offset was actually achieved (not clamped by a temporary
+        // loading shrink) or the retry deadline has elapsed.
+        if (Math.abs(window.scrollY - target) <= SCROLL_RESTORE_TOLERANCE_PX) {
+          finish(false);
+        } else if (Date.now() < deadline) {
+          stabilizing = false;
+          tryRestore();
+        } else {
           finish(false);
         }
       }, waitMs);

@@ -310,6 +310,11 @@ export function createSupportDraftController(opts: {
     const action = pendingAction(record);
     if (!action) {
       // Nothing to send: the server already holds this text, or there is nothing to store.
+      // Clear any stale save error so an explicit retry() after a server-committed write
+      // never stays stuck in "error".
+      record.error = null;
+      record.errorScope = null;
+      record.failedAction = null;
       record.status = computeStatus(record);
       emit();
       return;
@@ -337,11 +342,10 @@ export function createSupportDraftController(opts: {
       } else {
         await opts.api(`/support/threads/${record.threadId}/draft`, { method: "DELETE" });
         record.savedBody = "";
-        // Retire only the cleanup generation that this DELETE covered; a newer send/discard
-        // stays armed, and a later failed GET on a re-opened thread cannot re-issue a stale DELETE.
-        if (record.dropDraftEpoch === startedDropEpoch) {
-          record.dropDraftEpoch = 0;
-        }
+        // The server is now confirmed empty. Retire cleanup intent so a concurrent discardDraft
+        // during DELETE cannot leave dropDraftEpoch armed and erase a newer cross-tab draft on a
+        // subsequent failed GET. Any new text typed during DELETE is persisted by reconcile().
+        record.dropDraftEpoch = 0;
         // If no further edits arrived while DELETE was in flight and the box is empty, reset
         // `edited` so a future re-open does not treat the empty box as a local deletion of a
         // newer draft saved in another tab.
@@ -452,6 +456,12 @@ export function createSupportDraftController(opts: {
         return;
       }
       if (record.edited && record.body.trim()) {
+        // Do not auto-replay a PUT that already failed when a subsequent GET also fails.
+        if (record.errorScope === "save" && record.failedAction === "put") {
+          record.status = computeStatus(record);
+          emit();
+          return;
+        }
         // The operator already typed new text before GET failed: persist it via PUT instead
         // of stranding the reply in load-error without saving.
         if (record.errorScope !== "save") {
@@ -568,11 +578,15 @@ export function createSupportDraftController(opts: {
       if (pendingAction(record)) scheduleSave(record);
       return;
     }
+    const serverAlreadyEmpty =
+      record.loadSettled && !record.saving && record.serverKnown && record.savedBody === "";
     if (sentRevision !== record.revision) {
       // The operator changed the box while the message was on its way. Still record cleanup
-      // intent for the sent draft so clearing the box before POST ack or before PUT confirmation
-      // cannot strand the old draft on the server if GET fails.
-      record.dropDraftEpoch = ++record.intentEpoch;
+      // intent for the sent draft (unless the server is already confirmed empty) so clearing the
+      // box before POST ack or before PUT confirmation cannot strand the old draft on the server.
+      if (!serverAlreadyEmpty) {
+        record.dropDraftEpoch = ++record.intentEpoch;
+      }
       if (!record.body.trim()) {
         clearTimer(record);
         record.edited = false;
@@ -591,7 +605,7 @@ export function createSupportDraftController(opts: {
     clearTimer(record);
     record.body = "";
     record.edited = false;
-    record.dropDraftEpoch = ++record.intentEpoch;
+    record.dropDraftEpoch = serverAlreadyEmpty ? 0 : ++record.intentEpoch;
     record.error = null;
     record.errorScope = null;
     record.failedAction = null;
@@ -604,10 +618,12 @@ export function createSupportDraftController(opts: {
   const discardDraft = (threadId: string) => {
     const record = records.get(threadId);
     if (!record) return;
+    const serverAlreadyEmpty =
+      record.loadSettled && !record.saving && record.serverKnown && record.savedBody === "";
     clearTimer(record);
     record.body = "";
     record.edited = false;
-    record.dropDraftEpoch = ++record.intentEpoch;
+    record.dropDraftEpoch = serverAlreadyEmpty ? 0 : ++record.intentEpoch;
     record.error = null;
     record.errorScope = null;
     record.failedAction = null;
