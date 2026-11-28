@@ -1,4 +1,47 @@
-# Финальное независимое ревью PR #4 — итоговый вердикт (2026-11-27)
+# Финальное независимое ревью PR #4 — итоговый вердикт (2026-11-27 / обновлено 2026-11-28)
+
+## Актуальный канонический статус (Волна 9 — закрытие возврата RR-01…RR-08)
+
+> **Статус:** Этот блок заменяет (supersedes) ранний вердикт по `4c5c201` / CI `45868444118` ниже. Исторические разделы §1–§8 сохранены для трассируемости и помечены как заменённые.
+
+| Поле | Значение |
+|---|---|
+| **Репозиторий / PR / ветка** | `filippmiller/laundry` · [PR #4](https://github.com/filippmiller/laundry/pull/4) · `feat/audit-remediation-wave6` |
+| **Исходный кандидат возврата** | `0a76b7edac8969524045164293189602dc3daa29` (tree `0855447dddcce411a349ef0de903dc11ec61946c`, CI `45996781919`) |
+| **Протестированный код-кандидат** | `8118b7eb9fc763ea456f1027ab173da2a66b3179` (tree `6667e27447811660733980920d154e00fd58de9f`) |
+| **CI run / attempt** | [`46086432899`](https://github.com/filippmiller/laundry/actions/runs/46086432899), attempt `1` (`quality`: `success`, `smoke`: `success`, `CodeRabbit`: `skipped` — не засчитывается как ревью) |
+| **CI checkout / tree-equivalence** | `0e7ed9b2fb9b7b7c8f79e203d45ad19de47c75de` (`refs/pull/4/merge`), `checkoutTree = 6667e27447811660733980920d154e00fd58de9f` **=== `HEAD^{tree}`** |
+| **CI artifact** | `ci-verification-receipts-46086432899-1` (id `15239666831`, `54 130` байт, `sha256:56d6f964079dea5553fbe32893a7d52a5b84501f236f26dc03cf7058627932b9`) |
+| **Фактические прогоны CI** | Vitest PostgreSQL **90 файлов / 626 тестов PASS** · Smoke **11/11** · Wave 7 **12/12** (`skipped=0`) · Wave 8 API **7/7** (`skipped=0`) · Wave 8 UI **8/8** (`skipped=0`, `servedMatchesDist=true`) · Mobile **16/16** (`0` `pageErrors`, активный rAF-метр) · Wave 9 mounted **32/32** (`0` failed) |
+| **Независимое ревью (EGM)** | Gate A (`egm-implementation-readiness`, Gemini 4 Hydrogen), Gate B (`egm-codebase-details`, Gemini 4 Hydrogen — APPROVE + cross-family Codex `gpt-6.2-sol` — 2 P1 + 6 P2 найдены и закрыты в `8118b7e`), финальный независимый аудит на Gemini 4 Neon |
+
+### Четыре контура готовности
+
+| Контур | Статус | Основание |
+|---|---|---|
+| **CODE** | **READY_FOR_RECHECK / PASS** | Все 8 замечаний `LND-W9-RR-01…RR-08` закрыты на `8118b7e`; принятые `RET-01/02/03/04/07` и `C-01` сохранены и перепроверены репродукторами и mounted-набором |
+| **CI** | **VERIFIED_PASS_TREE_EQUIVALENT** | Run `46086432899` attempt `1`: `quality=success`, `smoke=success`, `CodeRabbit=skipped` (не ревью), `checkoutTree === HEAD^{tree}` |
+| **DEPLOY** | **NOT_VERIFIED** | Образы API/worker, миграции/rollback и контейнерный запуск не входили в данный мандат |
+| **LIVE** | **NOT_VERIFIED** | Реальные SMS, платежи, фискальные провайдеры и production rollout не входили в данный мандат |
+
+### Диспозиция замечаний возврата (`LND-W9-RR-01…RR-08`)
+
+| ID | Приоритет | Статус | Исправление и доказательство |
+|---|---|---|---|
+| **RR-01** | P2 | **CLOSED** | `apps/web/src/workspaces/support-draft-autosave.ts` (`loadEpoch`, `writeCompletedEpoch`, `dropDraftEpoch`): поздний GET после DELETE не воскрешает отправленный ответ. Подтверждено `repro-stale-draft-get.mjs` (exit `0`) и CI `W9-R2-01-MOUNTED`. |
+| **RR-02** | P2 | **CLOSED** | `apps/web/src/workspaces/support-draft-autosave.ts`: no-op cleanup при пустом сервере завершает `dropDraftEpoch` и не удаляет новый черновик другой вкладки при последующем failed GET; незавершённый cleanup после initial failed GET сохранён. Подтверждено `repro-completed-empty-cleanup.mjs` (exit `0`) и CI `W9-R2-02-MOUNTED`. |
+| **RR-03** | P2 | **CLOSED** | `apps/web/src/components/Router.tsx` (`WorkspaceMountGate`) + `apps/web/src/App.tsx`: восстановление привязано к реально смонтированному целевому кабинету и переживает loading clamp. Подтверждено `actual-workspace-repro.mjs` (exit `0`, `y=800`, `errors=[]`) и CI `W9-R2-03-RAIL/BACK-FORWARD/RELOAD/NOOP/USER-INTERRUPT/REDUCED-MOTION`. |
+| **RR-04** | P2 | **CLOSED** | `scripts/verify-mobile-layout.mjs` + `scripts/mobile-layout-verdict.mjs`: `installActivityMeter` безопасно переносит `addInitScript` до появления `documentElement`/`body`, ведёт `ready`, `frames`, `openFrames`, `witnessChecks`, `witnessMissingFrames`, `observingDocumentElement`, `observingBody`, unrounded drift и `pageErrors`; `evaluateMobileResults` fail-closed. Подтверждено CI Mobile `16/16` (`0` `pageErrors`) и CI `W9-R2-04-HEALTHY/TRANSIENT-DRIFT/BROKEN-METER/PAGEERROR`. |
+| **RR-05** | P2 | **CLOSED** | `scripts/verify-mobile-layout.mjs` + `scripts/mobile-layout-verdict.mjs`: проверка `railRect` (`Number.isFinite`), `railVisibility`, 2-осевого `railViewportIntersection` и `railNavHitOk`. Подтверждено CI `W9-R2-04-MISSING-RAIL/HIDDEN/ZERO-HEIGHT/VERT-OFFSCREEN/COVERED-NAV`. |
+| **RR-06** | P3 | **CLOSED** | `scripts/verify-wave8-ui.mjs`: `servedHtmlSha256`, `servedAssetsSha256` (все 28 чанков), `bundleManifestSha256` (все 29 файлов `dist/web`) и `servedMatchesDist: true` сериализуются в JSON receipt (проверено в `verify-wave8-ui-2026-11-28T00-14-11-602Z.json` артефакта `46086432899`). |
+| **RR-07** | P3 | **CLOSED** | Обновлены канонический вердикт (`docs/reports/PR4_FINAL_VERDICT_2026-11-27.md`) и описание PR #4; исторические записи помечены как заменённые. |
+| **RR-08** | P3 | **CLOSED** | Возвратный ZIP собран с POSIX-разделителями `/` и `MANIFEST_SHA256.txt` (UTF-8 без BOM, LF), перепроверен штатной распаковкой в чистый каталог и сверкой SHA-256 без нормализации путей. |
+
+---
+
+## Исторический архив — SUPERSEDED (Волна 8 / ранняя Волна 9, `4c5c201` / CI `45868444118`)
+
+> **Примечание:** Разделы ниже относятся к более раннему прогону (`4c5c201` / `66dea1a`) и заменены актуальным статусом выше.
 
 **Репозиторий:** `filippmiller/laundry` · **Ветка:** `feat/audit-remediation-wave6` · **PR:** [#4](https://github.com/filippmiller/laundry/pull/4) ·
 **Кандидат повторной приёмки:** `646a72fd46566e2561e0b0217082c4ee3153b2a1` (tree `1a76fd9c48a0cbf772f4d424c67d69c6c2543195`) ·
