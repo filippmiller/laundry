@@ -84,51 +84,107 @@ const results = [];
  */
 function installActivityMeter() {
   const meter = { mutations: 0, resizes: 0, scrolls: 0 };
+  const status = {
+    ready: false,
+    error: null,
+    frames: 0,
+    openFrames: 0,
+    witnessChecks: 0,
+    witnessMissingFrames: 0,
+    observingDocumentElement: false,
+    observingBody: false,
+  };
   window.__activity = meter;
+  window.__activityMeter = status;
   window.__samples = [];
   window.__anchorBaselineTop = null;
   window.__anchorDrifts = [];
   window.__maxAnchorDriftWhileOpen = 0;
-  const observer = new MutationObserver(records => {
-    meter.mutations += records.length;
-  });
-  observer.observe(document, { childList: true, subtree: true, characterData: true });
-  const resize = new ResizeObserver(entries => {
-    meter.resizes += entries.length;
-  });
-  resize.observe(document.documentElement);
-  if (document.body) resize.observe(document.body);
-  window.addEventListener("scroll", () => {
-    meter.scrolls += 1;
-  }, { passive: true });
 
-  let lastY = window.scrollY;
-  const tick = () => {
-    const y = window.scrollY;
-    if (y !== lastY) {
-      window.__samples.push({ t: performance.now(), from: lastY, y, phase: window.__phase ?? null });
-      lastY = y;
-    }
-    const phase = window.__phase ?? null;
-    if (
-      window.__anchorBaselineTop !== null &&
-      (phase === "opening" || phase === "open" || phase === "wheel" || phase === "closing")
-    ) {
-      const anchor = document.querySelector("[data-mobile-probe-anchor]");
-      if (anchor) {
-        const top = Math.round(anchor.getBoundingClientRect().top);
-        const drift = Math.abs(top - window.__anchorBaselineTop);
-        if (drift > window.__maxAnchorDriftWhileOpen) {
-          window.__maxAnchorDriftWhileOpen = drift;
+  try {
+    window.addEventListener(
+      "scroll",
+      () => {
+        meter.scrolls += 1;
+      },
+      { passive: true },
+    );
+
+    let lastY = window.scrollY;
+    const tick = () => {
+      try {
+        status.frames += 1;
+        const y = window.scrollY;
+        if (y !== lastY) {
+          window.__samples.push({ t: performance.now(), from: lastY, y, phase: window.__phase ?? null });
+          lastY = y;
         }
-        if (drift > 2) {
-          window.__anchorDrifts.push({ t: performance.now(), phase, top, drift, y });
+        const phase = window.__phase ?? null;
+        if (phase === "opening" || phase === "open" || phase === "wheel" || phase === "closing") {
+          status.openFrames += 1;
+          if (window.__anchorBaselineTop !== null) {
+            const anchor = document.querySelector("[data-mobile-probe-anchor]");
+            if (anchor) {
+              status.witnessChecks += 1;
+              const rawTop = anchor.getBoundingClientRect().top;
+              const drift = Number(Math.abs(rawTop - window.__anchorBaselineTop).toFixed(2));
+              if (drift > window.__maxAnchorDriftWhileOpen) {
+                window.__maxAnchorDriftWhileOpen = drift;
+              }
+              if (drift > 2) {
+                window.__anchorDrifts.push({ t: performance.now(), phase, top: Math.round(rawTop), drift, y });
+              }
+            } else {
+              status.witnessMissingFrames += 1;
+            }
+          }
         }
+      } catch (err) {
+        status.error = err?.message ?? String(err);
       }
-    }
+      requestAnimationFrame(tick);
+    };
     requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
+    status.ready = true;
+
+    const resize =
+      typeof ResizeObserver === "function"
+        ? new ResizeObserver(entries => {
+            meter.resizes += entries.length;
+          })
+        : null;
+
+    const attachResizeObservers = () => {
+      if (!resize) return;
+      try {
+        if (!status.observingDocumentElement && document.documentElement instanceof Element) {
+          resize.observe(document.documentElement);
+          status.observingDocumentElement = true;
+        }
+        if (!status.observingBody && document.body instanceof Element) {
+          resize.observe(document.body);
+          status.observingBody = true;
+        }
+      } catch (err) {
+        status.error = err?.message ?? String(err);
+      }
+    };
+
+    const observer = new MutationObserver(records => {
+      meter.mutations += records.length;
+      if (!status.observingDocumentElement || !status.observingBody) {
+        attachResizeObservers();
+      }
+    });
+    observer.observe(document, { childList: true, subtree: true, characterData: true });
+    attachResizeObservers();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", attachResizeObservers, { once: true });
+    }
+  } catch (err) {
+    status.ready = false;
+    status.error = err?.message ?? String(err);
+  }
 }
 
 /**
@@ -561,10 +617,15 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
     window.__anchorBaselineTop = baseline;
     window.__anchorDrifts = [];
     window.__maxAnchorDriftWhileOpen = 0;
+    if (window.__activityMeter) {
+      window.__activityMeter.openFrames = 0;
+      window.__activityMeter.witnessChecks = 0;
+      window.__activityMeter.witnessMissingFrames = 0;
+    }
   }, anchorBefore.ok ? anchorBefore.top : null);
   const scrollAtClick = await page.evaluate(() => window.scrollY);
   const stickyBefore = await readSticky(page);
-  const sampleMark = await page.evaluate(() => window.__samples.length);
+  const sampleMark = await page.evaluate(() => (Array.isArray(window.__samples) ? window.__samples.length : 0));
   // The window of the measurement starts HERE, before the click: the jump the
   // opening of the drawer causes belongs to the drawer, so it has to be inside
   // the window. The mark is taken right after the phase is set — a mark taken
@@ -676,16 +737,42 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
   await setPhase(page, "closing");
   await page.keyboard.press("Escape");
   const closeWait = await waitForRailState(page, "false");
-  await setPhase(page, "closed");
   await waitForSettledPage(page, 600);
+  await setPhase(page, "closed");
   drawer.closeTimedOut = closeWait.timedOut;
   drawer.scrollAfterClose = await page.evaluate(() => window.scrollY);
   const driftSummary = await page.evaluate(() => ({
-    maxDrift: window.__maxAnchorDriftWhileOpen ?? 0,
-    drifts: (window.__anchorDrifts ?? []).slice(0, 20),
+    maxDrift: typeof window.__maxAnchorDriftWhileOpen === "number" ? window.__maxAnchorDriftWhileOpen : null,
+    drifts: Array.isArray(window.__anchorDrifts) ? window.__anchorDrifts.slice(0, 20) : [],
+    meterStatus: window.__activityMeter
+      ? {
+          ready: Boolean(window.__activityMeter.ready),
+          error: window.__activityMeter.error ?? null,
+          frames: typeof window.__activityMeter.frames === "number" ? window.__activityMeter.frames : 0,
+          openFrames: typeof window.__activityMeter.openFrames === "number" ? window.__activityMeter.openFrames : 0,
+          witnessChecks:
+            typeof window.__activityMeter.witnessChecks === "number" ? window.__activityMeter.witnessChecks : 0,
+          witnessMissingFrames:
+            typeof window.__activityMeter.witnessMissingFrames === "number"
+              ? window.__activityMeter.witnessMissingFrames
+              : 0,
+          observingDocumentElement: Boolean(window.__activityMeter.observingDocumentElement),
+          observingBody: Boolean(window.__activityMeter.observingBody),
+        }
+      : {
+          ready: false,
+          error: "activity meter not installed",
+          frames: 0,
+          openFrames: 0,
+          witnessChecks: 0,
+          witnessMissingFrames: 0,
+          observingDocumentElement: false,
+          observingBody: false,
+        },
   }));
   drawer.maxAnchorDriftWhileOpen = driftSummary.maxDrift;
   drawer.anchorDriftsWhileOpen = driftSummary.drifts;
+  drawer.meterStatus = driftSummary.meterStatus;
   const anchorClosed = await readAnchor(page, "the anchor element disappeared after the drawer was closed");
   drawer.anchorClosed = anchorClosed.ok ? { top: anchorClosed.top, height: anchorClosed.height } : null;
   // The reading position has to come back to the place the user left it.
@@ -704,7 +791,10 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
   //
   // The samples are read at the very end of the measurement, so the phases of
   // the wheel and of the closing are part of the picture too.
-  const moves = await page.evaluate(mark => window.__samples.slice(mark), sampleMark);
+  const moves = await page.evaluate(
+    mark => (Array.isArray(window.__samples) ? window.__samples.slice(mark) : []),
+    sampleMark,
+  );
   const movesByPhase = {};
   for (const move of moves) {
     const phase = move.phase ?? "before";
@@ -781,6 +871,8 @@ async function run() {
         });
         await context.addInitScript(installActivityMeter);
         const page = await context.newPage();
+        const pageErrors = [];
+        page.on("pageerror", err => pageErrors.push(err?.message ?? String(err)));
         await page.goto(BASE, { waitUntil: "domcontentloaded" });
         await loginAs(context, role);
         // A hash-only navigation does not reload the app, so the session has to
@@ -805,7 +897,18 @@ async function run() {
           drawer = await measureDrawer(page, { toggle, layoutWidth, tag });
         }
 
-        results.push({ tag, width, zoom, role, layoutWidth, target: target.kind, hasToggle, before, drawer });
+        results.push({
+          tag,
+          width,
+          zoom,
+          role,
+          layoutWidth,
+          target: target.kind,
+          hasToggle,
+          pageErrors,
+          before,
+          drawer,
+        });
 
         console.log(
           `--- ${tag} (layout ${layoutWidth}px) ---`,

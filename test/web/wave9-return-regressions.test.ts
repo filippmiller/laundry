@@ -599,6 +599,7 @@ describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden tog
     role: "customer",
     layoutWidth: 375,
     hasToggle: true,
+    pageErrors: [] as string[],
     before: {
       horizontalOverflow: false,
       tabCount: 0,
@@ -623,6 +624,16 @@ describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden tog
       anchorMovedByWheel: false,
       anchorHeldWhileOpen: true,
       maxAnchorDriftWhileOpen: 0,
+      meterStatus: {
+        ready: true,
+        error: null as string | null,
+        frames: 30,
+        openFrames: 12,
+        witnessChecks: 12,
+        witnessMissingFrames: 0,
+        observingDocumentElement: true,
+        observingBody: true,
+      },
       anchorRestored: true,
       stickyOpen: { topbar: { top: 0, bottom: 56 }, tabBar: null },
       topbarPinned: true,
@@ -702,6 +713,52 @@ describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden tog
     r.drawer.maxAnchorDriftWhileOpen = 24;
     const { failures } = evaluateMobileResults([r]);
     expect(failures.some(f => f.includes("shifted transiently by 24px"))).toBe(true);
+  });
+
+  it("LND-W9-RR-04: fails on pageerror, unready/errored meter, zero frames/witnessChecks, or NaN drift", () => {
+    const withPageErr = validMobileResult();
+    withPageErr.pageErrors = ["TypeError: Failed to execute 'observe' on 'ResizeObserver'"];
+    expect(evaluateMobileResults([withPageErr]).failures.some(f => f.includes("uncaught page error"))).toBe(true);
+
+    const unready = validMobileResult();
+    unready.drawer.meterStatus.ready = false;
+    expect(evaluateMobileResults([unready]).failures.some(f => f.includes("meter was not ready"))).toBe(true);
+
+    const zeroFrames = validMobileResult();
+    zeroFrames.drawer.meterStatus.openFrames = 0;
+    expect(evaluateMobileResults([zeroFrames]).failures.some(f => f.includes("0 frames while the drawer was open"))).toBe(true);
+
+    const zeroWitness = validMobileResult();
+    zeroWitness.drawer.meterStatus.witnessChecks = 0;
+    expect(evaluateMobileResults([zeroWitness]).failures.some(f => f.includes("0 witness checks"))).toBe(true);
+
+    const errored = validMobileResult();
+    errored.drawer.meterStatus.error = "ResizeObserver exploded";
+    expect(evaluateMobileResults([errored]).failures.some(f => f.includes("meter errored"))).toBe(true);
+
+    const nanDrift = validMobileResult();
+    nanDrift.drawer.maxAnchorDriftWhileOpen = Number.NaN;
+    expect(evaluateMobileResults([nanDrift]).failures.some(f => f.includes("maxAnchorDriftWhileOpen is missing or invalid"))).toBe(true);
+
+    const negDrift = validMobileResult();
+    negDrift.drawer.maxAnchorDriftWhileOpen = -1;
+    expect(evaluateMobileResults([negDrift]).failures.some(f => f.includes("maxAnchorDriftWhileOpen is missing or invalid"))).toBe(true);
+
+    const noResizeObs = validMobileResult();
+    noResizeObs.drawer.meterStatus.observingBody = false;
+    expect(evaluateMobileResults([noResizeObs]).failures.some(f => f.includes("did not attach ResizeObserver"))).toBe(true);
+
+    const witnessDropped = validMobileResult();
+    witnessDropped.drawer.meterStatus.witnessMissingFrames = 2;
+    expect(evaluateMobileResults([witnessDropped]).failures.some(f => f.includes("witness disappeared during 2"))).toBe(true);
+
+    const badPageErrors = validMobileResult();
+    (badPageErrors as unknown as { pageErrors: unknown }).pageErrors = "oops";
+    expect(evaluateMobileResults([badPageErrors]).failures.some(f => f.includes("malformed pageErrors"))).toBe(true);
+
+    const silentAnchorLost = validMobileResult();
+    (silentAnchorLost.drawer as unknown as { anchorLost: boolean }).anchorLost = true;
+    expect(evaluateMobileResults([silentAnchorLost]).failures.some(f => f.includes("missing or lost without diagnostic"))).toBe(true);
   });
 });
 

@@ -14,6 +14,11 @@ export function evaluateMobileResults(results) {
   const notes = [];
 
   for (const r of results) {
+    if (r.pageErrors !== undefined && !Array.isArray(r.pageErrors)) {
+      failures.push(`${r.tag}: malformed pageErrors evidence (${typeof r.pageErrors})`);
+    } else if (Array.isArray(r.pageErrors) && r.pageErrors.length > 0) {
+      failures.push(`${r.tag}: uncaught page error(s): ${r.pageErrors.join("; ")}`);
+    }
     if (r.before?.horizontalOverflow) {
       failures.push(`${r.tag}: the document scrolls horizontally`);
     }
@@ -49,8 +54,9 @@ export function evaluateMobileResults(results) {
       }
       if (
         !r.drawer.railRect ||
-        typeof r.drawer.railRect.width !== "number" ||
-        typeof r.drawer.railRect.height !== "number" ||
+        !Number.isFinite(r.drawer.railRect.width) ||
+        !Number.isFinite(r.drawer.railRect.height) ||
+        !Number.isFinite(r.drawer.railRect.left) ||
         r.drawer.railRect.width <= 0 ||
         r.drawer.railRect.height <= 0 ||
         r.drawer.railRect.left < -2 ||
@@ -64,7 +70,7 @@ export function evaluateMobileResults(results) {
         !r.drawer.railVisibility ||
         r.drawer.railVisibility.display === "none" ||
         r.drawer.railVisibility.visibility !== "visible" ||
-        typeof r.drawer.railVisibility.opacity !== "number" ||
+        !Number.isFinite(r.drawer.railVisibility.opacity) ||
         r.drawer.railVisibility.opacity <= 0 ||
         r.drawer.railVisibility.checkVisibility === false
       ) {
@@ -74,6 +80,9 @@ export function evaluateMobileResults(results) {
       }
       if (
         !r.drawer.railViewportIntersection ||
+        !Number.isFinite(r.drawer.railViewportIntersection.width) ||
+        !Number.isFinite(r.drawer.railViewportIntersection.height) ||
+        !Number.isFinite(r.drawer.railViewportIntersection.area) ||
         r.drawer.railViewportIntersection.width <= 0 ||
         r.drawer.railViewportIntersection.height <= 0 ||
         r.drawer.railViewportIntersection.area <= 0
@@ -104,13 +113,55 @@ export function evaluateMobileResults(results) {
       if (r.drawer.anchorHeldWhileOpen === false) {
         failures.push(`${r.tag}: the page behind the drawer jumps`);
       }
-      if (
-        typeof r.drawer.maxAnchorDriftWhileOpen === "number" &&
-        r.drawer.maxAnchorDriftWhileOpen > MAX_ANCHOR_DRIFT_PX
-      ) {
+      if (!r.drawer.meterStatus || r.drawer.meterStatus.ready !== true) {
+        failures.push(
+          `${r.tag}: activity meter was not ready (meterStatus=${JSON.stringify(r.drawer.meterStatus ?? null)})`,
+        );
+      } else {
+        if (r.drawer.meterStatus.error) {
+          failures.push(`${r.tag}: activity meter errored: ${r.drawer.meterStatus.error}`);
+        }
+        if (r.drawer.meterStatus.observingDocumentElement !== true || r.drawer.meterStatus.observingBody !== true) {
+          failures.push(
+            `${r.tag}: activity meter did not attach ResizeObserver to documentElement and body (docEl=${String(r.drawer.meterStatus.observingDocumentElement)}, body=${String(r.drawer.meterStatus.observingBody)})`,
+          );
+        }
+        if (!Number.isFinite(r.drawer.meterStatus.frames) || r.drawer.meterStatus.frames < 1) {
+          failures.push(`${r.tag}: activity meter measured 0 animation frames`);
+        }
+        if (!Number.isFinite(r.drawer.meterStatus.openFrames) || r.drawer.meterStatus.openFrames < 1) {
+          failures.push(`${r.tag}: activity meter measured 0 frames while the drawer was open`);
+        }
+        if (
+          !r.drawer.anchorMissing &&
+          !r.drawer.anchorLost &&
+          (!Number.isFinite(r.drawer.meterStatus.witnessChecks) || r.drawer.meterStatus.witnessChecks < 1)
+        ) {
+          failures.push(`${r.tag}: activity meter measured 0 witness checks while the drawer was open`);
+        }
+        if (
+          Number.isFinite(r.drawer.meterStatus.witnessMissingFrames) &&
+          r.drawer.meterStatus.witnessMissingFrames > 0
+        ) {
+          failures.push(
+            `${r.tag}: reading-line witness disappeared during ${r.drawer.meterStatus.witnessMissingFrames} animation frame(s)`,
+          );
+        }
+      }
+      if (!Number.isFinite(r.drawer.maxAnchorDriftWhileOpen) || r.drawer.maxAnchorDriftWhileOpen < 0) {
+        failures.push(
+          `${r.tag}: maxAnchorDriftWhileOpen is missing or invalid (${String(r.drawer.maxAnchorDriftWhileOpen)})`,
+        );
+      } else if (r.drawer.maxAnchorDriftWhileOpen > MAX_ANCHOR_DRIFT_PX) {
         failures.push(
           `${r.tag}: the reading line shifted transiently by ${r.drawer.maxAnchorDriftWhileOpen}px while the drawer was open`,
         );
+      }
+      if (
+        (r.drawer.anchorMissing || r.drawer.anchorLost) &&
+        (!Array.isArray(r.drawer.anchorProblems) || r.drawer.anchorProblems.length === 0)
+      ) {
+        failures.push(`${r.tag}: reading-line witness was missing or lost without diagnostic`);
       }
       if (r.drawer.anchorRestored === false) {
         failures.push(`${r.tag}: the scroll position is not restored`);

@@ -1036,14 +1036,27 @@ createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictM
   return outDir;
 }
 
-async function createMobileAppPage(browser, origin, { installMeter = false, dispatchDelayMs = 700, onDispatchRequested = null } = {}) {
+async function createMobileAppPage(
+  browser,
+  origin,
+  {
+    installMeter = false,
+    dispatchDelayMs = 700,
+    onDispatchRequested = null,
+    reducedMotion = "no-preference",
+    extraInitScript = null,
+  } = {},
+) {
   const context = await browser.newContext({
     viewport: { width: 375, height: 820 },
     locale: "ru-RU",
-    reducedMotion: "no-preference",
+    reducedMotion,
   });
   if (installMeter) {
     await context.addInitScript(installActivityMeter);
+  }
+  if (extraInitScript) {
+    await context.addInitScript(extraInitScript);
   }
   const page = await context.newPage();
   const pageErrors = [];
@@ -1243,14 +1256,55 @@ async function runMobileRestoreSuite(browser, appOrigin) {
       await s.context.close();
     }
   });
+
+  await runCheck("W9-R2-03-REDUCED-MOTION", "reduced motion preserves Dispatcher y=1500 restore with zero pageerrors", async () => {
+    const s = await createMobileAppPage(browser, appOrigin, {
+      dispatchDelayMs: 500,
+      reducedMotion: "reduce",
+    });
+    try {
+      await s.page.goto(`${appOrigin}/#/dispatcher`);
+      await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+      await s.page.waitForTimeout(850);
+      await s.page.evaluate(() => window.scrollTo({ top: 1500, behavior: "instant" }));
+      await s.page.waitForTimeout(150);
+      const seededDisp = await s.page.evaluate(() => window.scrollY);
+      assert.ok(Math.abs(seededDisp - 1500) <= 2, `reduced-motion Dispatcher failed to seed y=1500 (got ${seededDisp})`);
+      await s.selectWorkspaceViaDrawer("Финансы");
+      await s.page.getByRole("heading", { name: "Финансовый контур и сверка", exact: true }).waitFor();
+      await s.page.waitForTimeout(850);
+      await s.page.evaluate(() => window.scrollTo({ top: 900, behavior: "instant" }));
+      await s.page.waitForTimeout(150);
+      const seededFin = await s.page.evaluate(() => window.scrollY);
+      assert.ok(Math.abs(seededFin - 900) <= 2, `reduced-motion Finance failed to seed y=900 (got ${seededFin})`);
+      await s.selectWorkspaceViaDrawer("Диспетчерская");
+      await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+      await until(
+        async () => Math.abs((await s.page.evaluate(() => window.scrollY)) - 1500) <= 2,
+        "reduced-motion Dispatcher restore to y=1500",
+        6000,
+      );
+      await s.page.waitForTimeout(500);
+      const y = await s.page.evaluate(() => window.scrollY);
+      assert.ok(Math.abs(y - 1500) <= 2, `reduced-motion restore expected 1500, got ${y}`);
+      assert.deepEqual(s.pageErrors, []);
+      return `reducedMotion=reduce, restoredY=${y} (target 1500)`;
+    } finally {
+      await s.context.close();
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Suite E: Mobile Verifier Production Controls (R2-04)
+// Suite E: Mobile Verifier Production Controls (R2-04 / RR-04 / RR-05)
 // ---------------------------------------------------------------------------
 async function runMobileVerifierSuite(browser, appOrigin) {
-  const runMobileControl = async (tag, mutatePage) => {
-    const s = await createMobileAppPage(browser, appOrigin, { installMeter: true, dispatchDelayMs: 50 });
+  const runMobileControl = async (tag, mutatePage, { installMeter = true, extraInitScript = null } = {}) => {
+    const s = await createMobileAppPage(browser, appOrigin, {
+      installMeter,
+      dispatchDelayMs: 50,
+      extraInitScript,
+    });
     try {
       await s.page.goto(`${appOrigin}/#/dispatcher`, { waitUntil: "domcontentloaded" });
       await s.page.waitForSelector(".app-shell", { timeout: 10000 });
@@ -1272,49 +1326,157 @@ async function runMobileVerifierSuite(browser, appOrigin) {
         role: "platform_admin",
         layoutWidth: 375,
         hasToggle,
+        pageErrors: [...s.pageErrors],
         before,
         drawer,
       };
-      return evaluateMobileResults([measurement]);
+      return { verdict: evaluateMobileResults([measurement]), measurement };
     } finally {
       await s.context.close();
     }
   };
 
-  await runCheck("W9-R2-04-HEALTHY", "evaluateMobileResults passes healthy open drawer at 375x820", async () => {
-    const verdict = await runMobileControl("healthy", null);
+  await runCheck("W9-R2-04-HEALTHY", "evaluateMobileResults passes healthy open drawer at 375x820 with active meter", async () => {
+    const { verdict, measurement } = await runMobileControl("healthy", null);
     assert.equal(verdict.failures.length, 0, verdict.failures.join("; "));
-    return `failures=0, notes=${verdict.notes.length}`;
+    assert.deepEqual(measurement.pageErrors, [], `unexpected pageErrors: ${measurement.pageErrors.join("; ")}`);
+    assert.equal(measurement.drawer?.meterStatus?.ready, true, "expected meterStatus.ready === true");
+    assert.equal(measurement.drawer?.meterStatus?.observingDocumentElement, true, "expected observingDocumentElement === true");
+    assert.equal(measurement.drawer?.meterStatus?.observingBody, true, "expected observingBody === true");
+    assert.ok((measurement.drawer?.meterStatus?.frames ?? 0) > 0, "expected meterStatus.frames > 0");
+    assert.ok((measurement.drawer?.meterStatus?.openFrames ?? 0) > 0, "expected meterStatus.openFrames > 0");
+    assert.ok((measurement.drawer?.meterStatus?.witnessChecks ?? 0) > 0, "expected meterStatus.witnessChecks > 0");
+    assert.equal(measurement.drawer?.meterStatus?.witnessMissingFrames ?? 0, 0, "expected witnessMissingFrames === 0");
+    return `failures=0, notes=${verdict.notes.length}, frames=${measurement.drawer.meterStatus.frames}, openFrames=${measurement.drawer.meterStatus.openFrames}, witnessChecks=${measurement.drawer.meterStatus.witnessChecks}`;
+  });
+
+  await runCheck("W9-R2-04-TRANSIENT-DRIFT", "normal addInitScript meter detects transient 24px shift with return as FAIL", async () => {
+    const { verdict, measurement } = await runMobileControl("transient-drift", async page => {
+      await page.evaluate(() => {
+        const shell = document.querySelector(".app-shell");
+        if (!shell) throw new Error("missing .app-shell");
+        let triggered = false;
+        const obs = new MutationObserver(() => {
+          if (triggered || shell.getAttribute("data-rail-open") !== "true") return;
+          const anchor = document.querySelector("[data-mobile-probe-anchor]");
+          if (!anchor || !(anchor instanceof window.HTMLElement)) return;
+          triggered = true;
+          const prevDisplay = anchor.style.display;
+          const prevTransform = anchor.style.transform;
+          if (window.getComputedStyle(anchor).display === "inline") {
+            anchor.style.display = "inline-block";
+          }
+          anchor.style.transform = "translateY(24px)";
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setTimeout(() => {
+                anchor.style.transform = prevTransform;
+                anchor.style.display = prevDisplay;
+              }, 220);
+            });
+          });
+          obs.disconnect();
+        });
+        obs.observe(shell, { attributes: true, attributeFilter: ["data-rail-open"] });
+      });
+    });
+    assert.deepEqual(measurement.pageErrors, [], `unexpected pageErrors: ${measurement.pageErrors.join("; ")}`);
+    assert.equal(measurement.drawer?.anchorHeldWhileOpen, true, "expected transient shift to recover before settled read");
+    assert.ok(
+      (measurement.drawer?.maxAnchorDriftWhileOpen ?? 0) >= 24,
+      `expected maxAnchorDriftWhileOpen >= 24, got ${measurement.drawer?.maxAnchorDriftWhileOpen}`,
+    );
+    assert.ok(
+      verdict.failures.some(f => f.includes("shifted transiently")),
+      `expected transient shift failure, got ${JSON.stringify(verdict.failures)}`,
+    );
+    return `maxDrift=${measurement.drawer.maxAnchorDriftWhileOpen}px, anchorHeldWhileOpen=true, failures=${JSON.stringify(verdict.failures)}`;
+  });
+
+  await runCheck("W9-R2-04-BROKEN-METER", "evaluateMobileResults fails when activity meter is missing or unready", async () => {
+    const { verdict } = await runMobileControl("broken-meter", null, { installMeter: false });
+    assert.ok(
+      verdict.failures.some(f => f.includes("meter was not ready")),
+      `expected meter failure, got ${JSON.stringify(verdict.failures)}`,
+    );
+    return `failures=${JSON.stringify(verdict.failures)}`;
+  });
+
+  await runCheck("W9-R2-04-PAGEERROR", "evaluateMobileResults fails on uncaught pageerror during startup", async () => {
+    const { verdict } = await runMobileControl("pageerror", null, {
+      extraInitScript: () => {
+        setTimeout(() => {
+          throw new Error("injected mobile probe pageerror");
+        }, 0);
+      },
+    });
+    assert.ok(
+      verdict.failures.some(
+        f => f.includes("uncaught page error") && f.includes("injected mobile probe pageerror"),
+      ),
+      `expected injected pageerror failure, got ${JSON.stringify(verdict.failures)}`,
+    );
+    return `failures=${JSON.stringify(verdict.failures)}`;
+  });
+
+  await runCheck("W9-R2-04-MISSING-RAIL", "evaluateMobileResults rejects missing .rail DOM node", async () => {
+    const { verdict, measurement } = await runMobileControl("missing-rail", async page => {
+      await page.evaluate(() => {
+        document.querySelector(".rail")?.remove();
+      });
+    });
+    assert.deepEqual(measurement.pageErrors, []);
+    assert.equal(measurement.drawer?.meterStatus?.ready, true);
+    assert.ok(
+      verdict.failures.some(f => f.includes("railRect=null") || f.includes("not visible")),
+      `expected missing rail failure, got ${JSON.stringify(verdict.failures)}`,
+    );
+    return `failures=${JSON.stringify(verdict.failures)}`;
   });
 
   await runCheck("W9-R2-04-HIDDEN", "evaluateMobileResults rejects visibility:hidden .rail", async () => {
-    const verdict = await runMobileControl("hidden", async page => {
+    const { verdict, measurement } = await runMobileControl("hidden", async page => {
       await page.addStyleTag({ content: ".rail { visibility: hidden !important; }" });
     });
-    assert.ok(verdict.failures.length > 0, "expected failures for hidden .rail");
+    assert.deepEqual(measurement.pageErrors, []);
+    assert.equal(measurement.drawer?.meterStatus?.ready, true);
+    assert.ok(
+      verdict.failures.some(f => f.includes("not visible")),
+      `expected visibility failure, got ${JSON.stringify(verdict.failures)}`,
+    );
     return `failures=${JSON.stringify(verdict.failures)}`;
   });
 
   await runCheck("W9-R2-04-ZERO-HEIGHT", "evaluateMobileResults rejects zero-height collapsed .rail", async () => {
-    const verdict = await runMobileControl("zero-height", async page => {
+    const { verdict, measurement } = await runMobileControl("zero-height", async page => {
       await page.addStyleTag({
         content: ".rail { height: 0 !important; min-height: 0 !important; padding: 0 !important; border: 0 !important; overflow: hidden !important; }",
       });
     });
-    assert.ok(verdict.failures.length > 0, "expected failures for zero-height .rail");
+    assert.deepEqual(measurement.pageErrors, []);
+    assert.equal(measurement.drawer?.meterStatus?.ready, true);
+    assert.ok(
+      verdict.failures.some(f => f.includes("collapsed")),
+      `expected collapsed failure, got ${JSON.stringify(verdict.failures)}`,
+    );
     return `failures=${JSON.stringify(verdict.failures)}`;
   });
 
   await runCheck("W9-R2-04-VERT-OFFSCREEN", "evaluateMobileResults rejects vertically offscreen .rail", async () => {
-    const verdict = await runMobileControl("vert-offscreen", async page => {
+    const { verdict, measurement } = await runMobileControl("vert-offscreen", async page => {
       await page.addStyleTag({ content: ".rail { top: -2000px !important; bottom: auto !important; }" });
     });
-    assert.ok(verdict.failures.length > 0, "expected failures for vertically offscreen .rail");
+    assert.deepEqual(measurement.pageErrors, []);
+    assert.equal(measurement.drawer?.meterStatus?.ready, true);
+    assert.ok(
+      verdict.failures.some(f => f.includes("no visible area")),
+      `expected offscreen failure, got ${JSON.stringify(verdict.failures)}`,
+    );
     return `failures=${JSON.stringify(verdict.failures)}`;
   });
 
   await runCheck("W9-R2-04-COVERED-NAV", "evaluateMobileResults rejects pointer-blocking overlay covering .rail__item", async () => {
-    const verdict = await runMobileControl("covered-nav", async page => {
+    const { verdict, measurement } = await runMobileControl("covered-nav", async page => {
       await page.evaluate(() => {
         const rail = document.querySelector(".rail");
         if (!rail) throw new Error("missing .rail");
@@ -1325,7 +1487,12 @@ async function runMobileVerifierSuite(browser, appOrigin) {
         rail.appendChild(overlay);
       });
     });
-    assert.ok(verdict.failures.length > 0, "expected failures for covered .rail__item");
+    assert.deepEqual(measurement.pageErrors, []);
+    assert.equal(measurement.drawer?.meterStatus?.ready, true);
+    assert.ok(
+      verdict.failures.some(f => f.includes("reachable")),
+      `expected covered nav failure, got ${JSON.stringify(verdict.failures)}`,
+    );
     return `failures=${JSON.stringify(verdict.failures)}`;
   });
 }
