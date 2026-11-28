@@ -3,6 +3,7 @@ import {
   SCROLL_RESTORE_ATTEMPTS,
   SCROLL_RESTORE_TOLERANCE_PX,
   decideScrollRestore,
+  shouldKeyCancelScrollRestore,
 } from "../../apps/web/src/scroll-restoration.js";
 
 /**
@@ -154,5 +155,31 @@ describe("the restoration of the remembered reading position", () => {
   it("checks often enough for a workspace that loads slowly", () => {
     // 25 checks every 120 ms: the restoration has a chance before the reader gives up waiting.
     expect(SCROLL_RESTORE_ATTEMPTS * 120).toBeGreaterThanOrEqual(2500);
+  });
+});
+
+describe("LND-W9-R3-04: keyboard semantics for cancelling pending scroll restoration", () => {
+  it("does NOT cancel restoration when Space activates a button or checkbox control (e.g. .rail-toggle)", () => {
+    expect(shouldKeyCancelScrollRestore({ key: " ", spaceActivatedControl: true })).toBe(false);
+    expect(shouldKeyCancelScrollRestore({ key: "Spacebar", spaceActivatedControl: true })).toBe(false);
+  });
+
+  it("DOES cancel restoration on Space, Shift+Space, PageUp/PageDown, and Ctrl+Home/Ctrl+End", () => {
+    expect(shouldKeyCancelScrollRestore({ key: " ", spaceActivatedControl: false })).toBe(true);
+    expect(shouldKeyCancelScrollRestore({ key: " ", shiftKey: true, spaceActivatedControl: false })).toBe(true);
+    expect(shouldKeyCancelScrollRestore({ key: "PageDown" })).toBe(true);
+    expect(shouldKeyCancelScrollRestore({ key: "PageUp" })).toBe(true);
+    expect(shouldKeyCancelScrollRestore({ key: "Home", ctrlKey: true })).toBe(true);
+    expect(shouldKeyCancelScrollRestore({ key: "End", ctrlKey: true })).toBe(true);
+  });
+
+  it("ignores defaultPrevented, modifier shortcuts, overlays, open drawer, editable targets, and arrow widgets", () => {
+    expect(shouldKeyCancelScrollRestore({ key: " ", defaultPrevented: true })).toBe(false);
+    expect(shouldKeyCancelScrollRestore({ key: "ArrowDown", ctrlKey: true })).toBe(false);
+    expect(shouldKeyCancelScrollRestore({ key: "PageDown", insideOverlay: true })).toBe(false);
+    expect(shouldKeyCancelScrollRestore({ key: "PageDown", drawerOpen: true })).toBe(false);
+    expect(shouldKeyCancelScrollRestore({ key: " ", editableTarget: true })).toBe(false);
+    expect(shouldKeyCancelScrollRestore({ key: "ArrowDown", arrowWidgetControl: true })).toBe(false);
+    expect(shouldKeyCancelScrollRestore({ key: "PageDown", arrowWidgetControl: true })).toBe(true);
   });
 });

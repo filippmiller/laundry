@@ -8,6 +8,15 @@
  */
 
 export const MAX_ANCHOR_DRIFT_PX = 2;
+/** Minimum fraction of reference animation frames the activity meter must observe while open. */
+export const MIN_METER_FRAME_COVERAGE = 0.85;
+/** Maximum reference rAF frames allowed after the meter's last tick before flagging a stall. */
+export const MAX_METER_TAIL_GAP_FRAMES = 2;
+/** Maximum consecutive reference rAF frames missed mid-window before flagging a transient stall. */
+export const MAX_METER_MISSED_STREAK = 4;
+/** Phases that must each observe at least one animation frame while the drawer is open/closing. */
+const REQUIRED_ACTIVE_PHASES = ["open", "wheel", "closing"];
+const ALL_OBSERVED_PHASES = ["opening", "open", "wheel", "closing"];
 
 export function evaluateMobileResults(results) {
   const failures = [];
@@ -146,6 +155,94 @@ export function evaluateMobileResults(results) {
           failures.push(
             `${r.tag}: reading-line witness disappeared during ${r.drawer.meterStatus.witnessMissingFrames} animation frame(s)`,
           );
+        }
+        // Continuous observation checks against independent reference rAF loop (LND-W9-R3-05).
+        const ms = r.drawer.meterStatus;
+        if (
+          !Number.isFinite(ms.refOpenFrames) ||
+          ms.refOpenFrames < 3 ||
+          !Number.isFinite(ms.tailGapRefFrames) ||
+          ms.tailGapRefFrames < 0 ||
+          !Number.isFinite(ms.maxMissedStreak) ||
+          ms.maxMissedStreak < 0 ||
+          !ms.phaseFrames ||
+          !ms.phaseRefFrames ||
+          !ms.phaseWitnessChecks
+        ) {
+          failures.push(
+            `${r.tag}: activity meter continuity evidence is missing or invalid (refOpenFrames=${String(ms.refOpenFrames)}, tailGapRefFrames=${String(ms.tailGapRefFrames)}, maxMissedStreak=${String(ms.maxMissedStreak)})`,
+          );
+        } else {
+          if (ms.openFrames > ms.refOpenFrames + 2) {
+            failures.push(
+              `${r.tag}: activity meter frame count is out of order (openFrames=${ms.openFrames} > refOpenFrames=${ms.refOpenFrames})`,
+            );
+          }
+          if (ms.tailGapRefFrames > MAX_METER_TAIL_GAP_FRAMES) {
+            failures.push(
+              `${r.tag}: activity meter stalled before the measurement window closed (tailGapRefFrames=${ms.tailGapRefFrames} > ${MAX_METER_TAIL_GAP_FRAMES})`,
+            );
+          }
+          if (Number.isFinite(ms.maxMissedStreak) && ms.maxMissedStreak > MAX_METER_MISSED_STREAK) {
+            failures.push(
+              `${r.tag}: activity meter had an in-window stall streak of ${ms.maxMissedStreak} consecutive frames (max ${MAX_METER_MISSED_STREAK})`,
+            );
+          }
+          const minRequiredFrames = Math.max(1, Math.floor(ms.refOpenFrames * MIN_METER_FRAME_COVERAGE));
+          if (ms.openFrames < minRequiredFrames) {
+            failures.push(
+              `${r.tag}: activity meter missed animation frames while drawer was open (openFrames=${ms.openFrames}/${ms.refOpenFrames}, required>=${minRequiredFrames})`,
+            );
+          }
+          if (!r.drawer.anchorMissing && !r.drawer.anchorLost && ms.witnessChecks < minRequiredFrames) {
+            failures.push(
+              `${r.tag}: activity meter missed witness checks while drawer was open (witnessChecks=${ms.witnessChecks}/${ms.refOpenFrames}, required>=${minRequiredFrames})`,
+            );
+          }
+          for (const phase of ALL_OBSERVED_PHASES) {
+            const refCount = ms.phaseRefFrames[phase];
+            const meterCount = ms.phaseFrames[phase];
+            const witnessCount = ms.phaseWitnessChecks[phase];
+            const requiredPhase = REQUIRED_ACTIVE_PHASES.includes(phase);
+            if (requiredPhase && (!Number.isFinite(refCount) || refCount < 1)) {
+              failures.push(
+                `${r.tag}: insufficient rendering opportunities in phase "${phase}" (refFrames=${String(refCount)})`,
+              );
+              continue;
+            }
+            if (!Number.isFinite(refCount) || refCount < 1) continue;
+            if (!Number.isFinite(meterCount) || meterCount < 1) {
+              failures.push(
+                `${r.tag}: activity meter observed 0 frames during phase "${phase}" (refFrames=${refCount})`,
+              );
+              continue;
+            }
+            if (refCount >= 3) {
+              const minPhaseFrames = Math.max(1, Math.floor(refCount * MIN_METER_FRAME_COVERAGE));
+              if (meterCount < minPhaseFrames) {
+                failures.push(
+                  `${r.tag}: activity meter missed frames during phase "${phase}" (${meterCount}/${refCount}, required>=${minPhaseFrames})`,
+                );
+              }
+              if (
+                !r.drawer.anchorMissing &&
+                !r.drawer.anchorLost &&
+                (!Number.isFinite(witnessCount) || witnessCount < minPhaseFrames)
+              ) {
+                failures.push(
+                  `${r.tag}: activity meter missed witness checks during phase "${phase}" (${String(witnessCount)}/${refCount}, required>=${minPhaseFrames})`,
+                );
+              }
+            } else if (
+              !r.drawer.anchorMissing &&
+              !r.drawer.anchorLost &&
+              (!Number.isFinite(witnessCount) || witnessCount < 1)
+            ) {
+              failures.push(
+                `${r.tag}: activity meter observed 0 witness checks during phase "${phase}" (refFrames=${refCount})`,
+              );
+            }
+          }
         }
       }
       if (!Number.isFinite(r.drawer.maxAnchorDriftWhileOpen) || r.drawer.maxAnchorDriftWhileOpen < 0) {

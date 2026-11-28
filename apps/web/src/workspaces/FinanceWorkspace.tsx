@@ -225,6 +225,7 @@ export function FinanceWorkspace({
   const [reconciliation, setReconciliation] = useState<ReconciliationResponse>({});
   const [drift, setDrift] = useState<DriftItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [initialLoaded, setInitialLoaded] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [loadingMoreBuckets, setLoadingMoreBuckets] = useState<BucketBusyMap>(EMPTY_BUCKET_BUSY);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -437,7 +438,10 @@ export function FinanceWorkspace({
       if (!generation.isCurrent(token)) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      if (generation.isCurrent(token)) setLoading(false);
+      if (generation.isCurrent(token)) {
+        setLoading(false);
+        setInitialLoaded(true);
+      }
     }
   }, [refreshChargebacks, notify, generation, bucketGuard]);
 
@@ -825,7 +829,7 @@ export function FinanceWorkspace({
   const driftCount = drift.length;
 
   return (
-    <div className="workspace-grid">
+    <div className="workspace-grid" data-layout-pending={!initialLoaded || chargebacksLoading ? "true" : undefined}>
       <div className="alert-banner">
         <AlertTriangle size={18} aria-hidden="true" />
         <span>Платёжный и фискальный шлюзы работают в демонстрационном режиме (54-ФЗ не подключён)</span>

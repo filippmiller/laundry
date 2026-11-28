@@ -356,6 +356,167 @@ createRoot(document.getElementById("root")).render(<SupportClaimsWorkspace notif
         await context.close();
       }
     });
+
+    await runCheck("W9-R3-01-MOUNTED", "two-tab mounted pending-empty send/discard retires cleanup intent and preserves Tab B draft on later 502", async () => {
+      const summaries = [];
+      for (const cleanup of ["send", "discard"]) {
+        const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+        const a = await context.newPage();
+        const b = await context.newPage();
+        const pageErrors = [];
+        for (const p of [a, b]) p.on("pageerror", e => pageErrors.push(e.message));
+        const firstGet = defer();
+        const postActionRefresh = defer();
+        let serverDraft = null;
+        let aGets = 0;
+        let aLists = 0;
+        let aDeletes = 0;
+        const thread = { id: "thread-A", subject: "Audit test thread A", state: "open", createdAt: "2026-11-28T00:00:00Z" };
+        const respond = (route, data, status = 200) =>
+          route.fulfill({ status, contentType: "application/json", body: JSON.stringify(data) });
+        const listResponse = () => ({ items: [{ ...thread }], totalCount: 1, nextCursor: null, hasMore: false });
+        try {
+          for (const [tab, page] of [["A", a], ["B", b]]) {
+            await page.route("**/api/v1/**", async route => {
+              const req = route.request();
+              const pathname = new URL(req.url()).pathname;
+              const method = req.method();
+              const body = req.postData() ? req.postDataJSON() : null;
+              if (pathname === "/api/v1/support/threads") {
+                if (tab === "A" && ++aLists > 1) { postActionRefresh.resolve(route); return; }
+                return respond(route, listResponse());
+              }
+              if (pathname === "/api/v1/support/threads/thread-A") {
+                return respond(route, { thread: { ...thread }, messages: [], hasEarlier: false, totalMessages: 0 });
+              }
+              if (pathname === "/api/v1/support/threads/thread-A/messages") return respond(route, { id: "sent-1" });
+              if (pathname === "/api/v1/support/threads/thread-A/close") { thread.state = "closed"; serverDraft = null; return respond(route, { state: "closed" }); }
+              if (pathname === "/api/v1/support/threads/thread-A/reopen") { thread.state = "open"; return respond(route, { state: "open" }); }
+              if (pathname === "/api/v1/support/threads/thread-A/draft") {
+                if (method === "GET") {
+                  if (tab === "A") {
+                    aGets += 1;
+                    if (aGets === 1) { firstGet.resolve(route); return; }
+                    if (aGets > 1) return respond(route, { error: { code: "AUDIT_502" } }, 502);
+                  }
+                  return respond(route, serverDraft === null ? null : { body: serverDraft });
+                }
+                if (method === "PUT") { serverDraft = body.body; return respond(route, null); }
+                if (method === "DELETE") { if (tab === "A") aDeletes += 1; serverDraft = null; return respond(route, null); }
+              }
+              return respond(route, { items: [], totalCount: 0, hasMore: false, nextCursor: null });
+            });
+          }
+          await a.goto(`${server.origin}/?section=threads`);
+          await a.getByRole("button", { name: /Audit test thread A/ }).click();
+          const boxA = a.getByRole("textbox", { name: "Ответ клиенту" });
+          await boxA.waitFor({ state: "visible" });
+          await firstGet.promise;
+          if (cleanup === "send") {
+            await boxA.fill("sent during pending initial GET");
+            await a.getByRole("button", { name: "Отправить", exact: true }).click();
+          } else {
+            await a.getByRole("textbox", { name: "Причина закрытия обращения" }).fill("Resolved");
+            await a.getByRole("button", { name: "Закрыть обращение", exact: true }).click();
+          }
+          await postActionRefresh.promise;
+          await respond(await firstGet.promise, null);
+          await until(async () => (await boxA.inputValue()) === "", `${cleanup}: empty reply`);
+          assert.equal(aDeletes, 0, `${cleanup}: no-op cleanup must not issue DELETE`);
+
+          await b.goto(`${server.origin}/?section=threads`);
+          await b.getByRole("button", { name: /Audit test thread A/ }).click();
+          if (cleanup === "discard") {
+            await b.getByRole("button", { name: "Переоткрыть обращение", exact: true }).click();
+          }
+          const boxB = b.getByRole("textbox", { name: "Ответ клиенту" });
+          await boxB.waitFor({ state: "visible" });
+          const newer = `Fresh same-author Tab B draft (${cleanup})`;
+          await boxB.fill(newer);
+          await until(() => serverDraft === newer, `${cleanup}: Tab B PUT`);
+          await b.getByText("Черновик сохранён", { exact: true }).waitFor({ state: "visible" });
+
+          await respond(await postActionRefresh.promise, listResponse());
+          await until(() => aGets === 2, `${cleanup}: Tab A refresh GET`);
+          await a.waitForTimeout(1000);
+          assert.equal(serverDraft, newer, `${cleanup}: Tab B draft must survive Tab A failed refresh`);
+          assert.equal(aDeletes, 0, `${cleanup}: Tab A must not send spurious DELETE`);
+          assert.equal(await a.getByRole("button", { name: "Повторить загрузку черновика" }).isVisible(), true);
+          assert.deepEqual(pageErrors, []);
+          summaries.push(`${cleanup}=ok`);
+        } finally {
+          await context.close();
+        }
+      }
+      return summaries.join(", ");
+    });
+
+    await runCheck("W9-R3-02-MOUNTED", "two-tab mounted failed DELETE + failed reopen GET + edit/clear preserves Tab B draft", async () => {
+      const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const a = await context.newPage();
+      const b = await context.newPage();
+      const pageErrors = [];
+      for (const p of [a, b]) p.on("pageerror", e => pageErrors.push(e.message));
+      const thread = { id: "thread-A", subject: "Audit test thread A", state: "open", createdAt: "2026-11-28T00:00:00Z" };
+      let serverDraft = "OLD SERVER DRAFT";
+      let aGets = 0;
+      let aDeletes = 0;
+      const respond = (route, data, status = 200) =>
+        route.fulfill({ status, contentType: "application/json", body: JSON.stringify(data) });
+      try {
+        for (const [tab, page] of [["A", a], ["B", b]]) {
+          await page.route("**/api/v1/**", async route => {
+            const req = route.request();
+            const pathname = new URL(req.url()).pathname;
+            const method = req.method();
+            const body = req.postData() ? req.postDataJSON() : null;
+            if (pathname === "/api/v1/support/threads") return respond(route, { items: [thread], totalCount: 1, nextCursor: null, hasMore: false });
+            if (pathname === "/api/v1/support/threads/thread-A") return respond(route, { thread, messages: [], hasEarlier: false, totalMessages: 0 });
+            if (pathname === "/api/v1/support/threads/thread-A/draft") {
+              if (method === "GET") {
+                if (tab === "A" && ++aGets > 1) return respond(route, { error: { code: "GET_502" } }, 502);
+                return respond(route, serverDraft === null ? null : { body: serverDraft });
+              }
+              if (method === "PUT") { serverDraft = body.body; return respond(route, null); }
+              if (method === "DELETE") {
+                if (tab === "A" && ++aDeletes === 1) return respond(route, { error: { code: "DELETE_500" } }, 500);
+                serverDraft = null;
+                return respond(route, null);
+              }
+            }
+            return respond(route, { items: [], totalCount: 0, hasMore: false, nextCursor: null });
+          });
+        }
+        await a.goto(`${server.origin}/?section=threads`);
+        await a.getByRole("button", { name: /Audit test thread A/ }).click();
+        const boxA = a.getByRole("textbox", { name: "Ответ клиенту" });
+        await until(async () => (await boxA.inputValue()) === "OLD SERVER DRAFT", "Tab A old draft");
+        await boxA.fill("");
+        await until(() => aDeletes === 1, "Tab A first failed DELETE");
+        await a.getByText("Не сохранено", { exact: true }).waitFor({ state: "visible" });
+
+        await b.goto(`${server.origin}/?section=threads`);
+        await b.getByRole("button", { name: /Audit test thread A/ }).click();
+        const boxB = b.getByRole("textbox", { name: "Ответ клиенту" });
+        await until(async () => (await boxB.inputValue()) === "OLD SERVER DRAFT", "Tab B old draft");
+        const fresh = "NEW SAME-AUTHOR DRAFT FROM TAB B";
+        await boxB.fill(fresh);
+        await until(() => serverDraft === fresh, "Tab B PUT");
+        await b.getByText("Черновик сохранён", { exact: true }).waitFor({ state: "visible" });
+
+        await a.getByRole("button", { name: /Audit test thread A/ }).click();
+        await a.getByRole("button", { name: "Повторить загрузку черновика" }).waitFor({ state: "visible" });
+        await boxA.fill("temporary");
+        await boxA.fill("");
+        await a.waitForTimeout(1100);
+        assert.equal(aDeletes, 1, `expected exactly 1 DELETE, got ${aDeletes}`);
+        assert.equal(serverDraft, fresh, "Tab B fresh draft must not be deleted");
+        assert.deepEqual(pageErrors, []);
+        return `aDeletes=${aDeletes}, serverDraft preserved`;
+      } finally {
+        await context.close();
+      }
+    });
   } finally {
     await server.close();
   }
@@ -1042,6 +1203,8 @@ async function createMobileAppPage(
   {
     installMeter = false,
     dispatchDelayMs = 700,
+    analyticsDelayMs = 0,
+    chunkDelayMs = 0,
     onDispatchRequested = null,
     reducedMotion = "no-preference",
     extraInitScript = null,
@@ -1063,11 +1226,21 @@ async function createMobileAppPage(
   page.on("pageerror", e => pageErrors.push(e.message));
   page.setDefaultTimeout(10000);
 
+  if (chunkDelayMs > 0) {
+    await page.route("**/*DispatcherWorkspace*.js", async route => {
+      await sleep(chunkDelayMs);
+      await route.continue();
+    });
+  }
+
   await page.route("**/api/v1/**", async route => {
     const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
     if (path === "/dispatch/overview") {
       onDispatchRequested?.();
       if (dispatchDelayMs > 0) await sleep(dispatchDelayMs);
+    }
+    if (path === "/finance/analytics" && analyticsDelayMs > 0) {
+      await sleep(analyticsDelayMs);
     }
     await route.fulfill({
       status: 200,
@@ -1293,6 +1466,165 @@ async function runMobileRestoreSuite(browser, appOrigin) {
       await s.context.close();
     }
   });
+
+  await runCheck("W9-R3-03-FINANCE-DELAY", "Finance900 -> Dispatcher1500 -> Finance with 150/1100/1800ms analytics delay preserves reading witness and offset", async () => {
+    const readWitness = page =>
+      page.evaluate(() => {
+        const hit = document.elementFromPoint(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight / 2));
+        return {
+          y: window.scrollY,
+          text: hit?.textContent?.replace(/\s+/g, " ").trim().slice(0, 120) ?? "",
+          historyFinance: window.history.state?.scrollOffsets?.finance ?? null,
+          status: document.getElementById("workspace")?.getAttribute("data-scroll-restore-status") ?? null,
+        };
+      });
+    const outcomes = [];
+    for (const delay of [150, 1100, 1800]) {
+      const s = await createMobileAppPage(browser, appOrigin, { dispatchDelayMs: 50, analyticsDelayMs: delay });
+      try {
+        await s.page.goto(`${appOrigin}/#/finance`);
+        await s.page.getByRole("heading", { name: "Финансовый контур и сверка", exact: true }).waitFor();
+        await s.page.waitForTimeout(delay + 400);
+        await s.page.evaluate(() => window.scrollTo({ top: 900, behavior: "instant" }));
+        await s.page.waitForTimeout(150);
+        const initial = await readWitness(s.page);
+        assert.ok(Math.abs(initial.y - 900) <= 2, `seed finance 900 failed: ${JSON.stringify(initial)}`);
+
+        await s.selectWorkspaceViaDrawer("Диспетчерская");
+        await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+        await s.page.waitForTimeout(400);
+        await s.page.evaluate(() => window.scrollTo({ top: 1500, behavior: "instant" }));
+        await s.page.waitForTimeout(150);
+
+        await s.selectWorkspaceViaDrawer("Финансы");
+        await s.page.getByRole("heading", { name: "Финансовый контур и сверка", exact: true }).waitFor();
+        await s.page.waitForTimeout(delay + 900);
+        const final = await readWitness(s.page);
+        assert.ok(Math.abs(final.y - 900) <= 2, `delay=${delay}ms: expected y=900, got ${final.y}`);
+        assert.equal(final.text, initial.text, `delay=${delay}ms: reading witness drifted from "${initial.text}" to "${final.text}"`);
+        assert.ok(Math.abs((final.historyFinance ?? -1) - 900) <= 2, `delay=${delay}ms: history finance=${final.historyFinance}`);
+        assert.deepEqual(s.pageErrors, []);
+        outcomes.push(`${delay}ms:y=${final.y}`);
+      } finally {
+        await s.context.close();
+      }
+    }
+    return outcomes.join(", ");
+  });
+
+  await runCheck("W9-R3-04-PREMOUNT-WHEEL", "real wheel during delayed lazy chunk cancels pending restore while no-input control restores 1500", async () => {
+    const outcomes = [];
+    for (const sendWheel of [false, true]) {
+      const s = await createMobileAppPage(browser, appOrigin, { dispatchDelayMs: 50, chunkDelayMs: 900 });
+      try {
+        await s.page.goto(`${appOrigin}/#/dispatcher`);
+        await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+        await s.page.waitForTimeout(400);
+        await s.page.evaluate(() => window.scrollTo({ top: 1500, behavior: "instant" }));
+        await s.page.waitForTimeout(150);
+        await s.page.reload({ waitUntil: "domcontentloaded" });
+        await s.page.locator(".app-shell").waitFor();
+        if (sendWheel) {
+          const mountedBeforeWheel = await s.page.evaluate(
+            () => document.querySelector("[data-mounted-workspace]")?.getAttribute("data-mounted-workspace") ?? null,
+          );
+          assert.notEqual(mountedBeforeWheel, "dispatcher", "wheel must fire BEFORE DispatcherWorkspace mounts");
+          await s.page.mouse.move(345, 420);
+          await s.page.mouse.wheel(0, 120);
+        }
+        await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+        await s.page.waitForTimeout(900);
+        const finalY = await s.page.evaluate(() => window.scrollY);
+        const expected = sendWheel ? 0 : 1500;
+        assert.ok(Math.abs(finalY - expected) <= 2, `sendWheel=${sendWheel}: expected ${expected}, got ${finalY}`);
+        assert.deepEqual(s.pageErrors, []);
+        outcomes.push(`${sendWheel ? "wheel" : "control"}=${finalY}`);
+      } finally {
+        await s.context.close();
+      }
+    }
+    return outcomes.join(", ");
+  });
+
+  await runCheck("W9-R3-04-MENU-SPACE", "Space on .rail-toggle opens drawer and Escape closes it without cancelling pending Dispatcher1500 restore", async () => {
+    const s = await createMobileAppPage(browser, appOrigin, { dispatchDelayMs: 900 });
+    try {
+      await s.page.goto(`${appOrigin}/#/dispatcher`);
+      await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+      await s.page.waitForTimeout(1100);
+      await s.page.evaluate(() => window.scrollTo({ top: 1500, behavior: "instant" }));
+      await s.page.waitForTimeout(150);
+      await s.selectWorkspaceViaDrawer("Финансы");
+      await s.page.getByRole("heading", { name: "Финансовый контур и сверка", exact: true }).waitFor();
+      await s.page.waitForTimeout(400);
+      await s.selectWorkspaceViaDrawer("Диспетчерская");
+      await s.page.waitForFunction(() => document.querySelector("[data-mounted-workspace]")?.dataset.mountedWorkspace === "dispatcher");
+      await s.page.getByRole("button", { name: "Открыть меню", exact: true }).focus();
+      assert.equal(
+        await s.page.evaluate(() => document.querySelector(".app-shell")?.getAttribute("data-rail-open")),
+        "false",
+        "drawer must start closed before Space",
+      );
+      await s.page.keyboard.press("Space");
+      await until(
+        async () =>
+          (await s.page.evaluate(() => document.querySelector(".app-shell")?.getAttribute("data-rail-open"))) === "true",
+        "Space on .rail-toggle must open drawer",
+      );
+      await s.page.keyboard.press("Escape");
+      await until(
+        async () =>
+          (await s.page.evaluate(() => document.querySelector(".app-shell")?.getAttribute("data-rail-open"))) === "false",
+        "Escape must close drawer",
+      );
+      await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+      await s.page.waitForTimeout(1300);
+      const finalY = await s.page.evaluate(() => window.scrollY);
+      const historyDisp = await s.page.evaluate(() => window.history.state?.scrollOffsets?.dispatcher ?? null);
+      assert.ok(Math.abs(finalY - 1500) <= 2, `expected y=1500 after Space/Escape on menu button, got ${finalY}`);
+      assert.ok(Math.abs((historyDisp ?? -1) - 1500) <= 2, `expected history dispatcher=1500, got ${historyDisp}`);
+      assert.deepEqual(s.pageErrors, []);
+      return `drawer=false->true->false, finalY=${finalY}, historyDispatcher=${historyDisp}`;
+    } finally {
+      await s.context.close();
+    }
+  });
+
+  await runCheck("W9-R3-03-TIMEOUT-FALLBACK", "over-budget analytics delay (3600ms) exits via explicit timeout-fallback without overwriting remembered history offset", async () => {
+    const s = await createMobileAppPage(browser, appOrigin, { dispatchDelayMs: 50, analyticsDelayMs: 3600 });
+    try {
+      await s.page.goto(`${appOrigin}/#/finance`);
+      await s.page.getByRole("heading", { name: "Финансовый контур и сверка", exact: true }).waitFor();
+      await s.page.waitForTimeout(4100);
+      await s.page.evaluate(() => window.scrollTo({ top: 900, behavior: "instant" }));
+      await s.page.waitForTimeout(150);
+
+      await s.selectWorkspaceViaDrawer("Диспетчерская");
+      await s.page.getByRole("heading", { name: "Диспетчерский пульт", exact: true }).waitFor();
+      await s.page.waitForTimeout(400);
+
+      await s.selectWorkspaceViaDrawer("Финансы");
+      await s.page.getByRole("heading", { name: "Финансовый контур и сверка", exact: true }).waitFor();
+      await until(
+        async () =>
+          (await s.page.evaluate(() => document.getElementById("workspace")?.getAttribute("data-scroll-restore-status"))) ===
+          "timeout-fallback",
+        "expected timeout-fallback status after 3000ms budget",
+        5000,
+      );
+      await s.page.waitForTimeout(1200);
+      const snap = await s.page.evaluate(() => ({
+        status: document.getElementById("workspace")?.getAttribute("data-scroll-restore-status") ?? null,
+        historyFinance: window.history.state?.scrollOffsets?.finance ?? null,
+      }));
+      assert.equal(snap.status, "timeout-fallback");
+      assert.ok(Math.abs((snap.historyFinance ?? -1) - 900) <= 2, `remembered finance offset must stay 900, got ${snap.historyFinance}`);
+      assert.deepEqual(s.pageErrors, []);
+      return `status=${snap.status}, historyFinance=${snap.historyFinance}`;
+    } finally {
+      await s.context.close();
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1494,6 +1826,42 @@ async function runMobileVerifierSuite(browser, appOrigin) {
       `expected covered nav failure, got ${JSON.stringify(verdict.failures)}`,
     );
     return `failures=${JSON.stringify(verdict.failures)}`;
+  });
+
+  await runCheck("W9-R3-05-STALLED-METER", "evaluateMobileResults fails closed when meter tick stalls after frame 1 while app rAF continues", async () => {
+    const { verdict, measurement } = await runMobileControl("stalled-meter", async page => {
+      await page.evaluate(() => {
+        const nativeRaf = window.requestAnimationFrame.bind(window);
+        let triggered = false;
+        window.requestAnimationFrame = callback => {
+          if (callback.name === "tick" && window.__activityMeter?.openFrames >= 1) {
+            if (!triggered) {
+              triggered = true;
+              setTimeout(() => {
+                const a = document.querySelector("[data-mobile-probe-anchor]");
+                if (!a) return;
+                const prevDisplay = a.style.display;
+                const prevTransform = a.style.transform;
+                if (window.getComputedStyle(a).display === "inline") a.style.display = "inline-block";
+                a.style.transform = "translateY(24px)";
+                setTimeout(() => {
+                  a.style.transform = prevTransform;
+                  a.style.display = prevDisplay;
+                }, 220);
+              }, 30);
+            }
+            return 0;
+          }
+          return nativeRaf(callback);
+        };
+      });
+    });
+    assert.deepEqual(measurement.pageErrors, [], `unexpected pageErrors: ${measurement.pageErrors.join("; ")}`);
+    assert.ok(
+      verdict.failures.some(f => f.includes("stalled") || f.includes("missed animation frames")),
+      `expected stalled meter failure, got ${JSON.stringify(verdict.failures)}`,
+    );
+    return `openFrames=${measurement.drawer?.meterStatus?.openFrames}/${measurement.drawer?.meterStatus?.refOpenFrames}, failures=${JSON.stringify(verdict.failures)}`;
   });
 }
 

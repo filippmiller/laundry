@@ -93,15 +93,32 @@ function installActivityMeter() {
     witnessMissingFrames: 0,
     observingDocumentElement: false,
     observingBody: false,
+    lastTickAt: null,
+    lastTickRefFrame: 0,
+    phaseFrames: { opening: 0, open: 0, wheel: 0, closing: 0 },
+    phaseWitnessChecks: { opening: 0, open: 0, wheel: 0, closing: 0 },
+  };
+  const ref = {
+    frames: 0,
+    openFrames: 0,
+    lastTickAt: null,
+    missedStreak: 0,
+    maxMissedStreak: 0,
+    lastSeenMeterFrames: 0,
+    phaseFrames: { opening: 0, open: 0, wheel: 0, closing: 0 },
   };
   window.__activity = meter;
   window.__activityMeter = status;
+  window.__activityRef = ref;
   window.__samples = [];
   window.__anchorBaselineTop = null;
   window.__anchorDrifts = [];
   window.__maxAnchorDriftWhileOpen = 0;
 
   try {
+    // Bind native rAF at installation so monkey-patching window.requestAnimationFrame cannot
+    // silence the independent reference frame counter (LND-W9-R3-05).
+    const nativeRaf = window.requestAnimationFrame.bind(window);
     window.addEventListener(
       "scroll",
       () => {
@@ -110,10 +127,36 @@ function installActivityMeter() {
       { passive: true },
     );
 
+    const refTick = () => {
+      ref.frames += 1;
+      ref.lastTickAt = performance.now();
+      const phase = window.__phase ?? null;
+      if (phase === "opening" || phase === "open" || phase === "wheel" || phase === "closing") {
+        ref.openFrames += 1;
+        ref.phaseFrames[phase] = (ref.phaseFrames[phase] ?? 0) + 1;
+        if (status.frames === ref.lastSeenMeterFrames) {
+          ref.missedStreak += 1;
+          if (ref.missedStreak > ref.maxMissedStreak) {
+            ref.maxMissedStreak = ref.missedStreak;
+          }
+        } else {
+          ref.missedStreak = 0;
+          ref.lastSeenMeterFrames = status.frames;
+        }
+      } else {
+        ref.missedStreak = 0;
+        ref.lastSeenMeterFrames = status.frames;
+      }
+      nativeRaf(refTick);
+    };
+    nativeRaf(refTick);
+
     let lastY = window.scrollY;
     const tick = () => {
       try {
         status.frames += 1;
+        status.lastTickAt = performance.now();
+        status.lastTickRefFrame = ref.frames;
         const y = window.scrollY;
         if (y !== lastY) {
           window.__samples.push({ t: performance.now(), from: lastY, y, phase: window.__phase ?? null });
@@ -122,10 +165,12 @@ function installActivityMeter() {
         const phase = window.__phase ?? null;
         if (phase === "opening" || phase === "open" || phase === "wheel" || phase === "closing") {
           status.openFrames += 1;
+          status.phaseFrames[phase] = (status.phaseFrames[phase] ?? 0) + 1;
           if (window.__anchorBaselineTop !== null) {
             const anchor = document.querySelector("[data-mobile-probe-anchor]");
             if (anchor) {
               status.witnessChecks += 1;
+              status.phaseWitnessChecks[phase] = (status.phaseWitnessChecks[phase] ?? 0) + 1;
               const rawTop = anchor.getBoundingClientRect().top;
               const drift = Number(Math.abs(rawTop - window.__anchorBaselineTop).toFixed(2));
               if (drift > window.__maxAnchorDriftWhileOpen) {
@@ -584,14 +629,43 @@ function judgeSticky(sticky) {
 async function measureDrawer(page, { toggle, layoutWidth, tag, outDir = OUT }) {
   const attempts = 3;
   let drawer = null;
+  let preservedMeterFailure = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     drawer = await measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir });
+    const ms = drawer?.meterStatus;
+    if (ms && !preservedMeterFailure) {
+      // Preserve ANY meter or continuity failure across witness retries (LND-W9-R3-05).
+      const probeCheck = evaluateMobileResults([
+        {
+          tag,
+          layoutWidth,
+          hasToggle: true,
+          pageErrors: [],
+          before: { horizontalOverflow: false, tabCount: 0, tabRows: 0, hasTopbar: true },
+          drawer: {
+            ...drawer,
+            anchorProblems: [],
+          },
+        },
+      ]);
+      if (probeCheck.failures.some(f => f.includes("activity meter") || f.includes("insufficient rendering"))) {
+        preservedMeterFailure = ms;
+      }
+    }
     // The witness was lost: the workspace re-rendered the element under the
     // viewport, so the measurement has to be taken again on the new content.
     // A witness that was never there is not a reason to keep measuring — it
     // is a failure of the combination, and the reason says so.
-    if (!drawer.anchorLost && !drawer.anchorMissing) return drawer;
+    if (!drawer.anchorLost && !drawer.anchorMissing) {
+      if (preservedMeterFailure) {
+        drawer.meterStatus = preservedMeterFailure;
+      }
+      return drawer;
+    }
     console.log(`  (${tag}): the witness under the viewport was lost (${attempt}/${attempts}), the measurement is repeated`);
+  }
+  if (drawer && preservedMeterFailure) {
+    drawer.meterStatus = preservedMeterFailure;
   }
   return drawer;
 }
@@ -621,6 +695,15 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
       window.__activityMeter.openFrames = 0;
       window.__activityMeter.witnessChecks = 0;
       window.__activityMeter.witnessMissingFrames = 0;
+      window.__activityMeter.phaseFrames = { opening: 0, open: 0, wheel: 0, closing: 0 };
+      window.__activityMeter.phaseWitnessChecks = { opening: 0, open: 0, wheel: 0, closing: 0 };
+    }
+    if (window.__activityRef) {
+      window.__activityRef.openFrames = 0;
+      window.__activityRef.missedStreak = 0;
+      window.__activityRef.maxMissedStreak = 0;
+      window.__activityRef.lastSeenMeterFrames = window.__activityMeter?.frames ?? 0;
+      window.__activityRef.phaseFrames = { opening: 0, open: 0, wheel: 0, closing: 0 };
     }
   }, anchorBefore.ok ? anchorBefore.top : null);
   const scrollAtClick = await page.evaluate(() => window.scrollY);
@@ -738,38 +821,66 @@ async function measureDrawerOnce(page, { toggle, layoutWidth, tag, outDir = OUT 
   await page.keyboard.press("Escape");
   const closeWait = await waitForRailState(page, "false");
   await waitForSettledPage(page, 600);
-  await setPhase(page, "closed");
+  // End the observation window and snapshot meter + independent reference rAF counters atomically
+  // in the same page evaluation so there is no gap between closing the window and reading status.
+  const driftSummary = await page.evaluate(() => {
+    window.__phase = "closed";
+    window.__phaseMark = performance.now();
+    const m = window.__activityMeter;
+    const ref = window.__activityRef;
+    const refFrames = ref && typeof ref.frames === "number" ? ref.frames : 0;
+    const refOpenFrames = ref && typeof ref.openFrames === "number" ? ref.openFrames : 0;
+    const lastTickRefFrame = m && typeof m.lastTickRefFrame === "number" ? m.lastTickRefFrame : 0;
+    const tailGapRefFrames = ref ? Math.max(0, refFrames - lastTickRefFrame) : null;
+    const copyPhaseMap = src => ({
+      opening: typeof src?.opening === "number" ? src.opening : 0,
+      open: typeof src?.open === "number" ? src.open : 0,
+      wheel: typeof src?.wheel === "number" ? src.wheel : 0,
+      closing: typeof src?.closing === "number" ? src.closing : 0,
+    });
+    return {
+      scrollAfterClose: window.scrollY,
+      maxDrift: typeof window.__maxAnchorDriftWhileOpen === "number" ? window.__maxAnchorDriftWhileOpen : null,
+      drifts: Array.isArray(window.__anchorDrifts) ? window.__anchorDrifts.slice(0, 20) : [],
+      meterStatus: m
+        ? {
+            ready: Boolean(m.ready),
+            error: m.error ?? null,
+            frames: typeof m.frames === "number" ? m.frames : 0,
+            openFrames: typeof m.openFrames === "number" ? m.openFrames : 0,
+            witnessChecks: typeof m.witnessChecks === "number" ? m.witnessChecks : 0,
+            witnessMissingFrames: typeof m.witnessMissingFrames === "number" ? m.witnessMissingFrames : 0,
+            observingDocumentElement: Boolean(m.observingDocumentElement),
+            observingBody: Boolean(m.observingBody),
+            refFrames,
+            refOpenFrames,
+            tailGapRefFrames,
+            maxMissedStreak: ref && typeof ref.maxMissedStreak === "number" ? ref.maxMissedStreak : null,
+            phaseFrames: copyPhaseMap(m.phaseFrames),
+            phaseRefFrames: copyPhaseMap(ref?.phaseFrames),
+            phaseWitnessChecks: copyPhaseMap(m.phaseWitnessChecks),
+          }
+        : {
+            ready: false,
+            error: "activity meter not installed",
+            frames: 0,
+            openFrames: 0,
+            witnessChecks: 0,
+            witnessMissingFrames: 0,
+            observingDocumentElement: false,
+            observingBody: false,
+            refFrames: 0,
+            refOpenFrames: 0,
+            tailGapRefFrames: null,
+            maxMissedStreak: null,
+            phaseFrames: { opening: 0, open: 0, wheel: 0, closing: 0 },
+            phaseRefFrames: { opening: 0, open: 0, wheel: 0, closing: 0 },
+            phaseWitnessChecks: { opening: 0, open: 0, wheel: 0, closing: 0 },
+          },
+    };
+  });
   drawer.closeTimedOut = closeWait.timedOut;
-  drawer.scrollAfterClose = await page.evaluate(() => window.scrollY);
-  const driftSummary = await page.evaluate(() => ({
-    maxDrift: typeof window.__maxAnchorDriftWhileOpen === "number" ? window.__maxAnchorDriftWhileOpen : null,
-    drifts: Array.isArray(window.__anchorDrifts) ? window.__anchorDrifts.slice(0, 20) : [],
-    meterStatus: window.__activityMeter
-      ? {
-          ready: Boolean(window.__activityMeter.ready),
-          error: window.__activityMeter.error ?? null,
-          frames: typeof window.__activityMeter.frames === "number" ? window.__activityMeter.frames : 0,
-          openFrames: typeof window.__activityMeter.openFrames === "number" ? window.__activityMeter.openFrames : 0,
-          witnessChecks:
-            typeof window.__activityMeter.witnessChecks === "number" ? window.__activityMeter.witnessChecks : 0,
-          witnessMissingFrames:
-            typeof window.__activityMeter.witnessMissingFrames === "number"
-              ? window.__activityMeter.witnessMissingFrames
-              : 0,
-          observingDocumentElement: Boolean(window.__activityMeter.observingDocumentElement),
-          observingBody: Boolean(window.__activityMeter.observingBody),
-        }
-      : {
-          ready: false,
-          error: "activity meter not installed",
-          frames: 0,
-          openFrames: 0,
-          witnessChecks: 0,
-          witnessMissingFrames: 0,
-          observingDocumentElement: false,
-          observingBody: false,
-        },
-  }));
+  drawer.scrollAfterClose = driftSummary.scrollAfterClose;
   drawer.maxAnchorDriftWhileOpen = driftSummary.maxDrift;
   drawer.anchorDriftsWhileOpen = driftSummary.drifts;
   drawer.meterStatus = driftSummary.meterStatus;

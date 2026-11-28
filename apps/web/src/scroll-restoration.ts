@@ -53,3 +53,96 @@ export function decideScrollRestore(options: {
   if (Math.abs(currentScrollY) > SCROLL_RESTORE_TOLERANCE_PX) return "skip";
   return "restore";
 }
+
+export const DOCUMENT_SCROLL_KEYS = new Set([
+  "ArrowDown",
+  "ArrowUp",
+  "PageDown",
+  "PageUp",
+  "Home",
+  "End",
+  " ",
+  "Spacebar",
+]);
+
+const SPACE_ACTIVATED_SELECTOR =
+  'button, summary, [role="button"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"]';
+
+const ARROW_WIDGET_SELECTOR =
+  '[role="tablist"], [role="listbox"], [role="menu"], [role="radiogroup"], [role="slider"], [role="spinbutton"], [role="combobox"]';
+
+export type ScrollRestoreKeyCheck = {
+  key: string;
+  defaultPrevented?: boolean;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  insideOverlay?: boolean;
+  drawerOpen?: boolean;
+  editableTarget?: boolean;
+  spaceActivatedControl?: boolean;
+  arrowWidgetControl?: boolean;
+};
+
+/**
+ * Pure keyboard semantics predicate for cancelling pending scroll restoration (LND-W9-R3-04).
+ *
+ * - Space on a button/checkbox/tab (e.g. `.rail-toggle`) activates the control instead of
+ *   scrolling the document, so it must NOT cancel restoration.
+ * - Space / Shift+Space on a plain `<a href>` or document body scrolls the document and DOES
+ *   cancel restoration.
+ * - Input inside open overlays (drawer/dialog), editable fields, or already-handled events
+ *   (`defaultPrevented`) does not cancel restoration.
+ */
+export function shouldKeyCancelScrollRestore(check: ScrollRestoreKeyCheck): boolean {
+  if (check.defaultPrevented) return false;
+  const isCtrlHomeEnd = Boolean(
+    check.ctrlKey && !check.altKey && !check.metaKey && (check.key === "Home" || check.key === "End"),
+  );
+  if ((check.altKey || check.ctrlKey || check.metaKey) && !isCtrlHomeEnd) return false;
+  if (!DOCUMENT_SCROLL_KEYS.has(check.key)) return false;
+  if (check.insideOverlay || check.drawerOpen || check.editableTarget) return false;
+
+  const isSpace = check.key === " " || check.key === "Spacebar";
+  if (isSpace) {
+    return !check.spaceActivatedControl;
+  }
+
+  const isArrowOrHomeEnd =
+    check.key === "ArrowDown" ||
+    check.key === "ArrowUp" ||
+    check.key === "Home" ||
+    check.key === "End";
+  if (isArrowOrHomeEnd && check.arrowWidgetControl) {
+    return false;
+  }
+
+  return true;
+}
+
+export function classifyKeyboardTarget(target: EventTarget | null): {
+  insideOverlay: boolean;
+  editableTarget: boolean;
+  spaceActivatedControl: boolean;
+  arrowWidgetControl: boolean;
+} {
+  if (!(target instanceof Element)) {
+    return {
+      insideOverlay: false,
+      editableTarget: false,
+      spaceActivatedControl: false,
+      arrowWidgetControl: false,
+    };
+  }
+  const htmlEl = target as HTMLElement;
+  const editableTarget =
+    Boolean(htmlEl.isContentEditable) ||
+    Boolean(target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+  return {
+    insideOverlay: Boolean(target.closest(".rail, dialog[open]")),
+    editableTarget,
+    spaceActivatedControl: Boolean(target.closest(SPACE_ACTIVATED_SELECTOR)),
+    arrowWidgetControl: Boolean(target.closest(ARROW_WIDGET_SELECTOR)),
+  };
+}

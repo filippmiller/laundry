@@ -68,7 +68,7 @@ function Loading({ error }: { error: string | null }) {
     );
   }
   return (
-    <p className="muted row row--tight">
+    <p className="muted row row--tight" data-layout-pending="true">
       <Loader2 size={16} aria-hidden="true" className="spin" />
       <span>Загрузка…</span>
     </p>

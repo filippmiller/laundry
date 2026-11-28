@@ -103,6 +103,8 @@ type ThreadRecord = {
   saveQueued: boolean;
   /** The revision of the text in the reply box. Every keystroke raises it by one. */
   revision: number;
+  /** The revision most recently acknowledged by a confirmed server write (PUT/DELETE). */
+  ackedRevision: number;
   /** Monotonic generation of openThread() loads for this thread. */
   loadEpoch: number;
   /** Monotonic count of server-confirmed writes (PUT/DELETE) for this thread. */
@@ -111,6 +113,10 @@ type ThreadRecord = {
   intentEpoch: number;
   /** Non-zero when the server must not keep the sent/closed draft; holds the intent epoch. */
   dropDraftEpoch: number;
+  /** The cleanup epoch whose DELETE attempt failed; typing cannot replay it, only explicit retry(). */
+  failedCleanupEpoch: number;
+  /** True when a PUT rejected with an ambiguous server outcome; cleared only by a confirmed write. */
+  ambiguousPut: boolean;
   /** The write that failed last, so it is not repeated in a loop. */
   failedAction: "put" | "delete" | null;
 };
@@ -206,10 +212,13 @@ export function createSupportDraftController(opts: {
       saving: false,
       saveQueued: false,
       revision: 0,
+      ackedRevision: 0,
       loadEpoch: 0,
       writeCompletedEpoch: 0,
       intentEpoch: 0,
       dropDraftEpoch: 0,
+      failedCleanupEpoch: 0,
+      ambiguousPut: false,
       failedAction: null,
     };
     records.set(threadId, record);
@@ -223,25 +232,58 @@ export function createSupportDraftController(opts: {
   };
 
   /**
+   * True when the server is confirmed empty with no in-flight write and no unresolved ambiguous PUT.
+   */
+  const isConfirmedEmptyServer = (record: ThreadRecord): boolean =>
+    record.loadSettled &&
+    !record.saving &&
+    record.serverKnown &&
+    record.savedBody === "" &&
+    !record.ambiguousPut;
+
+  /**
    * What the server would have to receive for the current text: a new draft, the removal of the
    * stored one, or nothing at all because the server already holds this text.
+   *
+   * `explicitRetry` is true only when called directly from `retry()`: it allows retrying a
+   * previously failed explicit cleanup DELETE whose epoch was recorded in `failedCleanupEpoch`,
+   * whereas ordinary typing/clearing can never replay a failed DELETE on unknown server state.
    */
-  const pendingAction = (record: ThreadRecord): "put" | "delete" | null => {
+  const pendingAction = (
+    record: ThreadRecord,
+    optsAction: { explicitRetry?: boolean } = {},
+  ): "put" | "delete" | null => {
     const trimmed = record.body.trim();
     if (trimmed) {
-      // Non-empty text replaces whatever draft the server may hold. While a cleanup intent is
-      // still active (`dropDraftEpoch !== 0`), we still issue PUT even if the text happens to
-      // match `savedBody`, so the server confirmation explicitly retires the cleanup generation.
-      return trimmed === record.savedBody && record.dropDraftEpoch === 0 ? null : "put";
+      // Non-empty text replaces whatever draft the server may hold.
+      // - While a cleanup intent is active (`dropDraftEpoch !== 0`), still issue PUT so the
+      //   server confirmation explicitly retires the cleanup generation.
+      // - When server state is uncertain (`!serverKnown` or `ambiguousPut`) for UNSAVED locally
+      //   edited text (`revision !== ackedRevision`), still issue PUT even if `trimmed === savedBody`
+      //   (e.g. saved A -> failed PUT B that actually committed -> edited back to A -> failed reopen GET).
+      //   Already-acknowledged text (`revision === ackedRevision`) must NOT re-PUT on a later failed reopen.
+      const hasUnsavedEdit = record.edited && record.revision !== record.ackedRevision;
+      const uncertainEdited = hasUnsavedEdit && (!record.serverKnown || record.ambiguousPut);
+      if (trimmed === record.savedBody && record.dropDraftEpoch === 0 && !uncertainEdited) {
+        return null;
+      }
+      return "put";
     }
-    if (record.dropDraftEpoch !== 0 && record.loadSettled && (!record.serverKnown || record.savedBody !== "")) {
-      // The server must not keep the sent answer. The removal is sent even when the client does
-      // not know what the server holds (after a failed load) because the intent is explicit and
-      // idempotent. The load must have settled first so a removal never overtakes an in-flight GET.
-      return "delete";
+    if (record.dropDraftEpoch !== 0 && record.loadSettled) {
+      if (record.serverKnown && record.savedBody === "" && !record.ambiguousPut) {
+        return null;
+      }
+      const alreadyFailedThisCleanup = record.dropDraftEpoch === record.failedCleanupEpoch;
+      if (!alreadyFailedThisCleanup || optsAction.explicitRetry) {
+        // Unattempted explicit cleanup (RET-05) or explicit user retry of the failed cleanup.
+        // A subsequent GET (e.g. load retry reading Tab B's newer draft) must NOT auto-replay a
+        // previously failed cleanup DELETE.
+        return "delete";
+      }
+      return null;
     }
-    // An empty box only asks for a DELETE when the client knows that the server holds a draft.
-    // After a failed load without explicit cleanup intent, nothing is deleted.
+    // An empty box only asks for a DELETE when the client currently knows the server holds a draft.
+    // After a failed load without active unattempted cleanup intent, nothing is deleted.
     return record.serverKnown && record.savedBody !== "" ? "delete" : null;
   };
 
@@ -275,11 +317,19 @@ export function createSupportDraftController(opts: {
     if (disposed) return;
     // The queued write is answered by this comparison: the box itself says what is missing.
     record.saveQueued = false;
+    // Defense in depth: if the server is confirmed empty with no ambiguous PUT and the box is
+    // empty, any completed cleanup intent is retired immediately so a future failed GET cannot
+    // re-fire it against a newer cross-tab draft (LND-W9-R3-01).
+    if (record.dropDraftEpoch !== 0 && isConfirmedEmptyServer(record) && record.body.trim() === "") {
+      record.dropDraftEpoch = 0;
+      record.failedCleanupEpoch = 0;
+    }
     const action = pendingAction(record);
     if (!action) {
       // The server holds what the box holds: a pending timer would only repeat the same write.
+      // Preserve an active save error instead of reverting to "loading" while an overlapping GET is in flight.
       clearTimer(record);
-      record.status = computeStatus(record);
+      record.status = record.errorScope === "save" && record.error ? "error" : computeStatus(record);
       emit();
       return;
     }
@@ -295,7 +345,10 @@ export function createSupportDraftController(opts: {
     void performSave(record);
   };
 
-  const performSave = async (record: ThreadRecord): Promise<void> => {
+  const performSave = async (
+    record: ThreadRecord,
+    optsSave: { explicitRetry?: boolean } = {},
+  ): Promise<void> => {
     if (disposed) return;
     if (record.saving) {
       // Only one write per thread may run at a time: a second one waits for the first.
@@ -307,7 +360,7 @@ export function createSupportDraftController(opts: {
       // known, so a DELETE can never destroy a draft the operator never saw.
       return;
     }
-    const action = pendingAction(record);
+    const action = pendingAction(record, optsSave);
     if (!action) {
       // Nothing to send: the server already holds this text, or there is nothing to store.
       // Clear any stale save error so an explicit retry() after a server-committed write
@@ -321,7 +374,6 @@ export function createSupportDraftController(opts: {
     }
     const trimmed = record.body.trim();
     const startedDropEpoch = record.dropDraftEpoch;
-    const startedRevision = record.revision;
     record.saving = true;
     record.status = "saving";
     record.error = null;
@@ -334,22 +386,33 @@ export function createSupportDraftController(opts: {
           body: { body: trimmed },
         });
         record.savedBody = trimmed;
+        record.ambiguousPut = false;
+        if (record.body.trim() === trimmed) {
+          // Whether the box stayed at `startedRevision` or was edited and reverted back to the
+          // exact same trimmed text while PUT was in flight, the current text is now server-acked.
+          record.ackedRevision = record.revision;
+          record.edited = false;
+        }
         if (trimmed && record.dropDraftEpoch === startedDropEpoch) {
           // The server holds the replacement text now, retiring only the cleanup generation that
           // existed when this PUT started (never a newer send/discard).
           record.dropDraftEpoch = 0;
+          record.failedCleanupEpoch = 0;
         }
       } else {
         await opts.api(`/support/threads/${record.threadId}/draft`, { method: "DELETE" });
         record.savedBody = "";
+        record.ambiguousPut = false;
         // The server is now confirmed empty. Retire cleanup intent so a concurrent discardDraft
         // during DELETE cannot leave dropDraftEpoch armed and erase a newer cross-tab draft on a
         // subsequent failed GET. Any new text typed during DELETE is persisted by reconcile().
         record.dropDraftEpoch = 0;
+        record.failedCleanupEpoch = 0;
         // If no further edits arrived while DELETE was in flight and the box is empty, reset
         // `edited` so a future re-open does not treat the empty box as a local deletion of a
         // newer draft saved in another tab.
-        if (record.revision === startedRevision && record.body.trim() === "") {
+        if (record.body.trim() === "") {
+          record.ackedRevision = record.revision;
           record.edited = false;
         }
       }
@@ -370,10 +433,18 @@ export function createSupportDraftController(opts: {
       // The write that failed is remembered: it must not be repeated in a loop, but a write of
       // another kind — the removal of a draft the server still holds — is still needed.
       record.failedAction = action;
-      if (action === "put" && record.dropDraftEpoch !== 0) {
-        // markSent/discardDraft arrived while this PUT was in flight and the PUT outcome is
-        // ambiguous: mark server state unknown so reconcile() issues the pending DELETE now.
-        record.serverKnown = false;
+      if (action === "put") {
+        // The PUT outcome on the server is ambiguous until a later write confirms server state.
+        record.ambiguousPut = true;
+        if (record.dropDraftEpoch !== 0) {
+          // markSent/discardDraft arrived while this PUT was in flight: mark server state unknown
+          // so reconcile() issues the pending DELETE now.
+          record.serverKnown = false;
+        }
+      } else if (action === "delete" && startedDropEpoch !== 0) {
+        // Record which cleanup epoch failed so typing/clearing later cannot silently replay a
+        // failed DELETE after a failed reopen GET (LND-W9-R3-02).
+        record.failedCleanupEpoch = startedDropEpoch;
       }
       emit();
       opts.onError?.(record.error);
@@ -413,11 +484,12 @@ export function createSupportDraftController(opts: {
     const myLoadEpoch = ++record.loadEpoch;
     const startWriteCompletedEpoch = record.writeCompletedEpoch;
     const startedDuringWrite = record.saving;
-    const startDropEpoch = record.dropDraftEpoch;
     record.loadSettled = false;
-    if (!startedDuringWrite && record.errorScope !== "save") {
-      record.serverKnown = false;
-    }
+    // Always invalidate pre-reopen server freshness when starting a new GET (LND-W9-R3-02).
+    // If an overlapping write succeeds before/after this GET, its confirmation sets `serverKnown = true`
+    // and advances `writeCompletedEpoch`. If the overlapping write or this GET fails, `serverKnown`
+    // stays `false` so stale `savedBody` can never authorize a DELETE of an unseen cross-tab draft.
+    record.serverKnown = false;
     if (record.errorScope !== "save") {
       record.error = null;
       record.errorScope = null;
@@ -450,9 +522,9 @@ export function createSupportDraftController(opts: {
         }
         return;
       }
-      if (record.dropDraftEpoch !== 0) {
-        // Explicit cleanup intent (send/close) survives GET failure and executes via reconcile
-        // (respecting failedAction so a failed DELETE never replays in a loop).
+      if (record.dropDraftEpoch !== 0 && record.dropDraftEpoch !== record.failedCleanupEpoch) {
+        // Unattempted explicit cleanup intent (RET-05) survives initial GET failure and executes
+        // via reconcile. Previously failed cleanup attempts do not auto-replay on GET failure.
         if (record.errorScope !== "save") {
           record.error = null;
           record.errorScope = null;
@@ -460,14 +532,14 @@ export function createSupportDraftController(opts: {
         reconcile(record);
         return;
       }
-      if (record.edited && record.body.trim()) {
+      if (record.edited && record.revision !== record.ackedRevision && record.body.trim()) {
         // Do not auto-replay a PUT that already failed when a subsequent GET also fails.
         if (record.errorScope === "save" && record.failedAction === "put") {
           record.status = computeStatus(record);
           emit();
           return;
         }
-        // The operator already typed new text before GET failed: persist it via PUT instead
+        // The operator already typed new unsaved text before GET failed: persist it via PUT instead
         // of stranding the reply in load-error without saving.
         if (record.errorScope !== "save") {
           record.error = null;
@@ -478,8 +550,15 @@ export function createSupportDraftController(opts: {
         emit();
         return;
       }
+      // If a previously failed cleanup DELETE was abandoned for a reopen that also failed,
+      // retire the stale cleanup epoch so a subsequent load retry stays strictly read-only.
+      if (record.dropDraftEpoch !== 0 && record.dropDraftEpoch === record.failedCleanupEpoch) {
+        record.dropDraftEpoch = 0;
+        record.failedCleanupEpoch = 0;
+      }
       record.error = formatError(err);
       record.errorScope = "load";
+      record.failedAction = null;
       record.status = "error";
       emit();
       opts.onError?.(record.error);
@@ -496,9 +575,18 @@ export function createSupportDraftController(opts: {
       // Fresh GET with no overlapping or completed write: accept server state.
       record.serverKnown = true;
       record.savedBody = stored.trim();
-      if (record.savedBody === "" && record.dropDraftEpoch === startDropEpoch) {
-        // Server already has no draft and no newer send/discard happened while GET was in flight.
+      // If the server is confirmed empty and no ambiguous prior PUT could still commit,
+      // any pending cleanup intent (including one registered while this GET was in flight)
+      // is already satisfied and must be retired so a later failed GET never deletes a
+      // newer cross-tab draft (LND-W9-R3-01).
+      if (record.savedBody === "" && !record.ambiguousPut) {
         record.dropDraftEpoch = 0;
+        record.failedCleanupEpoch = 0;
+        if (record.errorScope === "save" && record.failedAction === "delete" && record.body.trim() === "") {
+          record.error = null;
+          record.errorScope = null;
+          record.failedAction = null;
+        }
       }
       // A locally typed answer or an active cleanup intent always wins over the stored draft.
       if (record.dropDraftEpoch === 0 && !record.edited) {
@@ -547,7 +635,7 @@ export function createSupportDraftController(opts: {
     record.errorScope = null;
     record.failedAction = null;
     // Note: do NOT clear `dropDraftEpoch` on keystroke (LND-W9-R2-02). Cleanup intent is retired
-    // only after a confirmed DELETE or a confirmed replacement PUT on the server.
+    // only after a confirmed DELETE, a confirmed replacement PUT, or a confirmed empty GET.
     if (!record.loadSettled) {
       // The stored draft is still on its way: nothing is written before it is known, so a DELETE
       // can never destroy a draft the operator never saw.
@@ -571,7 +659,7 @@ export function createSupportDraftController(opts: {
       return;
     }
     clearTimer(record);
-    await performSave(record);
+    await performSave(record, { explicitRetry: true });
   };
 
   const markSent = (threadId: string, sentRevision: number) => {
@@ -583,13 +671,8 @@ export function createSupportDraftController(opts: {
       if (pendingAction(record)) scheduleSave(record);
       return;
     }
-    const hadAmbiguousPut = record.failedAction === "put";
-    const serverAlreadyEmpty =
-      record.loadSettled &&
-      !record.saving &&
-      record.serverKnown &&
-      record.savedBody === "" &&
-      !hadAmbiguousPut;
+    const hadAmbiguousPut = record.ambiguousPut || record.failedAction === "put";
+    const serverAlreadyEmpty = isConfirmedEmptyServer(record) && !hadAmbiguousPut;
     if (sentRevision !== record.revision) {
       // The operator changed the box while the message was on its way. Still record cleanup
       // intent for the sent draft (unless the server is already confirmed empty) so clearing the
@@ -597,6 +680,7 @@ export function createSupportDraftController(opts: {
       if (hadAmbiguousPut) record.serverKnown = false;
       if (!serverAlreadyEmpty) {
         record.dropDraftEpoch = ++record.intentEpoch;
+        record.failedCleanupEpoch = 0;
       }
       if (!record.body.trim()) {
         clearTimer(record);
@@ -618,6 +702,7 @@ export function createSupportDraftController(opts: {
     record.edited = false;
     if (hadAmbiguousPut) record.serverKnown = false;
     record.dropDraftEpoch = serverAlreadyEmpty ? 0 : ++record.intentEpoch;
+    record.failedCleanupEpoch = 0;
     record.error = null;
     record.errorScope = null;
     record.failedAction = null;
@@ -630,18 +715,14 @@ export function createSupportDraftController(opts: {
   const discardDraft = (threadId: string) => {
     const record = records.get(threadId);
     if (!record) return;
-    const hadAmbiguousPut = record.failedAction === "put";
-    const serverAlreadyEmpty =
-      record.loadSettled &&
-      !record.saving &&
-      record.serverKnown &&
-      record.savedBody === "" &&
-      !hadAmbiguousPut;
+    const hadAmbiguousPut = record.ambiguousPut || record.failedAction === "put";
+    const serverAlreadyEmpty = isConfirmedEmptyServer(record) && !hadAmbiguousPut;
     clearTimer(record);
     record.body = "";
     record.edited = false;
     if (hadAmbiguousPut) record.serverKnown = false;
     record.dropDraftEpoch = serverAlreadyEmpty ? 0 : ++record.intentEpoch;
+    record.failedCleanupEpoch = 0;
     record.error = null;
     record.errorScope = null;
     record.failedAction = null;

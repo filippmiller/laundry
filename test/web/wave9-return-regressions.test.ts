@@ -589,6 +589,333 @@ describe("LND-W9-RET-05: support draft cleanup runs when GET fails after markSen
     expect(controller.getSnapshot().status).toBe("error");
     expect(controller.getSnapshot().errorScope).toBe("save");
   });
+
+  it("LND-W9-R3-01: pending-empty send or discard retires cleanup intent when GET resolves null", async () => {
+    for (const mode of ["send", "discard"] as const) {
+      const get1 = deferred<{ body: string } | null>();
+      let getCount = 0;
+      let serverDraft: string | null = null;
+      const calls: string[] = [];
+      const api: SupportDraftApiFn = async (_path, options) => {
+        const method = (options?.method ?? "GET").toUpperCase();
+        calls.push(method);
+        if (method === "GET") {
+          getCount += 1;
+          if (getCount === 1) return get1.promise;
+          throw new Error("502 Bad Gateway");
+        }
+        if (method === "DELETE") serverDraft = null;
+        return null;
+      };
+      const controller = createSupportDraftController({ api });
+      const open1 = controller.openThread(`t-r3-01-${mode}`);
+      if (mode === "send") {
+        controller.setBody("sent while initial GET pending");
+        controller.markSent(`t-r3-01-${mode}`, controller.getSnapshot().revision);
+      } else {
+        controller.discardDraft(`t-r3-01-${mode}`);
+      }
+      get1.resolve(null);
+      await open1;
+      await settle();
+      expect(calls).toEqual(["GET"]);
+      expect(controller.getSnapshot().status).toBe("clean");
+
+      // Another tab saves a new draft; Tab A reopens and gets 502 -> must NOT send DELETE.
+      serverDraft = "NEW DRAFT FROM TAB B";
+      await controller.openThread(`t-r3-01-${mode}`);
+      await settle();
+      expect(calls).toEqual(["GET", "GET"]);
+      expect(serverDraft).toBe("NEW DRAFT FROM TAB B");
+      expect(controller.getSnapshot().status).toBe("error");
+      expect(controller.getSnapshot().errorScope).toBe("load");
+    }
+  });
+
+  it("LND-W9-R3-01: ambiguous prior PUT keeps cleanup armed even if a stale empty GET settles", async () => {
+    const get2 = deferred<{ body: string } | null>();
+    let getCount = 0;
+    let serverDraft: string | null = null;
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return null;
+        return get2.promise;
+      }
+      if (method === "PUT") {
+        // Server actually stored it, but network response timed out (ambiguous PUT).
+        serverDraft = String((options?.body as { body: string }).body);
+        throw new Error("Network timeout");
+      }
+      if (method === "DELETE") {
+        serverDraft = null;
+        return null;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+    await controller.openThread("t-r3-01-ambig");
+    controller.setBody("sent");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(serverDraft).toBe("sent");
+
+    // Reopen starts GET2 (captured empty before PUT landed), meanwhile operator sends.
+    const open2 = controller.openThread("t-r3-01-ambig");
+    controller.markSent("t-r3-01-ambig", controller.getSnapshot().revision);
+    get2.resolve(null);
+    await open2;
+    await settle();
+    expect(calls).toEqual(["GET", "PUT", "GET", "DELETE"]);
+    expect(serverDraft).toBeNull();
+    expect(controller.getSnapshot().status).toBe("clean");
+  });
+
+  it("LND-W9-R3-02: failed DELETE + failed reopen GET invalidates serverKnown so edit+clear never deletes Tab B draft", async () => {
+    let getCount = 0;
+    let deleteCount = 0;
+    let serverDraft: string | null = "OLD SERVER DRAFT";
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return serverDraft === null ? null : { body: serverDraft };
+        throw new Error("502 Bad Gateway");
+      }
+      if (method === "DELETE") {
+        deleteCount += 1;
+        if (deleteCount === 1) throw new Error("500 DELETE failed");
+        serverDraft = null;
+        return null;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+    await controller.openThread("t-r3-02");
+    controller.setBody("");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(deleteCount).toBe(1);
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("save");
+
+    // Tab B saves a fresh draft.
+    serverDraft = "NEW TAB B DRAFT";
+    await controller.openThread("t-r3-02");
+    await settle();
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("load");
+
+    // Operator types temporary text and clears before debounce -> must NOT issue a 2nd DELETE.
+    controller.setBody("temporary");
+    controller.setBody("");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(deleteCount).toBe(1);
+    expect(serverDraft).toBe("NEW TAB B DRAFT");
+    expect(calls).toEqual(["GET", "DELETE", "GET"]);
+  });
+
+  it("LND-W9-R3-02: reopen overlapping a failing DELETE still invalidates serverKnown", async () => {
+    const del1 = deferred<null>();
+    const get2 = deferred<{ body: string } | null>();
+    let getCount = 0;
+    let deleteCount = 0;
+    let serverDraft: string | null = "OLD";
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      if (method === "GET") {
+        getCount += 1;
+        return getCount === 1 ? { body: "OLD" } : get2.promise;
+      }
+      if (method === "DELETE") {
+        deleteCount += 1;
+        if (deleteCount === 1) return del1.promise;
+        serverDraft = null;
+        return null;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+    await controller.openThread("t-r3-02-overlap");
+    controller.setBody("");
+    await vi.advanceTimersByTimeAsync(800);
+    const open2 = controller.openThread("t-r3-02-overlap");
+    del1.reject(new Error("DELETE 500"));
+    serverDraft = "TAB B NEW";
+    get2.reject(new Error("GET 502"));
+    await open2;
+    await settle();
+    controller.setBody("tmp");
+    controller.setBody("");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(deleteCount).toBe(1);
+    expect(serverDraft).toBe("TAB B NEW");
+  });
+
+  it("LND-W9-R3-02: PUT retry honors current edited revision even when edited back to cached savedBody", async () => {
+    let getCount = 0;
+    let serverDraft: string | null = "A";
+    const puts: string[] = [];
+    let failFirstPut = true;
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return { body: "A" };
+        throw new Error("502 Bad Gateway");
+      }
+      if (method === "PUT") {
+        const text = String((options?.body as { body: string }).body);
+        puts.push(text);
+        serverDraft = text;
+        if (failFirstPut) {
+          failFirstPut = false;
+          throw new Error("Network timeout after commit");
+        }
+        return null;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+    await controller.openThread("t-r3-02-put-a");
+    controller.setBody("B");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(serverDraft).toBe("B");
+
+    // Operator edits back to A, then reopen GET fails.
+    controller.setBody("A");
+    await controller.openThread("t-r3-02-put-a");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(puts).toEqual(["B", "A"]);
+    expect(serverDraft).toBe("A");
+    expect(controller.getSnapshot().status).toBe("saved");
+  });
+
+  it("LND-W9-R3-GateB-P1-1: acknowledged PUT followed by failed reopen GET never re-PUTs old text over Tab B draft", async () => {
+    let getCount = 0;
+    let serverDraft: string | null = null;
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return null;
+        throw new Error("502 Bad Gateway");
+      }
+      if (method === "PUT") {
+        serverDraft = String((options?.body as { body: string }).body);
+        return null;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+    await controller.openThread("t-gb-p1-1");
+    controller.setBody("Draft A");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(serverDraft).toBe("Draft A");
+    expect(controller.getSnapshot().status).toBe("saved");
+
+    // Tab B saves a newer draft; Tab A reopens and gets 502 -> must NOT re-PUT "Draft A".
+    serverDraft = "Draft B from Tab B";
+    await controller.openThread("t-gb-p1-1");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(calls).toEqual(["GET", "PUT", "GET"]);
+    expect(serverDraft).toBe("Draft B from Tab B");
+    expect(controller.getSnapshot().status).toBe("error");
+    expect(controller.getSnapshot().errorScope).toBe("load");
+  });
+
+  it("LND-W9-R3-GateB-P1-2: retrying load after failed explicit cleanup DELETE + failed GET stays read-only and preserves Tab B draft", async () => {
+    let getCount = 0;
+    let deleteCount = 0;
+    let serverDraft: string | null = "OLD DRAFT";
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return { body: "OLD DRAFT" };
+        if (getCount === 2) throw new Error("502 Bad Gateway");
+        return serverDraft === null ? null : { body: serverDraft };
+      }
+      if (method === "DELETE") {
+        deleteCount += 1;
+        if (deleteCount === 1) throw new Error("500 DELETE failed");
+        serverDraft = null;
+        return null;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+    await controller.openThread("t-gb-p1-2");
+    controller.markSent("t-gb-p1-2", controller.getSnapshot().revision);
+    await settle();
+    expect(deleteCount).toBe(1);
+    expect(controller.getSnapshot().errorScope).toBe("save");
+
+    // Tab B saves a newer draft; Tab A reopens (GET 502), then user clicks retry load (GET 200 -> Tab B draft).
+    serverDraft = "NEW TAB B DRAFT";
+    await controller.openThread("t-gb-p1-2");
+    await settle();
+    expect(controller.getSnapshot().errorScope).toBe("load");
+
+    await controller.retry();
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(deleteCount).toBe(1);
+    expect(serverDraft).toBe("NEW TAB B DRAFT");
+    expect(controller.getSnapshot().body).toBe("NEW TAB B DRAFT");
+  });
+
+  it("LND-W9-R3-GateB-R2-P1: edit A -> AB -> A while PUT A is in flight still acknowledges A so later failed reopen never overwrites Tab B", async () => {
+    const putGate = deferred<null>();
+    let getCount = 0;
+    let serverDraft: string | null = null;
+    const calls: string[] = [];
+    const api: SupportDraftApiFn = async (_path, options) => {
+      const method = (options?.method ?? "GET").toUpperCase();
+      calls.push(method);
+      if (method === "GET") {
+        getCount += 1;
+        if (getCount === 1) return null;
+        throw new Error("502 Bad Gateway");
+      }
+      if (method === "PUT") {
+        serverDraft = String((options?.body as { body: string }).body);
+        return putGate.promise;
+      }
+      return null;
+    };
+    const controller = createSupportDraftController({ api });
+    await controller.openThread("t-gb-r2-p1");
+    controller.setBody("A");
+    await vi.advanceTimersByTimeAsync(800);
+    // While PUT A is in flight, edit to AB and back to A.
+    controller.setBody("AB");
+    controller.setBody("A");
+    putGate.resolve(null);
+    await settle();
+    expect(controller.getSnapshot().status).toBe("saved");
+
+    // Tab B saves B; Tab A reopens with 502 -> must NOT re-PUT A over Tab B's B.
+    serverDraft = "B from Tab B";
+    await controller.openThread("t-gb-r2-p1");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+    expect(calls).toEqual(["GET", "PUT", "GET"]);
+    expect(serverDraft).toBe("B from Tab B");
+  });
 });
 
 describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden toggle, missing topbar, and transient drift", () => {
@@ -633,6 +960,13 @@ describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden tog
         witnessMissingFrames: 0,
         observingDocumentElement: true,
         observingBody: true,
+        refFrames: 30,
+        refOpenFrames: 12,
+        tailGapRefFrames: 0,
+        maxMissedStreak: 0,
+        phaseFrames: { opening: 1, open: 5, wheel: 3, closing: 3 },
+        phaseRefFrames: { opening: 1, open: 5, wheel: 3, closing: 3 },
+        phaseWitnessChecks: { opening: 1, open: 5, wheel: 3, closing: 3 },
       },
       anchorRestored: true,
       stickyOpen: { topbar: { top: 0, bottom: 56 }, tabBar: null },
@@ -759,6 +1093,43 @@ describe("LND-W9-RET-06: mobile layout verdict rejects broken drawer, hidden tog
     const silentAnchorLost = validMobileResult();
     (silentAnchorLost.drawer as unknown as { anchorLost: boolean }).anchorLost = true;
     expect(evaluateMobileResults([silentAnchorLost]).failures.some(f => f.includes("missing or lost without diagnostic"))).toBe(true);
+  });
+
+  it("LND-W9-R3-05: rejects stalled meter, mid-window gap, and missing phase coverage while allowing slow synchronized runners", () => {
+    const stalled = validMobileResult();
+    stalled.drawer.meterStatus.openFrames = 1;
+    stalled.drawer.meterStatus.witnessChecks = 1;
+    stalled.drawer.meterStatus.refOpenFrames = 100;
+    stalled.drawer.meterStatus.tailGapRefFrames = 99;
+    stalled.drawer.meterStatus.phaseFrames = { opening: 0, open: 1, wheel: 0, closing: 0 };
+    stalled.drawer.meterStatus.phaseRefFrames = { opening: 1, open: 45, wheel: 20, closing: 34 };
+    stalled.drawer.meterStatus.phaseWitnessChecks = { opening: 0, open: 1, wheel: 0, closing: 0 };
+    const stalledVerdict = evaluateMobileResults([stalled]);
+    expect(stalledVerdict.failures.some(f => f.includes("stalled before the measurement window closed"))).toBe(true);
+    expect(stalledVerdict.failures.some(f => f.includes("missed animation frames"))).toBe(true);
+    expect(stalledVerdict.failures.some(f => f.includes('phase "wheel"'))).toBe(true);
+
+    // Mid-window stall that resumes before close (tailGap=0, all phases >=1, but low coverage).
+    const resumed = validMobileResult();
+    resumed.drawer.meterStatus.openFrames = 40;
+    resumed.drawer.meterStatus.witnessChecks = 40;
+    resumed.drawer.meterStatus.refOpenFrames = 100;
+    resumed.drawer.meterStatus.tailGapRefFrames = 0;
+    resumed.drawer.meterStatus.phaseFrames = { opening: 1, open: 10, wheel: 10, closing: 19 };
+    resumed.drawer.meterStatus.phaseRefFrames = { opening: 1, open: 60, wheel: 20, closing: 19 };
+    resumed.drawer.meterStatus.phaseWitnessChecks = { opening: 1, open: 10, wheel: 10, closing: 19 };
+    expect(evaluateMobileResults([resumed]).failures.some(f => f.includes("missed animation frames"))).toBe(true);
+
+    // Slow/throttled runner where both loops stay synchronized -> PASS.
+    const slowSync = validMobileResult();
+    slowSync.drawer.meterStatus.openFrames = 6;
+    slowSync.drawer.meterStatus.witnessChecks = 6;
+    slowSync.drawer.meterStatus.refOpenFrames = 6;
+    slowSync.drawer.meterStatus.tailGapRefFrames = 0;
+    slowSync.drawer.meterStatus.phaseFrames = { opening: 0, open: 2, wheel: 2, closing: 2 };
+    slowSync.drawer.meterStatus.phaseRefFrames = { opening: 0, open: 2, wheel: 2, closing: 2 };
+    slowSync.drawer.meterStatus.phaseWitnessChecks = { opening: 0, open: 2, wheel: 2, closing: 2 };
+    expect(evaluateMobileResults([slowSync]).failures).toEqual([]);
   });
 });
 
