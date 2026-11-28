@@ -1,8 +1,46 @@
-# Финальное независимое ревью PR #4 — итоговый вердикт (2026-11-27 / обновлено 2026-11-28)
+# Финальное независимое ревью PR #4 — итоговый вердикт (2026-11-27 / обновлено 2026-11-28, Волна 9 / R3)
 
-## Актуальный канонический статус (Волна 9 — закрытие возврата RR-01…RR-08)
+## Актуальный канонический статус (Волна 9 / R3 — закрытие `LND-W9-R3-01…06`)
 
-> **Статус:** Этот блок заменяет (supersedes) ранний вердикт по `4c5c201` / CI `45868444118` ниже. Исторические разделы §1–§8 сохранены для трассируемости и помечены как заменённые.
+> **Статус:** Этот блок заменяет (supersedes) предыдущий вердикт по `2447cc0` / `8118b7e` (CI `46086432899`, `46087373389`) и ранний вердикт по `4c5c201` (CI `45868444118`). Исторические разделы ниже сохранены для трассируемости и помечены как `SUPERSEDED`.
+
+| Поле | Значение |
+|---|---|
+| **Репозиторий / PR / ветка** | `filippmiller/laundry` · [PR #4](https://github.com/filippmiller/laundry/pull/4) · `feat/audit-remediation-wave6` |
+| **Исходный baseline R3-аудита** | `2447cc0a98dac42ec8de480c9c2b94c8c53dc461` (tree `a98aaf69d07ce5e9de64423f0ddde088fdefc8e1`) |
+| **Протестированный код-кандидат R3** | `5d7179fb2e5fa67888b15a0792d6d24e0a85a004` (tree `a3568c642326f10789ce2b5e07580b56aa959477`) |
+| **CI run / attempt (код-кандидат)** | [`46134686555`](https://github.com/filippmiller/laundry/actions/runs/46134686555), attempt `1` (`quality`: `success`, `smoke`: `success`, `CodeRabbit`: `skipped` — не засчитывается как ревью) |
+| **CI checkout / tree-equivalence** | `ccd41ccfc06c37b10a676b623fd1e5dc1c5d9207` (`refs/pull/4/merge`), `checkoutTree = a3568c642326f10789ce2b5e07580b56aa959477` **=== `CODE_CANDIDATE^{tree}`** |
+| **CI artifact** | `ci-verification-receipts-46134686555-1` (id `15259023712`, `55 184` байт, `sha256:521dfb8349598a813d05f382ee0d712858d352d91dfe6561bc68cb64321b1b85`) |
+| **Фактические прогоны CI (`46134686555`)** | Vitest PostgreSQL **90 файлов / 638 тестов PASS** · Smoke **11/11** · Wave 7 **12/12** (`skipped=0`) · Wave 8 API **7/7** (`skipped=0`) · Wave 8 UI **8/8** (`skipped=0`) · Mobile **16/16** (`0` `pageErrors`, `minRefOpenFrames=98`, `maxTailGap=0`, `maxMissedStreak=1`) · Wave 9 mounted **39/39** (`0` failed) |
+| **Локальные прогоны (Windows)** | `npm run lint` PASS · `npm run typecheck` PASS · `npm run web:build` PASS (29 файлов) · web-only Vitest **13 файлов / 139 тестов PASS** · все 6 независимых репродукторов R3 (`controller-recheck` 9/9, `mounted-empty-cleanup` 4/4, `mounted-failed-delete-reopen` PASS, `workspace-restore` 6/6, `original-restore-control` PASS, `meter-stall` PASS) · `verify-wave9-mounted.mjs` **39/39 PASS** |
+| **Независимое ревью (EGM + cross-family)** | Автор: Google Gemini 4 Neon (TL). Gate A: OpenAI Codex `gpt-6.2-sol` (6 замечаний учтены до кода). Gate B: свежий stateless Goldfish (`egm-codebase-details`, Gemini 4 Flash — `APPROVE_WITH_NOTES`, 5 замечаний закрыты) + cross-family OpenAI Codex `gpt-6.2-sol` (Round 1: 2 P1 + 7 P2 + 2 P3 закрыты; Round 2: 1 P1 + 5 P2 закрыты; Round 3/Final: #1–#4, #6 подтверждены; остаточная теоретическая заметка по #5 — compositor scrollbar drag в один 16-мс кадр с пост-таймаутным `ResizeObserver` — зафиксирована честно). Raw receipts приложены в возвратном ZIP. |
+
+### Четыре контура готовности
+
+| Контур | Статус | Основание |
+|---|---|---|
+| **CODE** | **READY_FOR_RECHECK / PASS** | Все шесть замечаний `LND-W9-R3-01…06` закрыты на `5d7179f`; все 6 независимых репродукторов R3 перешли из RED в GREEN (exit 0); сохранённые `RET-01…07` и `RR-01…06` перепроверены |
+| **CI** | **VERIFIED_PASS_TREE_EQUIVALENT** | Run `46134686555` attempt `1`: `quality=success` (90 файлов / 638 тестов PostgreSQL), `smoke=success` (Wave 9 mounted 39/39, Mobile 16/16), `CodeRabbit=skipped` (не ревью), `checkoutTree === CODE_CANDIDATE^{tree}` |
+| **DEPLOY** | **NOT_VERIFIED** | Образы API/worker, миграции/rollback в staging/prod и контейнерный запуск не входят в данный мандат |
+| **LIVE** | **NOT_VERIFIED** | Реальные SMS, платёжные и фискальные провайдеры и production rollout не входят в данный мандат |
+
+### Матрица закрытия `LND-W9-R3-01…06`
+
+| ID | Приоритет | Статус | Изменение, тест и доказательство |
+|---|---|---|---|
+| **LND-W9-R3-01** | P2 | **CLOSED** | `apps/web/src/workspaces/support-draft-autosave.ts`: при чистом пустом `GET` (`!staleAgainstWrite && savedBody === "" && !ambiguousPut`) снимается `dropDraftEpoch` и `failedCleanupEpoch`, независимо от порядка `send`/`discard` во время pending `GET`; `ambiguousPut` отслеживается отдельно от UI ошибки; `RET-05` сохранён. Тесты: `test/web/wave9-return-regressions.test.ts`, CI `W9-R3-01-MOUNTED`, репродукторы `controller-recheck.mjs` (9/9) и `mounted-empty-cleanup.mjs` (4/4). |
+| **LND-W9-R3-02** | P2 | **CLOSED** | `apps/web/src/workspaces/support-draft-autosave.ts`: `openThread` всегда сбрасывает `serverKnown = false`; разделены `failedCleanupEpoch` и `explicitRetry`; введён `ackedRevision` (Gate B P1 — подтверждённый `PUT` больше не перезаписывает новый черновик другой вкладки после 502, а retry загрузки остаётся read-only). Тесты: `test/web/wave9-return-regressions.test.ts`, CI `W9-R3-02-MOUNTED`, репродуктор `mounted-failed-delete-reopen.mjs` (exit 0, `aDeletes=1`). |
+| **LND-W9-R3-03** | P2 | **CLOSED** | `apps/web/src/workspaces/analytics-panels.tsx`, `apps/web/src/workspaces/FinanceWorkspace.tsx`, `apps/web/src/App.tsx`: начальные загрузочные состояния маркируются `data-layout-pending="true"`; `App.tsx` ждёт готовности через `MutationObserver`/`ResizeObserver` в пределах монотонного бюджета `3000ms` и реализует терминальный `timeout-fallback` без перезаписи сохранённого offset в `history.state`. Тесты: CI `W9-R3-03-FINANCE-DELAY` (150/1100/1800ms), `W9-R3-03-TIMEOUT-FALLBACK` (3600ms), репродуктор `workspace-restore.mjs` (6/6, «Начислено» на y=900). |
+| **LND-W9-R3-04** | P2 | **CLOSED** | `apps/web/src/App.tsx`, `apps/web/src/scroll-restoration.ts`: постоянный window-слушатель `wheel`/`touchmove`/`keydown` с поддержкой `bootingRef` перехватывает ввод до монтирования (`WorkspaceMountGate`/`Suspense`); чистый предикат `shouldKeyCancelScrollRestore` не отменяет восстановление при `Space` на кнопках (`.rail-toggle`), сохраняя `Space`/`Shift+Space` на обычных ссылках и `Ctrl+Home`/`Ctrl+End`. Тесты: `test/web/scroll-restoration.test.ts`, CI `W9-R3-04-PREMOUNT-WHEEL`, `W9-R3-04-MENU-SPACE`, репродукторы `workspace-restore.mjs` и `original-restore-control.mjs`. |
+| **LND-W9-R3-05** | P3 | **CLOSED** | `scripts/verify-mobile-layout.mjs`, `scripts/mobile-layout-verdict.mjs`: добавлен независимый эталонный rAF-счётчик на привязанном при установке `nativeRaf` (`refTick`), пофазные счётчики (`phaseFrames`, `phaseRefFrames`, `phaseWitnessChecks`), `tailGapRefFrames` и `maxMissedStreak`, атомарное закрытие окна и сохранение ошибок метра через witness-ретраи. Тесты: `test/web/wave9-return-regressions.test.ts`, CI `W9-R3-05-STALLED-METER`, CI Mobile 16/16 (`minRefOpenFrames=98`, `maxTailGap=0`), репродуктор `meter-stall.mjs` (exit 0). |
+| **LND-W9-R3-06** | P3 | **CLOSED** | Описание PR #4 полностью перезаписано из чистого UTF-8 файла через `gh pr edit 4 --body-file` и перепроверено обратным чтением (`gh pr view 4 --json body`) на точное совпадение и отсутствие mojibake (`Ð`/`Ñ`). Канонический отчёт обновлён, новый переносимый возвратный ZIP собран с POSIX `/` путями и `MANIFEST_SHA256.txt` (UTF-8 без BOM, LF). |
+
+---
+
+## Исторический архив — SUPERSEDED (Волна 9 — ранняя сдача возврата RR-01…RR-08, `2447cc0` / `8118b7e` / CI `46086432899` и `46087373389`)
+
+> **Статус:** Заменён (`SUPERSEDED`) актуальным статусом R3 выше после повторного независимого аудита от 2026-11-28, выявившего `LND-W9-R3-01…06`.
 
 | Поле | Значение |
 |---|---|
