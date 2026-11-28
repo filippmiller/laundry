@@ -16,6 +16,7 @@ import {
   stateLabel,
 } from "../labels";
 import { ChronometryPanel, ChurnPanel, ItemMixPanel } from "./analytics-panels";
+import { PickupQueuePanel, StuckOrdersPanel, escalationCapabilities } from "./ops-panels";
 import { Badge, type BadgeTone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card, CardBody, CardHeader } from "../components/ui/Card";
@@ -86,7 +87,6 @@ type CapacityMismatch = {
   stored: number;
   actual: number;
 };
-
 const PARTNER_ASSIGNABLE_STATES = new Set([
   "confirmed",
   "scheduled",
@@ -226,8 +226,11 @@ const CAPACITY_DRIFT_COLUMNS: DataTableColumn<CapacityMismatch>[] = [
 
 export function DispatcherWorkspace({
   notify,
+  roles,
 }: {
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
+  /** The session roles: the panel only offers the escalation actions the server allows them. */
+  roles: string[];
 }) {
   const [data, setData] = useState<DispatchOverview | null>(null);
   const [metrics, setMetrics] = useState<Metric | null>(null);
@@ -527,16 +530,7 @@ export function DispatcherWorkspace({
         </CardBody>
       </Card>
 
-      {/* 2. Объём: что приняли и сколько весит */}
-      <ItemMixPanel key={refreshNonce} notify={notify} />
-
-      {/* 3. Сколько идёт заказ: где теряется время */}
-      <ChronometryPanel key={refreshNonce} notify={notify} />
-
-      {/* 4. Клиенты, у которых доставка не состоялась */}
-      <ChurnPanel key={refreshNonce} notify={notify} />
-
-      {/* 5. Назначение курьера на забор, фабрики-прачечной и доставки */}
+      {/* 2. Назначение курьера на забор, фабрики-прачечной и доставки */}
       <Card>
         <CardHeader
           title="Назначение курьера и фабрики-прачечной"
@@ -763,7 +757,7 @@ export function DispatcherWorkspace({
         </CardBody>
       </Card>
 
-      {/* 6. Очереди забора и доставки */}
+      {/* 3. Очереди забора и доставки */}
       <Card>
         <CardHeader title="Очереди забора и доставки" />
         <CardBody className="stack">
@@ -832,7 +826,7 @@ export function DispatcherWorkspace({
         </CardBody>
       </Card>
 
-      {/* 7. Инциденты приёмки и расхождения */}
+      {/* 4. Инциденты приёмки и расхождения */}
       <Card>
         <CardHeader title="Инциденты приёмки и расхождения" />
         <CardBody>
@@ -851,7 +845,7 @@ export function DispatcherWorkspace({
         </CardBody>
       </Card>
 
-      {/* 8. Сверка ёмкости слотов */}
+      {/* 5. Сверка ёмкости слотов */}
       <Card>
         <CardHeader
           title="Сверка ёмкости слотов"
@@ -880,6 +874,25 @@ export function DispatcherWorkspace({
           />
         </CardBody>
       </Card>
+      {/* 6. Заказы, ждущие курьера: без этого списка слот молча занимался */}
+      <PickupQueuePanel notify={notify} refreshToken={refreshNonce} />
+
+      {/* 7. Объём: что приняли и сколько весит */}
+      <ItemMixPanel notify={notify} refreshToken={refreshNonce} />
+
+      {/* 8. Сколько идёт заказ: где теряется время */}
+      <ChronometryPanel notify={notify} refreshToken={refreshNonce} />
+
+      {/* 9. Клиенты, у которых доставка не состоялась */}
+      <ChurnPanel notify={notify} refreshToken={refreshNonce} />
+
+      {/* 10. Заказы, которые застряли: у них теперь есть владелец и причина */}
+      <StuckOrdersPanel
+        notify={notify}
+        refreshToken={refreshNonce}
+        capabilities={escalationCapabilities(roles)}
+      />
+
     </div>
   );
 }

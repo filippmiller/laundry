@@ -8,12 +8,16 @@ import {
   paymentIntents, quotes, refunds, services, users,
 } from "../db/schema.js";
 import { assertRole, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
-import { assertCursorTimestamp, escapeLikePattern, pgCursorTimestampSql } from "../core/cursor.js";
+import {
+  assertCursorTimestamp, decodeKeysetCursor, encodeKeysetCursor, escapeLikePattern, pgCursorTimestampSql,
+} from "../core/cursor.js";
 import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
+import { expireDueHolds as expireDueHoldsDomain } from "../domain/slot-reservation.js";
 import { loadOrder } from "./orders.js";
-import { queryPartnerAccrualTotals } from "./partner-payable.js";
+import { processOutboxBatch } from "./outbox.js";
+import { queryPartnerBalance } from "./partner-payable.js";
 
 const ACCOUNTS = [
   ["clearing", "Платежный клиринг"],
@@ -634,6 +638,7 @@ export async function orderFinance(db: Db, principal: Principal, orderId: string
 export async function partnerAccruals(db: Db, principal: Principal, input: { limit?: number } = {}) {
   assertRole(principal, ...ROLE_GROUPS.partner);
   if (!principal.partnerId) throw errors.forbidden("partner scope required");
+  const partnerId = principal.partnerId;
   const limit = Math.min(input.limit ?? 50, 100);
   const accruals = await db.select({
     id: partnerServiceAccruals.id,
@@ -693,9 +698,38 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
     amountKopeks: number;
     status: string;
     disputed: boolean;
+    disputeId: string | null;
+    disputeState: PartnerDisputeState | null;
   }>>();
+  // The dispute behind every billed line: the partner has to see which line is contested and
+  // where the contest stands. An open dispute wins over a settled one on the same line.
+  const disputeByLine = new Map<string, { id: string; state: PartnerDisputeState; open: boolean }>();
+  const lineIds = lineRows.map(row => row.id);
+  if (lineIds.length) {
+    const disputeRows = await db.select({
+      id: partnerDisputes.id,
+      invoiceLineId: partnerDisputes.invoiceLineId,
+      state: partnerDisputes.state,
+      openedAt: partnerDisputes.openedAt,
+    }).from(partnerDisputes).where(and(
+      eq(partnerDisputes.organizationId, principal.organizationId),
+      inArray(partnerDisputes.invoiceLineId, lineIds),
+    )).orderBy(desc(partnerDisputes.openedAt));
+    for (const dispute of disputeRows) {
+      const open = dispute.state === "open" || dispute.state === "investigating";
+      const existing = disputeByLine.get(dispute.invoiceLineId);
+      if (!existing || (open && !existing.open)) {
+        disputeByLine.set(dispute.invoiceLineId, {
+          id: dispute.id,
+          state: partnerDisputeState(dispute.state),
+          open,
+        });
+      }
+    }
+  }
   for (const row of lineRows) {
     const list = linesByInvoice.get(row.invoiceId) ?? [];
+    const dispute = disputeByLine.get(row.id);
     list.push({
       id: row.id,
       accrualId: row.accrualId,
@@ -708,9 +742,14 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
       amountKopeks: row.amountKopeks,
       status: row.state,
       disputed: row.accrualDisputed || row.state === "disputed",
+      disputeId: dispute?.id ?? null,
+      disputeState: dispute?.state ?? null,
     });
     linesByInvoice.set(row.invoiceId, list);
   }
+  // One balance for the whole history of the partner, not for the page of accruals above:
+  // the panel and the payout authorization have to read the same numbers.
+  const balance = await queryPartnerBalance(db, principal.organizationId, partnerId);
   return {
     partnerId: principal.partnerId,
     accruals,
@@ -718,9 +757,19 @@ export async function partnerAccruals(db: Db, principal: Principal, input: { lim
       ...inv,
       lines: linesByInvoice.get(inv.id) ?? [],
     })),
-    estimatedTotalKopeks: accruals
-      .filter(accrual => accrual.status !== "voided")
-      .reduce((total, accrual) => total + accrual.amountKopeks, 0),
+    /** The lifetime accrual total of the partner — the sum over every non-voided accrual. */
+    estimatedTotalKopeks: balance.accruedKopeks,
+    /** The full balance of the partner, shared with the payout authorization. */
+    balance,
+    /**
+     * What the platform owes the partner before payouts: the accrued work minus the amount
+     * that is contested right now. The contested part is reported separately and is not
+     * payable until the dispute is settled. Kept as an alias of
+     * `balance.grossPayableKopeks` — the money that is still free to pay out is
+     * `balance.availableKopeks`, which already subtracts paid and reserved payouts.
+     */
+    payableKopeks: balance.grossPayableKopeks,
+    disputedKopeks: balance.disputedKopeks,
   };
 }
 
@@ -1091,6 +1140,214 @@ export async function resolvePartnerDispute(
   });
 }
 
+/** The state a partner dispute is reported in. */
+export type PartnerDisputeState = "open" | "investigating" | "resolved";
+
+/** How the dispute was settled. `null` while the dispute is still open. */
+export type PartnerDisputeOutcome = "upheld" | "rejected" | "partial" | null;
+
+export type PartnerDisputeItem = {
+  id: string;
+  invoiceId: string;
+  invoiceLineId: string;
+  partnerId: string;
+  reason: string;
+  state: PartnerDisputeState;
+  outcome: PartnerDisputeOutcome;
+  creditKopeks: number;
+  creditNoteId: string | null;
+  amountKopeks: number;
+  openedBy: string;
+  openedAt: string;
+  resolvedAt: string | null;
+};
+
+/** The partner-facing row: the partner learns what was decided, not which note carries it. */
+export type PartnerScopedDisputeItem = Omit<PartnerDisputeItem, "creditNoteId">;
+
+export type PartnerDisputeListOptions = {
+  state?: "open" | "investigating" | "resolved";
+  limit?: number;
+  cursor?: string;
+};
+
+type DisputeDbState = "open" | "investigating" | "resolved" | "rejected";
+
+/**
+ * The database keeps a rejected dispute as its own state. To a reader a rejected dispute is a
+ * settled one, so it is reported as `resolved` with the outcome `rejected`.
+ */
+function partnerDisputeState(state: string): PartnerDisputeState {
+  if (state === "open" || state === "investigating") return state;
+  return "resolved";
+}
+
+type PartnerDisputeRow = {
+  id: string;
+  invoiceId: string;
+  invoiceLineId: string;
+  partnerId: string;
+  reason: string;
+  state: string;
+  amountKopeks: number;
+  openedBy: string;
+  openedAt: Date;
+  cursorTs: string;
+};
+
+async function partnerDisputePage(
+  db: Db,
+  principal: Principal,
+  input: PartnerDisputeListOptions,
+  scope: { partnerId: string | null },
+) {
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 200);
+  const decoded = input.cursor ? decodeKeysetCursor(input.cursor) : null;
+  const stateFilter: DisputeDbState[] | null = input.state === "resolved"
+    ? ["resolved", "rejected"]
+    : input.state ? [input.state as DisputeDbState] : null;
+
+  const rows = await db.select({
+    id: partnerDisputes.id,
+    invoiceId: partnerInvoices.id,
+    invoiceLineId: partnerInvoiceLines.id,
+    partnerId: partnerInvoices.partnerId,
+    reason: partnerDisputes.reason,
+    state: partnerDisputes.state,
+    amountKopeks: partnerInvoiceLines.amountKopeks,
+    openedBy: partnerDisputes.openedBy,
+    openedAt: partnerDisputes.openedAt,
+    cursorTs: pgCursorTimestampSql(partnerDisputes.openedAt),
+  }).from(partnerDisputes)
+    .innerJoin(partnerInvoiceLines, eq(partnerInvoiceLines.id, partnerDisputes.invoiceLineId))
+    .innerJoin(partnerInvoices, and(
+      eq(partnerInvoices.id, partnerInvoiceLines.invoiceId),
+      eq(partnerInvoices.organizationId, principal.organizationId),
+    ))
+    .where(and(
+      eq(partnerDisputes.organizationId, principal.organizationId),
+      scope.partnerId ? eq(partnerInvoices.partnerId, scope.partnerId) : undefined,
+      stateFilter ? inArray(partnerDisputes.state, stateFilter) : undefined,
+      decoded
+        ? sql`(${partnerDisputes.openedAt}, ${partnerDisputes.id}) < (${decoded.ts}::timestamptz, ${decoded.id})`
+        : undefined,
+    ))
+    .orderBy(desc(partnerDisputes.openedAt), desc(partnerDisputes.id))
+    .limit(limit + 1);
+
+  // How many disputes the same filters match — the whole set, not the page. Without it a
+  // reader cannot tell whether the cursor ends at the last dispute or somewhere in the middle.
+  const [countRow] = await db.select({ count: sql<number>`count(*)::int` })
+    .from(partnerDisputes)
+    .innerJoin(partnerInvoiceLines, eq(partnerInvoiceLines.id, partnerDisputes.invoiceLineId))
+    .innerJoin(partnerInvoices, and(
+      eq(partnerInvoices.id, partnerInvoiceLines.invoiceId),
+      eq(partnerInvoices.organizationId, principal.organizationId),
+    ))
+    .where(and(
+      eq(partnerDisputes.organizationId, principal.organizationId),
+      scope.partnerId ? eq(partnerInvoices.partnerId, scope.partnerId) : undefined,
+      stateFilter ? inArray(partnerDisputes.state, stateFilter) : undefined,
+    ));
+
+  const hasMore = rows.length > limit;
+  const pageRows: PartnerDisputeRow[] = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeKeysetCursor(last.cursorTs, last.id) : null;
+
+  const disputeIds = pageRows.map(row => row.id);
+  const credits = new Map<string, { creditKopeks: number; creditNoteId: string | null }>();
+  const resolutions = new Map<string, { outcome: PartnerDisputeOutcome; resolvedAt: string }>();
+  if (disputeIds.length) {
+    const notes = await db.select({
+      id: partnerCreditNotes.id,
+      disputeId: partnerCreditNotes.disputeId,
+      amountKopeks: partnerCreditNotes.amountKopeks,
+      state: partnerCreditNotes.state,
+      createdAt: partnerCreditNotes.createdAt,
+    }).from(partnerCreditNotes).where(and(
+      eq(partnerCreditNotes.organizationId, principal.organizationId),
+      inArray(partnerCreditNotes.disputeId, disputeIds),
+    )).orderBy(asc(partnerCreditNotes.createdAt));
+    for (const note of notes) {
+      if (!note.disputeId || note.state === "rejected") continue;
+      const current = credits.get(note.disputeId) ?? { creditKopeks: 0, creditNoteId: null };
+      current.creditKopeks += Number(note.amountKopeks ?? 0);
+      current.creditNoteId = current.creditNoteId ?? note.id;
+      credits.set(note.disputeId, current);
+    }
+    // The decision itself (upheld / rejected / partial) and the moment it was taken live in the
+    // domain event the resolution wrote; the dispute row itself keeps only its state.
+    const events = await db.select({
+      aggregateId: outboxEvents.aggregateId,
+      payloadJson: outboxEvents.payloadJson,
+      createdAt: outboxEvents.createdAt,
+    }).from(outboxEvents).where(and(
+      eq(outboxEvents.organizationId, principal.organizationId),
+      eq(outboxEvents.aggregateType, "partner_dispute"),
+      eq(outboxEvents.eventType, "partner_dispute.resolved"),
+      inArray(outboxEvents.aggregateId, disputeIds),
+    )).orderBy(asc(outboxEvents.createdAt));
+    for (const event of events) {
+      const payload = (event.payloadJson ?? {}) as { outcome?: unknown };
+      const outcome = typeof payload.outcome === "string" && ["upheld", "rejected", "partial"].includes(payload.outcome)
+        ? (payload.outcome as "upheld" | "rejected" | "partial")
+        : null;
+      resolutions.set(event.aggregateId, { outcome, resolvedAt: event.createdAt.toISOString() });
+    }
+  }
+
+  const items: PartnerDisputeItem[] = pageRows.map(row => {
+    const credit = credits.get(row.id) ?? { creditKopeks: 0, creditNoteId: null };
+    const resolution = resolutions.get(row.id);
+    const state = partnerDisputeState(row.state);
+    const outcome: PartnerDisputeOutcome = state === "resolved"
+      ? (resolution?.outcome ?? (credit.creditKopeks > 0 ? "partial" : "rejected"))
+      : null;
+    return {
+      id: row.id,
+      invoiceId: row.invoiceId,
+      invoiceLineId: row.invoiceLineId,
+      partnerId: row.partnerId,
+      reason: row.reason,
+      state,
+      outcome,
+      creditKopeks: credit.creditKopeks,
+      creditNoteId: credit.creditNoteId,
+      amountKopeks: Number(row.amountKopeks ?? 0),
+      openedBy: row.openedBy,
+      openedAt: row.openedAt.toISOString(),
+      resolvedAt: resolution?.resolvedAt ?? null,
+    };
+  });
+
+  return { items, nextCursor, totalCount: Number(countRow?.count ?? 0) };
+}
+
+/** Every partner dispute of this tenant, newest first. */
+export async function listPartnerDisputes(
+  db: Db,
+  principal: Principal,
+  input: PartnerDisputeListOptions = {},
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  const page = await partnerDisputePage(db, principal, input, { partnerId: null });
+  return page;
+}
+
+/** The disputes of the caller's own partner only — never another partner's money. */
+export async function listPartnerScopedDisputes(
+  db: Db,
+  principal: Principal,
+  input: PartnerDisputeListOptions = {},
+) {
+  assertRole(principal, ...ROLE_GROUPS.partner);
+  if (!principal.partnerId) throw errors.forbidden("partner scope required");
+  const page = await partnerDisputePage(db, principal, input, { partnerId: principal.partnerId });
+  const items: PartnerScopedDisputeItem[] = page.items.map(({ creditNoteId: _creditNoteId, ...item }) => item);
+  return { items, nextCursor: page.nextCursor, totalCount: page.totalCount };
+}
+
 export type FinanceQueueBucket = "active" | "history" | "all";
 
 type QueueCursor = {
@@ -1122,17 +1379,20 @@ function decodeQueueCursor(raw: string): { createdAt: string; id: string; priori
 const ACTIVE_PAYOUT_STATES = ["scheduled", "pending"] as const;
 const ACTIVE_CREDIT_NOTE_STATES = ["draft", "pending"] as const;
 
-export async function listPartnerPayouts(
+async function partnerPayoutPage(
   db: Db,
   principal: Principal,
-  input: { bucket?: FinanceQueueBucket; limit?: number; cursor?: string } = {},
+  input: { bucket?: FinanceQueueBucket; limit?: number; cursor?: string },
+  scope: { partnerId: string | null },
 ) {
-  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
   const bucket: FinanceQueueBucket = input.bucket ?? "active";
   const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 100);
   const parsedCursor = input.cursor ? decodeQueueCursor(input.cursor) : null;
 
-  const baseConditions = [eq(partnerPayouts.organizationId, principal.organizationId)];
+  const baseConditions = [
+    eq(partnerPayouts.organizationId, principal.organizationId),
+    ...(scope.partnerId ? [eq(partnerPayouts.partnerId, scope.partnerId)] : []),
+  ];
   if (bucket === "active") {
     baseConditions.push(inArray(partnerPayouts.state, [...ACTIVE_PAYOUT_STATES]));
   } else if (bucket === "history") {
@@ -1193,17 +1453,49 @@ export async function listPartnerPayouts(
   };
 }
 
-export async function listPartnerCreditNotes(
+/** Every partner payout of this tenant. */
+export async function listPartnerPayouts(
   db: Db,
   principal: Principal,
   input: { bucket?: FinanceQueueBucket; limit?: number; cursor?: string } = {},
 ) {
   assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  return partnerPayoutPage(db, principal, input, { partnerId: null });
+}
+
+/** The payouts of the caller's own partner only. */
+export async function listPartnerScopedPayouts(
+  db: Db,
+  principal: Principal,
+  input: { bucket?: FinanceQueueBucket; limit?: number; cursor?: string } = {},
+) {
+  assertRole(principal, ...ROLE_GROUPS.partner);
+  if (!principal.partnerId) throw errors.forbidden("partner scope required");
+  return partnerPayoutPage(db, principal, input, { partnerId: principal.partnerId });
+}
+
+async function partnerCreditNotePage(
+  db: Db,
+  principal: Principal,
+  input: { bucket?: FinanceQueueBucket; limit?: number; cursor?: string },
+  scope: { partnerId: string | null },
+) {
   const bucket: FinanceQueueBucket = input.bucket ?? "active";
   const limit = Math.min(Math.max(Math.trunc(input.limit ?? 50), 1), 100);
   const parsedCursor = input.cursor ? decodeQueueCursor(input.cursor) : null;
 
-  const baseConditions = [eq(partnerCreditNotes.organizationId, principal.organizationId)];
+  const baseConditions = [
+    eq(partnerCreditNotes.organizationId, principal.organizationId),
+    ...(scope.partnerId
+      ? [inArray(
+        partnerCreditNotes.invoiceId,
+        db.select({ id: partnerInvoices.id }).from(partnerInvoices).where(and(
+          eq(partnerInvoices.organizationId, principal.organizationId),
+          eq(partnerInvoices.partnerId, scope.partnerId),
+        )),
+      )]
+      : []),
+  ];
   if (bucket === "active") {
     baseConditions.push(inArray(partnerCreditNotes.state, [...ACTIVE_CREDIT_NOTE_STATES]));
   } else if (bucket === "history") {
@@ -1262,6 +1554,51 @@ export async function listPartnerCreditNotes(
     hasMore,
     totalCount: Number(countRow?.count ?? 0),
   };
+}
+
+/** Every partner credit note of this tenant. */
+export async function listPartnerCreditNotes(
+  db: Db,
+  principal: Principal,
+  input: { bucket?: FinanceQueueBucket; limit?: number; cursor?: string } = {},
+) {
+  assertRole(principal, ...ROLE_GROUPS.finance, ...ROLE_GROUPS.admin);
+  return partnerCreditNotePage(db, principal, input, { partnerId: null });
+}
+
+/** The credit notes of the caller's own partner only. */
+export async function listPartnerScopedCreditNotes(
+  db: Db,
+  principal: Principal,
+  input: { bucket?: FinanceQueueBucket; limit?: number; cursor?: string } = {},
+) {
+  assertRole(principal, ...ROLE_GROUPS.partner);
+  if (!principal.partnerId) throw errors.forbidden("partner scope required");
+  return partnerCreditNotePage(db, principal, input, { partnerId: principal.partnerId });
+}
+
+/**
+ * Releases the slot holds whose TTL has expired.
+ *
+ * The sweep itself lives in the domain (`src/domain/slot-reservation.ts`); this is the operations
+ * surface around it, so a stand without a worker process can still free the capacity a stale
+ * hold is keeping.
+ */
+export async function expireDueHolds(db: Db, principal: Principal) {
+  assertRole(principal, ...ROLE_GROUPS.worker);
+  const swept = await expireDueHoldsDomain(db, { principal });
+  return { expired: swept.expired };
+}
+
+/**
+ * Delivers the events that piled up in the outbox.
+ *
+ * The worker keeps draining on its own; this is the manual drain for a stand that runs without a
+ * worker process.
+ */
+export async function drainOutbox(db: Db, principal: Principal) {
+  assertRole(principal, ...ROLE_GROUPS.worker);
+  return processOutboxBatch(db, principal);
 }
 
 const CHARGEBACK_STATES = ["disputed", "chargeback_lost"] as const;
@@ -1806,7 +2143,9 @@ export async function approvePartnerCreditNote(
 
 /**
  * Computes a partner's available payable balance inside an open transaction whose caller holds
- * the `partners` FOR UPDATE lock:
+ * the `partners` FOR UPDATE lock. It is a thin adapter over `queryPartnerBalance`, the single
+ * balance the partner panel reads too, so what is displayed and what may be paid out can never
+ * diverge:
  * - `grossPayableKopeks`: non-voided accruals minus net disputed holds (where each disputed
  *   accrual holds only its remaining uncredited balance, never double-deducting prior partial credits)
  * - `paidKopeks`: already approved or paid payouts
@@ -1819,27 +2158,13 @@ async function computePartnerBalanceTx(
   partnerId: string,
   excludePayoutId?: string,
 ) {
-  const [accrualTotals] = await queryPartnerAccrualTotals(tx, organizationId, partnerId);
-  const [paidRow] = await tx.select({ total: sum(partnerPayouts.amountKopeks) })
-    .from(partnerPayouts)
-    .where(and(
-      eq(partnerPayouts.organizationId, organizationId),
-      eq(partnerPayouts.partnerId, partnerId),
-      inArray(partnerPayouts.state, ["approved", "paid"]),
-    ));
-  const [reservedRow] = await tx.select({ total: sum(partnerPayouts.amountKopeks) })
-    .from(partnerPayouts)
-    .where(and(
-      eq(partnerPayouts.organizationId, organizationId),
-      eq(partnerPayouts.partnerId, partnerId),
-      inArray(partnerPayouts.state, ["scheduled", "pending"]),
-      ...(excludePayoutId ? [sql`${partnerPayouts.id} <> ${excludePayoutId}`] : []),
-    ));
-  const grossPayableKopeks = accrualTotals?.grossPayableKopeks ?? 0;
-  const paidKopeks = Number(paidRow?.total ?? 0);
-  const reservedKopeks = Number(reservedRow?.total ?? 0);
-  const availablePayableKopeks = grossPayableKopeks - paidKopeks - reservedKopeks;
-  return { grossPayableKopeks, paidKopeks, reservedKopeks, availablePayableKopeks };
+  const balance = await queryPartnerBalance(tx, organizationId, partnerId, { excludePayoutId });
+  return {
+    grossPayableKopeks: balance.grossPayableKopeks,
+    paidKopeks: balance.paidKopeks,
+    reservedKopeks: balance.reservedKopeks,
+    availablePayableKopeks: balance.availableKopeks,
+  };
 }
 
 /** Schedules a partner payout in `scheduled` state; requires a second finance/admin approver to release. */

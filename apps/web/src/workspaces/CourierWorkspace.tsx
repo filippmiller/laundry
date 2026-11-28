@@ -67,6 +67,27 @@ type ShiftReconciliation = {
   };
 };
 
+/**
+ * The server-side reconciliation of a closed shift: the immutable close snapshot plus every
+ * post-close adjustment recorded for a late valid offline scan. Without it the courier has no
+ * way to explain a scan that landed after the shift was closed.
+ */
+type ShiftReconciliationDetail = {
+  shiftId: string;
+  state: string;
+  completedAt: string | null;
+  snapshot: { stops: Record<string, number>; scans: { accepted: number; rejected: number } } | null;
+  adjustments: {
+    id: string;
+    scanEventId: string;
+    deltaAccepted: number;
+    deltaRejected: number;
+    reason: string;
+    recordedAt: string;
+  }[];
+  effectiveScans: { accepted: number; rejected: number };
+};
+
 type CourierShift = {
   shiftId: string;
   state: string;
@@ -121,6 +142,8 @@ type DeclaredItemView = {
   label: string;
   category: string;
   quantity: number;
+  /** What the customer stated the piece is worth. `null` means "no value declared". */
+  declaredValueKopeks?: number | null;
 };
 
 type IntakeMode = "economy_bag" | "protected_items" | "mixed";
@@ -338,6 +361,10 @@ function normalizeOrder(raw: unknown): OrderDetails | null {
       label: String(d.label ?? d.subtypeId ?? "Вещь"),
       category: String(d.category ?? ""),
       quantity: Number(d.quantity ?? 0),
+      // The customer's own declaration of the value — the reference the courier confirms
+      // or contradicts at intake.
+      declaredValueKopeks:
+        typeof d.declaredValueKopeks === "number" ? d.declaredValueKopeks : null,
     }))
     .filter(d => d.subtypeId.length > 0);
 
@@ -479,6 +506,11 @@ export function CourierWorkspace({
   const [shift, setShift] = useState<CourierShift | null>(null);
   const [shiftLoading, setShiftLoading] = useState(false);
   const [shiftReconciliation, setShiftReconciliation] = useState<ShiftReconciliation | null>(null);
+  // The id of the last shift this courier closed. The reconciliation stays reachable after the
+  // shift is gone: late offline scans may still arrive and adjust the snapshot afterwards.
+  const [closedShiftId, setClosedShiftId] = useState<string | null>(null);
+  const [shiftReconciliationDetail, setShiftReconciliationDetail] = useState<ShiftReconciliationDetail | null>(null);
+  const [shiftReconciliationError, setShiftReconciliationError] = useState<string | null>(null);
 
   // Offline queue & scanner state
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -748,6 +780,26 @@ export function CourierWorkspace({
     setIntakeMode(requiredIntakeMode ?? "economy_bag");
   }, [selectedStop?.stopId, requiredIntakeMode]);
 
+  // The customer's declaration arrives together with the order. A piece picked before the
+  // order loaded gets the declared value filled in as soon as the declaration is known —
+  // the courier confirms it or writes a different one, but never starts from a blank field.
+  useEffect(() => {
+    const declared = orderDetails?.declaredItems ?? [];
+    if (!declared.length || picked.length === 0) return;
+    setItemMeta(prev => {
+      const next = { ...prev };
+      let changed = false;
+      for (const item of picked) {
+        if (next[item.subtypeId]) continue;
+        const kopeks = declared.find(entry => entry.subtypeId === item.subtypeId)?.declaredValueKopeks;
+        if (typeof kopeks !== "number") continue;
+        next[item.subtypeId] = { declaredValueRub: String(kopeks / 100), note: "" };
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [orderDetails, picked]);
+
   const syncQueue = useCallback(async () => {
     if (syncingRef.current || !actorScope || !deviceId) return;
     if (!isOnline) {
@@ -950,9 +1002,35 @@ export function CourierWorkspace({
         },
       });
       setShift(null);
+      setClosedShiftId(shift.shiftId);
+      setShiftReconciliationDetail(null);
+      setShiftReconciliationError(null);
       notify({ kind: "ok", text: "Смена завершена. Сверка сформирована." });
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setShiftLoading(false);
+    }
+  };
+
+  /**
+   * Loads the authoritative reconciliation of a closed shift. The close response carries only the
+   * snapshot taken at that moment; the server adds corrections for late valid offline scans, so
+   * the courier has to be able to re-read it after the fact.
+   */
+  const loadShiftReconciliation = async (shiftId: string) => {
+    setShiftLoading(true);
+    setShiftReconciliationError(null);
+    try {
+      const res = await api<ShiftReconciliationDetail>(
+        `/courier/shifts/${encodeURIComponent(shiftId)}/reconciliation`,
+      );
+      setShiftReconciliationDetail(res);
+    } catch (err) {
+      setShiftReconciliationDetail(null);
+      const message = formatError(err);
+      setShiftReconciliationError(message);
+      notify({ kind: "error", text: message });
     } finally {
       setShiftLoading(false);
     }
@@ -1056,12 +1134,30 @@ export function CourierWorkspace({
     }
   };
 
+  /** What the customer declared for a piece — the reference the courier confirms or contradicts. */
+  const customerDeclaredKopeks = (subtypeId: string): number | null => {
+    const declared = (orderDetails?.declaredItems ?? []).find(item => item.subtypeId === subtypeId);
+    const kopeks = declared?.declaredValueKopeks;
+    return typeof kopeks === "number" ? kopeks : null;
+  };
+
+  /** The same value in the rubles the courier types into the intake form. */
+  const customerDeclaredRub = (subtypeId: string): string => {
+    const kopeks = customerDeclaredKopeks(subtypeId);
+    return kopeks === null ? "" : String(kopeks / 100);
+  };
+
   const handlePickedChange = (next: PickedGarment[]) => {
     setPicked(next);
     setItemMeta(prev => {
       const kept: Record<string, IntakeItemMeta> = {};
       for (const item of next) {
-        kept[item.subtypeId] = prev[item.subtypeId] ?? { declaredValueRub: "5000", note: "" };
+        // The declared value is not invented: it starts as what the customer declared
+        // (the quote carries it) and stays empty when the customer declared nothing.
+        const existing = prev[item.subtypeId];
+        kept[item.subtypeId] = existing
+          ? existing
+          : { declaredValueRub: customerDeclaredRub(item.subtypeId), note: "" };
       }
       return kept;
     });
@@ -1071,7 +1167,7 @@ export function CourierWorkspace({
     setItemMeta(prev => ({
       ...prev,
       [subtypeId]: {
-        ...(prev[subtypeId] ?? { declaredValueRub: "5000", note: "" }),
+        ...(prev[subtypeId] ?? { declaredValueRub: "", note: "" }),
         [field]: value,
       },
     }));
@@ -1133,13 +1229,20 @@ export function CourierWorkspace({
         const items: Array<Record<string, unknown>> = [];
         let index = 0;
         for (const item of picked) {
-          const meta = itemMeta[item.subtypeId] ?? { declaredValueRub: "5000", note: "" };
+          const meta = itemMeta[item.subtypeId] ?? { declaredValueRub: "", note: "" };
           const trimmedDeclared = meta.declaredValueRub.trim();
           const parsedDeclared = trimmedDeclared ? Number(trimmedDeclared.replace(",", ".")) : NaN;
           const declaredValueKopeks =
             trimmedDeclared && Number.isFinite(parsedDeclared) && parsedDeclared >= 0
               ? Math.round(parsedDeclared * 100)
               : undefined;
+          // The value has one author — the customer — and one confirmation point — this intake.
+          // So the courier either confirms the declared value or records a different one; a
+          // cleared field is a discrepancy as well, because nothing confirmed the declaration.
+          const customerKopeks = customerDeclaredKopeks(item.subtypeId);
+          const settlement = customerKopeks === null
+            ? undefined
+            : declaredValueKopeks === customerKopeks ? "confirmed" : "discrepancy";
           for (let piece = 0; piece < item.quantity; piece += 1) {
             index += 1;
             const entry: Record<string, unknown> = {
@@ -1148,6 +1251,7 @@ export function CourierWorkspace({
               subtypeId: item.subtypeId,
               description: meta.note.trim() || item.label,
               ...(declaredValueKopeks !== undefined ? { declaredValueKopeks } : {}),
+              ...(settlement ? { declaredValueSettlement: settlement } : {}),
             };
             if (intakeEvidenceIds.length > 0) {
               entry.evidenceAssetIds = intakeEvidenceIds;
@@ -1242,350 +1346,7 @@ export function CourierWorkspace({
         lede="Смена, маршрутный лист, приёмка на адресе и выдача заказов клиенту."
       />
 
-      {/* 1. Смена курьера */}
-      <section aria-label="Смена курьера">
-        <Card>
-          <CardHeader
-            title={
-              <span className="row row--tight">
-                <Truck size={20} aria-hidden="true" />
-                <span>Смена курьера</span>
-              </span>
-            }
-            subtitle={
-              shift ? (
-                <>
-                  ID: {shift.shiftId.slice(0, 8)} ·{" "}
-                  <Badge tone={SHIFT_STATE_TONES[shift.state] ?? "info"}>
-                    Статус: {stateLabel(SHIFT_STATE_LABELS, shift.state)}
-                  </Badge>
-                  {shift.startedAt ? ` · Начала ${dt(shift.startedAt)}` : ""}
-                </>
-              ) : (
-                <>
-                  Активная смена не открыта
-                  {demo?.shiftId ? ` · Демо-смена: ${demo.shiftId.slice(0, 8)}` : ""}
-                </>
-              )
-            }
-            actions={
-              <>
-                <Button
-                  variant="secondary"
-                  leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
-                  disabled={shiftLoading}
-                  onClick={() => void loadShift()}
-                >
-                  Обновить смену
-                </Button>
-                {!shift || shift.state !== "active" ? (
-                  <Button
-                    variant="primary"
-                    leadingIcon={<Play size={16} aria-hidden="true" />}
-                    disabled={shiftLoading}
-                    onClick={() => void handleOpenShift()}
-                  >
-                    Открыть смену
-                  </Button>
-                ) : (
-                  <Button
-                    variant="secondary"
-                    leadingIcon={<Square size={16} aria-hidden="true" />}
-                    disabled={shiftLoading}
-                    onClick={() => void handleCompleteShift()}
-                  >
-                    Закрыть смену
-                  </Button>
-                )}
-              </>
-            }
-          />
-          <CardBody>
-            {shiftReconciliation && (
-              <div role="status">
-                <Card quiet>
-                  <div className="row">
-                    <CheckCircle2 size={18} aria-hidden="true" />
-                    <strong>Сверка по закрытой смене</strong>
-                  </div>
-                  <StatGrid>
-                    <StatTile label="Точек маршрута" value={shiftReconciliation.stops} />
-                    <StatTile label="Сканов принято" value={shiftReconciliation.scans.accepted} />
-                    <StatTile label="Сканов отклонено" value={shiftReconciliation.scans.rejected} />
-                  </StatGrid>
-                </Card>
-              </div>
-            )}
-          </CardBody>
-        </Card>
-      </section>
-
-      {/* 2. Офлайн-очередь и сканер QR/штрихкодов */}
-      <section aria-label="Офлайн-очередь и сканер QR">
-        <Card>
-          <CardHeader
-            title={
-              <span className="row row--tight">
-                {isOnline ? (
-                  <Wifi size={20} aria-hidden="true" />
-                ) : (
-                  <WifiOff size={20} aria-hidden="true" />
-                )}
-                <span>Офлайн-очередь и сканер QR</span>
-              </span>
-            }
-            subtitle={`Связь: ${isOnline ? "В сети" : "Офлайн (сохранение в IndexedDB)"} · Устройство: ${deviceId ? deviceId.slice(0, 8) : "…"} · В очереди: ${pendingQueueCount}`}
-            actions={
-              <Checkbox
-                label="Офлайн-режим (тест без сети)"
-                checked={simulatedOffline}
-                onChange={e => setSimulatedOffline(e.target.checked)}
-              />
-            }
-          />
-          <CardBody>
-            <div className="button-row">
-              <Button
-                variant="primary"
-                leadingIcon={<QrCode size={18} aria-hidden="true" />}
-                onClick={() => setScannerOpen(true)}
-              >
-                Камера / Ручной скан QR
-              </Button>
-
-              <Button
-                variant="secondary"
-                leadingIcon={<ScanLine size={18} aria-hidden="true" />}
-                disabled={!selectedStop}
-                onClick={() => void handleScanCurrentOrder()}
-              >
-                Сканировать текущий заказ
-              </Button>
-
-              <Button
-                variant="secondary"
-                leadingIcon={<RefreshCw size={18} aria-hidden="true" />}
-                disabled={syncing || !isOnline}
-                onClick={() => void syncQueue()}
-              >
-                {syncing ? "Синхронизация..." : `Синхронизировать очередь (${pendingQueueCount})`}
-              </Button>
-            </div>
-
-            {unverifiedLegacyCount > 0 && (
-              <div className="alert-banner" role="status">
-                <AlertTriangle size={16} aria-hidden="true" />
-                <span>
-                  Обнаружена прежняя офлайн-очередь ({unverifiedLegacyCount} записей) с неподтверждённым владельцем.
-                  Записи не удалены и не присвоены автоматически.
-                </span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={recoveringLegacy}
-                  onClick={() => void handleRecoverLegacyQueue()}
-                >
-                  {recoveringLegacy ? "Перенос..." : "Перенести в мою очередь"}
-                </Button>
-              </div>
-            )}
-
-            {pendingScans.length > 0 && (
-              <div className="stack stack--tight">
-                <span className="muted">Ожидают синхронизации ({pendingScans.length}):</span>
-                <ul className="list">
-                  {pendingScans.map(scan => {
-                    const rejectedInfo = lastSync?.rejectedReasons.find(
-                      r => r.clientEventId === scan.clientEventId,
-                    );
-                    return (
-                      <li key={scan.clientEventId} className="list-item">
-                        <span className="row row--tight">
-                          <Badge tone={rejectedInfo ? "danger" : "neutral"}>
-                            {stateLabel(SCAN_TYPE_LABELS, scan.scannedType)}
-                          </Badge>
-                          <span>{scan.scannedId}</span>
-                          {rejectedInfo && (
-                            <span className="muted">· {rejectedInfo.reason}</span>
-                          )}
-                        </span>
-                        <span className="row row--tight">
-                          <span className="muted">{dt(scan.capturedAt)}</span>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => void handleRemoveScan(scan.clientEventId)}
-                          >
-                            Удалить из очереди
-                          </Button>
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-
-            {lastSync && (
-              <div role="status">
-                <Card quiet>
-                  <div className="row">
-                    <RefreshCw size={18} aria-hidden="true" />
-                    <strong>Последняя синхронизация ({dt(lastSync.syncedAt)})</strong>
-                  </div>
-                  <StatGrid>
-                    <StatTile label="В очереди осталось" value={pendingQueueCount} />
-                    <StatTile label="Принято" value={lastSync.accepted} />
-                    <StatTile label="Дубликатов" value={lastSync.duplicate} />
-                    <StatTile label="Отклонено" value={lastSync.rejected} />
-                  </StatGrid>
-                  {lastSync.rejectedReasons.length > 0 && (
-                    <div className="stack stack--tight">
-                      {lastSync.rejectedReasons.map((rej, idx) => (
-                        <div key={`${rej.clientEventId}-${idx}`} className="alert-banner">
-                          <AlertTriangle size={16} aria-hidden="true" />
-                          <span>
-                            {rej.scannedId ? `${rej.scannedId}: ` : ""}
-                            {rej.reason}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Card>
-              </div>
-            )}
-          </CardBody>
-        </Card>
-      </section>
-
-      {/* 3. Маршрутный лист */}
-      <section aria-label="Маршрутный лист">
-        <Card>
-          <CardHeader
-            title={
-              <span className="row row--tight">
-                <MapPin size={20} aria-hidden="true" />
-                <span>Маршрутный лист</span>
-              </span>
-            }
-            actions={
-              <Button
-                variant="secondary"
-                leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
-                disabled={routeLoading}
-                onClick={() => void loadRoute()}
-              >
-                Обновить маршрут
-              </Button>
-            }
-          />
-          <CardBody>
-            {stops.length === 0 ? (
-              <EmptyState
-                icon={<MapPin size={20} aria-hidden="true" />}
-                title={
-                  routeLoading
-                    ? "Загрузка маршрута..."
-                    : "На текущий момент точки маршрута не назначены."
-                }
-              />
-            ) : (
-              <Stagger as="ul" className="list">
-                {stops.map(stop => {
-                  const isSelected = selectedStop?.stopId === stop.stopId;
-                  const kindLabel = stop.kind === "pickup" ? "Забор" : "Доставка";
-                  const stopStateLabel = stateLabel(STOP_STATE_LABELS, stop.state);
-                  const orderStateLabel = stateLabel(ORDER_STATE_LABELS, stop.orderState);
-                  return (
-                    <Reveal as="li" key={stop.stopId}>
-                      <button
-                        type="button"
-                        className={cx("list-item", isSelected && "selected")}
-                        aria-pressed={isSelected}
-                        onClick={() => setSelectedStopId(stop.stopId)}
-                      >
-                        <span className="row row--tight">
-                          <strong>#{stop.sequence}</strong>
-                          <span>{stop.publicNumber}</span>
-                          <span>· {kindLabel}</span>
-                          {stop.address && <span>· {stop.address}</span>}
-                        </span>
-                        <span className="row row--tight">
-                          <Badge tone={STOP_STATE_TONES[stop.state] ?? "neutral"}>
-                            Точка: {stopStateLabel}
-                          </Badge>
-                          {orderStateLabel ? (
-                            <Badge tone={ORDER_STATE_TONES[stop.orderState] ?? "neutral"}>
-                              Заказ: {orderStateLabel}
-                            </Badge>
-                          ) : null}
-                        </span>
-                      </button>
-                    </Reveal>
-                  );
-                })}
-              </Stagger>
-            )}
-
-            {selectedStop && (
-              <div className="row row--between">
-                <div className="stack stack--tight">
-                  <strong>
-                    Выбрана точка #{selectedStop.sequence} ({selectedStop.publicNumber})
-                  </strong>
-                  <span className="row row--tight">
-                    <span className="muted">
-                      Тип: {selectedStop.kind === "pickup" ? "Забор" : "Доставка"}
-                    </span>
-                    <Badge tone={STOP_STATE_TONES[selectedStop.state] ?? "neutral"}>
-                      Статус точки: {stateLabel(STOP_STATE_LABELS, selectedStop.state)}
-                    </Badge>
-                    <Badge tone={ORDER_STATE_TONES[selectedStop.orderState] ?? "neutral"}>
-                      Статус заказа:{" "}
-                      {stateLabel(ORDER_STATE_LABELS, selectedStop.orderState)}
-                    </Badge>
-                  </span>
-                  {(selectedStop.address || selectedStop.apartment) && (
-                    <span>
-                      Адрес: {selectedStop.address ?? "—"}
-                      {selectedStop.apartment ? `, кв. ${selectedStop.apartment}` : ""}
-                    </span>
-                  )}
-                  {selectedStop.notes && (
-                    <span className="muted">Примечание к адресу: {selectedStop.notes}</span>
-                  )}
-                </div>
-
-                <div className="button-row">
-                  <Button
-                    variant="secondary"
-                    leadingIcon={<Navigation size={16} aria-hidden="true" />}
-                    disabled={stopActionBusy || selectedStop.state !== "pending"}
-                    onClick={() => void handleStopTransition("start")}
-                  >
-                    Выехал
-                  </Button>
-
-                  <Button
-                    variant="primary"
-                    leadingIcon={<Clock size={16} aria-hidden="true" />}
-                    disabled={
-                      stopActionBusy ||
-                      (selectedStop.state !== "pending" && selectedStop.state !== "en_route")
-                    }
-                    onClick={() => void handleStopTransition("arrive")}
-                  >
-                    Прибыл
-                  </Button>
-                </div>
-              </div>
-            )}
-          </CardBody>
-        </Card>
-      </section>
-
-      {/* 4. Приёмка на адресе (для kind === "pickup") */}
+      {/* 1. Приёмка на адресе (для kind === "pickup") */}
       {selectedStop?.kind === "pickup" && (
         <section aria-label="Приёмка на адресе">
           <Card>
@@ -1727,6 +1488,12 @@ export function CourierWorkspace({
                                 <span className="garment-picked-qty">
                                   принято {acceptedQuantity}
                                 </span>
+                                <span className="garment-picked-qty">
+                                  ценность{" "}
+                                  {declared.declaredValueKopeks === null || declared.declaredValueKopeks === undefined
+                                    ? "не заявлена"
+                                    : money(declared.declaredValueKopeks)}
+                                </span>
                                 {diff === 0 ? (
                                   <Badge tone="ok">совпадает</Badge>
                                 ) : (
@@ -1745,28 +1512,54 @@ export function CourierWorkspace({
                       value={picked}
                       onChange={handlePickedChange}
                       title="Что приняли"
-                      hint="Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Только ценность и дефекты, если они есть."
-                      renderExtra={item => (
-                        <span className="garment-row-fields">
-                          <input
-                            type="number"
-                            min={0}
-                            step={100}
-                            value={itemMeta[item.subtypeId]?.declaredValueRub ?? "5000"}
-                            onChange={e =>
-                              handleMetaChange(item.subtypeId, "declaredValueRub", e.target.value)
-                            }
-                            aria-label={`Объявленная ценность: ${item.label}`}
-                          />
-                          <input
-                            type="text"
-                            placeholder="дефекты, если есть"
-                            value={itemMeta[item.subtypeId]?.note ?? ""}
-                            onChange={e => handleMetaChange(item.subtypeId, "note", e.target.value)}
-                            aria-label={`Примечание: ${item.label}`}
-                          />
-                        </span>
-                      )}
+                      hint="Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Ценность подставляется из описи клиента: если она совпадает, вы её подтверждаете, если нет — записываете расхождение."
+                      renderExtra={item => {
+                        const customerKopeks = customerDeclaredKopeks(item.subtypeId);
+                        const typed = (itemMeta[item.subtypeId]?.declaredValueRub ?? "").trim();
+                        const typedValue = typed ? Number(typed.replace(",", ".")) : NaN;
+                        const typedKopeks = Number.isFinite(typedValue) && typedValue >= 0
+                          ? Math.round(typedValue * 100)
+                          : undefined;
+                        // The settlement is shown while the courier types: a value that differs
+                        // from the declaration is a discrepancy, not a quiet overwrite.
+                        const settlement = customerKopeks === null
+                          ? null
+                          : typedKopeks === customerKopeks ? "confirmed" : "discrepancy";
+                        return (
+                          <span className="garment-row-fields">
+                            <span className="muted">
+                              клиент заявил: {customerKopeks === null ? "не заявлена" : money(customerKopeks)}
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              // The value comes from the customer's declaration and may carry
+                              // kopecks. A step the typed value does not match would make the
+                              // browser refuse the whole intake form.
+                              step="any"
+                              placeholder="не заявлена"
+                              value={itemMeta[item.subtypeId]?.declaredValueRub ?? ""}
+                              onChange={e =>
+                                handleMetaChange(item.subtypeId, "declaredValueRub", e.target.value)
+                              }
+                              aria-label={`Объявленная ценность: ${item.label}`}
+                            />
+                            <input
+                              type="text"
+                              placeholder="дефекты, если есть"
+                              value={itemMeta[item.subtypeId]?.note ?? ""}
+                              onChange={e => handleMetaChange(item.subtypeId, "note", e.target.value)}
+                              aria-label={`Примечание: ${item.label}`}
+                            />
+                            {settlement === "confirmed" ? (
+                              <Badge tone="ok">подтверждено</Badge>
+                            ) : null}
+                            {settlement === "discrepancy" ? (
+                              <Badge tone="warn">расхождение</Badge>
+                            ) : null}
+                          </span>
+                        );
+                      }}
                     />
                   </div>
                 )}
@@ -1792,17 +1585,25 @@ export function CourierWorkspace({
                     variant="primary"
                     leadingIcon={<ShieldCheck size={18} aria-hidden="true" />}
                     disabled={intakeBusy || !dualConfirmed}
+                    aria-describedby="intake-dual-confirm-hint"
                   >
                     {intakeBusy ? "Сохранение..." : "Зафиксировать приёмку"}
                   </Button>
                 </div>
+                {/* The button is disabled until the customer confirms the handover — say so next to
+                    it instead of leaving a grey button with no explanation (MA-28). */}
+                <p className="muted u-mt-8px" id="intake-dual-confirm-hint">
+                  {dualConfirmed
+                    ? "Подтверждение получено — можно фиксировать приёмку."
+                    : "Отметьте подтверждение передачи и описи — без него приёмку зафиксировать нельзя."}
+                </p>
               </form>
             </CardBody>
           </Card>
         </section>
       )}
 
-      {/* 5. Выдача заказа клиенту (для kind === "delivery") */}
+      {/* 2. Выдача заказа клиенту (для kind === "delivery") */}
       {selectedStop?.kind === "delivery" && (
         <section aria-label="Выдача заказа клиенту">
           <Card>
@@ -1925,6 +1726,415 @@ export function CourierWorkspace({
           </Card>
         </section>
       )}
+
+      {/* 3. Маршрутный лист */}
+      <section aria-label="Маршрутный лист">
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                <MapPin size={20} aria-hidden="true" />
+                <span>Маршрутный лист</span>
+              </span>
+            }
+            actions={
+              <Button
+                variant="secondary"
+                leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+                disabled={routeLoading}
+                onClick={() => void loadRoute()}
+              >
+                Обновить маршрут
+              </Button>
+            }
+          />
+          <CardBody>
+            {stops.length === 0 ? (
+              <EmptyState
+                icon={<MapPin size={20} aria-hidden="true" />}
+                title={
+                  routeLoading
+                    ? "Загрузка маршрута..."
+                    : "На текущий момент точки маршрута не назначены."
+                }
+              />
+            ) : (
+              <Stagger as="ul" className="list">
+                {stops.map(stop => {
+                  const isSelected = selectedStop?.stopId === stop.stopId;
+                  const kindLabel = stop.kind === "pickup" ? "Забор" : "Доставка";
+                  const stopStateLabel = stateLabel(STOP_STATE_LABELS, stop.state);
+                  const orderStateLabel = stateLabel(ORDER_STATE_LABELS, stop.orderState);
+                  return (
+                    <Reveal as="li" key={stop.stopId}>
+                      <button
+                        type="button"
+                        className={cx("list-item", isSelected && "selected")}
+                        aria-pressed={isSelected}
+                        onClick={() => setSelectedStopId(stop.stopId)}
+                      >
+                        <span className="row row--tight">
+                          <strong>#{stop.sequence}</strong>
+                          <span>{stop.publicNumber}</span>
+                          <span>· {kindLabel}</span>
+                          {stop.address && <span>· {stop.address}</span>}
+                        </span>
+                        <span className="row row--tight">
+                          <Badge tone={STOP_STATE_TONES[stop.state] ?? "neutral"}>
+                            Точка: {stopStateLabel}
+                          </Badge>
+                          {orderStateLabel ? (
+                            <Badge tone={ORDER_STATE_TONES[stop.orderState] ?? "neutral"}>
+                              Заказ: {orderStateLabel}
+                            </Badge>
+                          ) : null}
+                        </span>
+                      </button>
+                    </Reveal>
+                  );
+                })}
+              </Stagger>
+            )}
+
+            {selectedStop && (
+              <div className="row row--between">
+                <div className="stack stack--tight">
+                  <strong>
+                    Выбрана точка #{selectedStop.sequence} ({selectedStop.publicNumber})
+                  </strong>
+                  <span className="row row--tight">
+                    <span className="muted">
+                      Тип: {selectedStop.kind === "pickup" ? "Забор" : "Доставка"}
+                    </span>
+                    <Badge tone={STOP_STATE_TONES[selectedStop.state] ?? "neutral"}>
+                      Статус точки: {stateLabel(STOP_STATE_LABELS, selectedStop.state)}
+                    </Badge>
+                    <Badge tone={ORDER_STATE_TONES[selectedStop.orderState] ?? "neutral"}>
+                      Статус заказа:{" "}
+                      {stateLabel(ORDER_STATE_LABELS, selectedStop.orderState)}
+                    </Badge>
+                  </span>
+                  {(selectedStop.address || selectedStop.apartment) && (
+                    <span>
+                      Адрес: {selectedStop.address ?? "—"}
+                      {selectedStop.apartment ? `, кв. ${selectedStop.apartment}` : ""}
+                    </span>
+                  )}
+                  {selectedStop.notes && (
+                    <span className="muted">Примечание к адресу: {selectedStop.notes}</span>
+                  )}
+                </div>
+
+                <div className="button-row">
+                  <Button
+                    variant="secondary"
+                    leadingIcon={<Navigation size={16} aria-hidden="true" />}
+                    disabled={stopActionBusy || selectedStop.state !== "pending"}
+                    onClick={() => void handleStopTransition("start")}
+                  >
+                    Выехал
+                  </Button>
+
+                  <Button
+                    variant="primary"
+                    leadingIcon={<Clock size={16} aria-hidden="true" />}
+                    disabled={
+                      stopActionBusy ||
+                      (selectedStop.state !== "pending" && selectedStop.state !== "en_route")
+                    }
+                    onClick={() => void handleStopTransition("arrive")}
+                  >
+                    Прибыл
+                  </Button>
+                </div>
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </section>
+
+      {/* 4. Смена курьера */}
+      <section aria-label="Смена курьера">
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                <Truck size={20} aria-hidden="true" />
+                <span>Смена курьера</span>
+              </span>
+            }
+            subtitle={
+              shift ? (
+                <>
+                  ID: {shift.shiftId.slice(0, 8)} ·{" "}
+                  <Badge tone={SHIFT_STATE_TONES[shift.state] ?? "info"}>
+                    Статус: {stateLabel(SHIFT_STATE_LABELS, shift.state)}
+                  </Badge>
+                  {shift.startedAt ? ` · Начала ${dt(shift.startedAt)}` : ""}
+                </>
+              ) : (
+                <>
+                  Активная смена не открыта
+                  {demo?.shiftId ? ` · Демо-смена: ${demo.shiftId.slice(0, 8)}` : ""}
+                </>
+              )
+            }
+            actions={
+              <>
+                <Button
+                  variant="secondary"
+                  leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+                  disabled={shiftLoading}
+                  onClick={() => void loadShift()}
+                >
+                  Обновить смену
+                </Button>
+                {!shift || shift.state !== "active" ? (
+                  <Button
+                    variant="primary"
+                    leadingIcon={<Play size={16} aria-hidden="true" />}
+                    disabled={shiftLoading}
+                    onClick={() => void handleOpenShift()}
+                  >
+                    Открыть смену
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    leadingIcon={<Square size={16} aria-hidden="true" />}
+                    disabled={shiftLoading}
+                    onClick={() => void handleCompleteShift()}
+                  >
+                    Закрыть смену
+                  </Button>
+                )}
+              </>
+            }
+          />
+          <CardBody>
+            {shiftReconciliation && (
+              <div role="status">
+                <Card quiet>
+                  <div className="row">
+                    <CheckCircle2 size={18} aria-hidden="true" />
+                    <strong>Сверка по закрытой смене</strong>
+                  </div>
+                  <StatGrid>
+                    <StatTile label="Точек маршрута" value={shiftReconciliation.stops} />
+                    <StatTile label="Сканов принято" value={shiftReconciliation.scans.accepted} />
+                    <StatTile label="Сканов отклонено" value={shiftReconciliation.scans.rejected} />
+                  </StatGrid>
+                </Card>
+              </div>
+            )}
+            {closedShiftId && (
+              <Card quiet>
+                <div className="row">
+                  <strong>Сверка закрытой смены</strong>
+                  <Button
+                    variant="ghost"
+                    leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
+                    disabled={shiftLoading}
+                    onClick={() => void loadShiftReconciliation(closedShiftId)}
+                  >
+                    Обновить сверку
+                  </Button>
+                </div>
+                {shiftReconciliationError && (
+                  <p className="muted" role="alert">
+                    Не удалось загрузить сверку: {shiftReconciliationError}
+                  </p>
+                )}
+                {shiftReconciliationDetail ? (
+                  <>
+                    <StatGrid>
+                      <StatTile
+                        label="Сканов принято (итог)"
+                        value={shiftReconciliationDetail.effectiveScans.accepted}
+                      />
+                      <StatTile
+                        label="Сканов отклонено (итог)"
+                        value={shiftReconciliationDetail.effectiveScans.rejected}
+                      />
+                      <StatTile
+                        label="Поздних коррекций"
+                        value={shiftReconciliationDetail.adjustments.length}
+                      />
+                    </StatGrid>
+                    {shiftReconciliationDetail.snapshot && (
+                      <p className="muted">
+                        Снимок на момент закрытия: {shiftReconciliationDetail.snapshot.stops
+                          ? Object.entries(shiftReconciliationDetail.snapshot.stops)
+                              .map(([state, count]) => `${stateLabel(STOP_STATE_LABELS, state)} — ${count}`)
+                              .join(", ")
+                          : "нет данных"}
+                      </p>
+                    )}
+                    {shiftReconciliationDetail.adjustments.length ? (
+                      <ul className="stack" aria-label="Поздние коррекции смены">
+                        {shiftReconciliationDetail.adjustments.map(adjustment => (
+                          <li key={adjustment.id}>
+                            {dt(adjustment.recordedAt)} — {adjustment.reason}: принято +{adjustment.deltaAccepted},
+                            отклонено +{adjustment.deltaRejected}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="muted">
+                        Поздних коррекций нет: все сканы учтены в снимке закрытия смены.
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="muted">
+                    Сверка закрытой смены загружается отдельно: она учитывает и поздние офлайн-сканы,
+                    пришедшие после закрытия.
+                  </p>
+                )}
+              </Card>
+            )}
+          </CardBody>
+        </Card>
+      </section>
+
+      {/* 5. Офлайн-очередь и сканер QR/штрихкодов */}
+      <section aria-label="Офлайн-очередь и сканер QR">
+        <Card>
+          <CardHeader
+            title={
+              <span className="row row--tight">
+                {isOnline ? (
+                  <Wifi size={20} aria-hidden="true" />
+                ) : (
+                  <WifiOff size={20} aria-hidden="true" />
+                )}
+                <span>Офлайн-очередь и сканер QR</span>
+              </span>
+            }
+            subtitle={`Связь: ${isOnline ? "В сети" : "Офлайн (сохранение в IndexedDB)"} · Устройство: ${deviceId ? deviceId.slice(0, 8) : "…"} · В очереди: ${pendingQueueCount}`}
+            actions={
+              <Checkbox
+                label="Офлайн-режим (тест без сети)"
+                checked={simulatedOffline}
+                onChange={e => setSimulatedOffline(e.target.checked)}
+              />
+            }
+          />
+          <CardBody>
+            <div className="button-row">
+              <Button
+                variant="primary"
+                leadingIcon={<QrCode size={18} aria-hidden="true" />}
+                onClick={() => setScannerOpen(true)}
+              >
+                Камера / Ручной скан QR
+              </Button>
+
+              <Button
+                variant="secondary"
+                leadingIcon={<ScanLine size={18} aria-hidden="true" />}
+                disabled={!selectedStop}
+                onClick={() => void handleScanCurrentOrder()}
+              >
+                Сканировать текущий заказ
+              </Button>
+
+              <Button
+                variant="secondary"
+                leadingIcon={<RefreshCw size={18} aria-hidden="true" />}
+                disabled={syncing || !isOnline}
+                onClick={() => void syncQueue()}
+              >
+                {syncing ? "Синхронизация..." : `Синхронизировать очередь (${pendingQueueCount})`}
+              </Button>
+            </div>
+
+            {unverifiedLegacyCount > 0 && (
+              <div className="alert-banner" role="status">
+                <AlertTriangle size={16} aria-hidden="true" />
+                <span>
+                  Обнаружена прежняя офлайн-очередь ({unverifiedLegacyCount} записей) с неподтверждённым владельцем.
+                  Записи не удалены и не присвоены автоматически.
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={recoveringLegacy}
+                  onClick={() => void handleRecoverLegacyQueue()}
+                >
+                  {recoveringLegacy ? "Перенос..." : "Перенести в мою очередь"}
+                </Button>
+              </div>
+            )}
+
+            {pendingScans.length > 0 && (
+              <div className="stack stack--tight">
+                <span className="muted">Ожидают синхронизации ({pendingScans.length}):</span>
+                <ul className="list">
+                  {pendingScans.map(scan => {
+                    const rejectedInfo = lastSync?.rejectedReasons.find(
+                      r => r.clientEventId === scan.clientEventId,
+                    );
+                    return (
+                      <li key={scan.clientEventId} className="list-item">
+                        <span className="row row--tight">
+                          <Badge tone={rejectedInfo ? "danger" : "neutral"}>
+                            {stateLabel(SCAN_TYPE_LABELS, scan.scannedType)}
+                          </Badge>
+                          <span>{scan.scannedId}</span>
+                          {rejectedInfo && (
+                            <span className="muted">· {rejectedInfo.reason}</span>
+                          )}
+                        </span>
+                        <span className="row row--tight">
+                          <span className="muted">{dt(scan.capturedAt)}</span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleRemoveScan(scan.clientEventId)}
+                          >
+                            Удалить из очереди
+                          </Button>
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+
+            {lastSync && (
+              <div role="status">
+                <Card quiet>
+                  <div className="row">
+                    <RefreshCw size={18} aria-hidden="true" />
+                    <strong>Последняя синхронизация ({dt(lastSync.syncedAt)})</strong>
+                  </div>
+                  <StatGrid>
+                    <StatTile label="В очереди осталось" value={pendingQueueCount} />
+                    <StatTile label="Принято" value={lastSync.accepted} />
+                    <StatTile label="Дубликатов" value={lastSync.duplicate} />
+                    <StatTile label="Отклонено" value={lastSync.rejected} />
+                  </StatGrid>
+                  {lastSync.rejectedReasons.length > 0 && (
+                    <div className="stack stack--tight">
+                      {lastSync.rejectedReasons.map((rej, idx) => (
+                        <div key={`${rej.clientEventId}-${idx}`} className="alert-banner">
+                          <AlertTriangle size={16} aria-hidden="true" />
+                          <span>
+                            {rej.scannedId ? `${rej.scannedId}: ` : ""}
+                            {rej.reason}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </Card>
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </section>
 
       <QrScannerDialog
         open={scannerOpen}

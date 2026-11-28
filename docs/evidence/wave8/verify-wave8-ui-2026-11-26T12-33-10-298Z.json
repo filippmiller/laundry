@@ -1,0 +1,71 @@
+{
+  "generatedAt": "2026-11-26T12:33:10.298Z",
+  "appUrl": "http://localhost:5173",
+  "kind": "browser acceptance in Chromium against the running web app",
+  "code": {
+    "codeSha": "87cefd2c69b3cd92fc1d7cf692f502ddade67659",
+    "codeTree": "408d5849fa67ba83377071c986b0d77b3f18e0cc",
+    "branch": "feat/audit-remediation-wave6",
+    "dirty": false,
+    "changedFiles": [],
+    "diffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "evidenceCommit": null,
+    "evidenceCommitNote": "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA"
+  },
+  "summary": {
+    "total": 8,
+    "passed": 8,
+    "skipped": 0,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "id": "LND-R5-UI-0",
+      "name": "the fixture thread exists",
+      "status": "PASS",
+      "detail": "thread 949d3922 of the support operator"
+    },
+    {
+      "id": "LND-R5-UI-1",
+      "name": "a newer answer survives the acknowledgement of the previous one",
+      "status": "PASS",
+      "detail": "the POST was held, \"Ответ B, набранный во время отправки 202…\" was typed during the wait; after the answer the box still holds it and the server draft holds the same text"
+    },
+    {
+      "id": "LND-R5-UI-2",
+      "name": "the newer answer is restored after a reload",
+      "status": "PASS",
+      "detail": "after the reload the reply box of the thread holds \"Ответ B, набранный во время отправки 2026-11-26T12:33:13.251…\""
+    },
+    {
+      "id": "LND-R5-UI-3",
+      "name": "clearing the box during a pending autosave leaves the server empty",
+      "status": "PASS",
+      "detail": "the PUT was held, the box was cleared during the wait; afterwards the server draft is empty and the badge reads \"нет бейджа\""
+    },
+    {
+      "id": "LND-R5-UI-4",
+      "name": "a late answer of the old filter does not replace the new list",
+      "status": "PASS",
+      "detail": "the answer of the \"all\" filter was held and released after the switch to \"open\"; the select reads \"open\", the screen shows \"Показано 1 из 1\" and the server answers 1 for the same filter, 1 row(s), none of them closed"
+    },
+    {
+      "id": "LND-R5-UI-5",
+      "name": "resolving a dispute refreshes the sums of the open workspace",
+      "status": "PASS",
+      "detail": "after the decision the open workspace asked for /finance/overview 1 time(s) and /finance/analytics 1 time(s) — no manual refresh was pressed"
+    },
+    {
+      "id": "LND-R5-UI-6",
+      "name": "a finance-only operator is not offered the escalation actions",
+      "status": "PASS",
+      "detail": "the finance workspace shows the stuck orders panel without any escalate/close button"
+    },
+    {
+      "id": "LND-R5-UI-7",
+      "name": "a dispatcher keeps the escalation actions",
+      "status": "PASS",
+      "detail": "the dispatcher workspace shows 16 escalation button(s)"
+    }
+  ]
+}

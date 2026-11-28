@@ -8,7 +8,7 @@ import { hashRequest, withIdempotency } from "../core/idempotency.js";
 import { calculateQuote, type QuoteInput, type ServiceLineInput } from "../domain/pricing.js";
 import { releaseHeldReservationsInTx } from "../domain/slot-reservation.js";
 import { activeTariff, resolveAddress } from "./catalog.js";
-import { normalizeDeclaredItems } from "../../shared/garment-taxonomy.js";
+import { normalizeDeclaredItems, type DeclaredItem } from "../../shared/garment-taxonomy.js";
 
 export type QuoteLineInput = {
   serviceId: string;
@@ -16,6 +16,20 @@ export type QuoteLineInput = {
   quantity: number;
   unit: "piece" | "gram";
 };
+
+/**
+ * One declared piece of laundry, with the value the customer states for it.
+ *
+ * The value is optional: a customer may hand over things without stating what they are worth,
+ * and the courier then leaves the field empty instead of inventing a number.
+ */
+export type DeclaredItemInput = {
+  subtypeId: string;
+  quantity: number;
+  /** The declared value in kopeks. `null` means "not declared". */
+  declaredValueKopeks?: number | null;
+};
+
 export type CreateQuoteInput = {
   organizationId?: string;
   customerId?: string;
@@ -33,7 +47,7 @@ export type CreateQuoteInput = {
    * into the quote hash: the declaration the courier reconciles against is the
    * one the customer actually accepted.
    */
-  declaredItems?: Array<{ subtypeId: string; quantity: number }>;
+  declaredItems?: DeclaredItemInput[];
   /**
    * Optional prior unattached held slot reservation IDs from an earlier quote attempt
    * that should be released atomically when the customer re-quotes after editing the form.
@@ -50,10 +64,33 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
   const now = input.now ?? new Date();
   // Validated before the idempotency envelope is opened: an unknown subtype or
   // an out-of-range quantity is a client mistake, not a replay.
-  const declared = normalizeDeclaredItems(input.declaredItems);
+  const declared = normalizeDeclaredItems(
+    input.declaredItems?.map(item => ({ subtypeId: item.subtypeId, quantity: item.quantity })),
+  );
   if (!declared.ok) {
     throw new AppError("VALIDATION_ERROR", declared.error, declared.detail ?? {});
   }
+  // The declared value is the customer's own statement about one piece. It is optional, and a
+  // negative or fractional number is a client mistake rather than a value to reinterpret.
+  const declaredValueBySubtype = new Map<string, number | null>();
+  for (const item of input.declaredItems ?? []) {
+    if (item.declaredValueKopeks === undefined || item.declaredValueKopeks === null) continue;
+    if (!Number.isInteger(item.declaredValueKopeks) || item.declaredValueKopeks < 0) {
+      throw new AppError("VALIDATION_ERROR", "DECLARED_VALUE_INVALID", {
+        subtypeId: item.subtypeId,
+        declaredValueKopeks: item.declaredValueKopeks,
+      });
+    }
+    if (!declaredValueBySubtype.has(item.subtypeId)) {
+      declaredValueBySubtype.set(item.subtypeId, item.declaredValueKopeks);
+    }
+  }
+  // The taxonomy normalizes the declaration; the declared value rides along with its subtype so
+  // that it lands in the immutable snapshot as well.
+  const declaredWithValue = declared.items.map(item => ({
+    ...item,
+    declaredValueKopeks: declaredValueBySubtype.get(item.subtypeId) ?? null,
+  }));
   // Эконом is a closed, weighed bag: the tariff promises no per-item inventory, so a
   // per-item list on such a quote would contradict what the customer was sold.
   if (declared.items.length > 0 && !input.lines.some(line => line.tier === "protected")) {
@@ -160,7 +197,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       sharedPickupFeeKopeks: tariff.sharedPickupFeeKopeks,
       sharedDeliveryFeeKopeks: tariff.sharedDeliveryFeeKopeks,
       expiresAt: expiresAt.toISOString(),
-      declaredItems: declared.items,
+      declaredItems: declaredWithValue,
     };
     const pricedQuote = calculateQuote(pricingInput);
     const [quote] = await tx.insert(quotes).values({
@@ -203,7 +240,7 @@ export async function createQuote(db: Db, principal: Principal, input: CreateQuo
       quoteHash: quote.quoteHash,
       totalKopeks: quote.totalKopeks,
       lines: pricedQuote.lines,
-      declaredItems: declared.items,
+      declaredItems: declaredWithValue,
       snapshot: pricedQuote.snapshot,
       releasedReservationIds,
     };
@@ -219,11 +256,19 @@ export async function getQuote(db: Db, principal: Principal, quoteId: string) {
   )).limit(1);
   if (!quote) throw errors.notFound("quote");
   if (hasRole(principal, "customer") && quote.customerId !== principal.userId) throw errors.notFound("quote");
-  const snapshot = (quote.snapshotJson ?? {}) as { addressId?: string; termsVersion?: string };
+  const snapshot = (quote.snapshotJson ?? {}) as {
+    addressId?: string;
+    termsVersion?: string;
+    declaredItems?: Array<DeclaredItem & { declaredValueKopeks?: number | null }>;
+  };
   return {
     ...quote,
     addressId: snapshot.addressId ?? null,
     termsVersion: snapshot.termsVersion ?? null,
+    // The declaration is part of the immutable snapshot, so the value the customer stated
+    // is readable together with the quote it belongs to — by the customer (who declared it)
+    // and by the courier (who confirms it at intake).
+    declaredItems: snapshot.declaredItems ?? [],
   };
 }
 

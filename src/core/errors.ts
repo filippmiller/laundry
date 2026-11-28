@@ -44,9 +44,26 @@ export class AppError extends Error {
   }
 }
 
+/**
+ * A route can require the same role through two role groups — `ROLE_GROUPS.finance` and
+ * `ROLE_GROUPS.admin` both carry `platform_admin` — and the forbidden message then named it
+ * twice ("requires one of: platform_finance, platform_admin, platform_admin"). The list a
+ * caller reads has to name every role exactly once.
+ */
+const ROLE_LIST_RE = /requires one of: (.+)$/;
+
+export function dedupeRoleList(reason: string): string {
+  const match = ROLE_LIST_RE.exec(reason);
+  if (!match) return reason;
+  const roles = match[1].split(",").map(role => role.trim()).filter(Boolean);
+  const unique = [...new Set(roles)];
+  if (unique.length === roles.length) return reason;
+  return `${reason.slice(0, match.index)}requires one of: ${unique.join(", ")}`;
+}
+
 export const errors = {
   notFound: (resource = "resource") => new AppError("NOT_FOUND", "NOT_FOUND", { resource }),
-  forbidden: (reason = "insufficient scope") => new AppError("FORBIDDEN", "FORBIDDEN", { reason }),
+  forbidden: (reason = "insufficient scope") => new AppError("FORBIDDEN", "FORBIDDEN", { reason: dedupeRoleList(reason) }),
   unauthorized: () => new AppError("UNAUTHORIZED", "UNAUTHORIZED"),
   version: (current: number) => new AppError("CONFLICT_VERSION", "CONFLICT_VERSION", { currentVersion: current }),
   transition: (from: string, to: string) => new AppError("INVALID_TRANSITION", "INVALID_TRANSITION", { from, to }),

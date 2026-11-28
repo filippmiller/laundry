@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   pull_request:
@@ -96,6 +96,59 @@ jobs:
         run: npm run smoke
         env:
           SMOKE_BASE_URL: http://127.0.0.1:3000
+      - name: Wave 7 live verification (the script starts the server it checks)
+        run: npm run verify:wave7
+        env:
+          VERIFY_SPAWN_API: "1"
+          VERIFY_API_PORT: "3107"
+      - name: Wave 8 live verification (the script starts the server it checks)
+        run: npm run verify:wave8
+        env:
+          VERIFY_SPAWN_API: "1"
+          VERIFY_API_PORT: "3126"
+      - name: Wave 8 browser acceptance (the script starts the stand it checks)
+        run: npm run verify:wave8:ui
+        env:
+          VERIFY_SPAWN_APP: "1"
+          VERIFY_API_PORT: "3127"
+      - name: Mobile layout regression (16 combinations of viewport, zoom and role)
+        run: npm run verify:mobile
+        env:
+          APP_URL: http://127.0.0.1:3000
+      - name: Wave 9 mounted behavioral & negative-control suite (Chromium)
+        run: npm run verify:wave9:mounted
+      - name: Write CI provenance summary
+        if: always()
+        run: |
+          mkdir -p temp/ci-artifacts
+          node -e '
+            const fs = require("node:fs");
+            const { execFileSync } = require("node:child_process");
+            const git = args => execFileSync("git", args, { encoding: "utf8" }).trim();
+            const provenance = {
+              generatedAt: new Date().toISOString(),
+              runId: process.env.GITHUB_RUN_ID ?? null,
+              runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+              githubSha: process.env.GITHUB_SHA ?? null,
+              githubRef: process.env.GITHUB_REF ?? null,
+              headRef: process.env.GITHUB_HEAD_REF ?? null,
+              checkoutSha: git(["rev-parse", "HEAD"]),
+              checkoutTree: git(["rev-parse", "HEAD^{tree}"]),
+            };
+            fs.writeFileSync("temp/ci-artifacts/ci-provenance.json", JSON.stringify(provenance, null, 2) + "\n");
+          '
+      - name: Upload verification receipts and mobile measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-verification-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            temp/ci-artifacts/ci-provenance.json
+            docs/evidence/wave7/
+            docs/evidence/wave8/
+            docs/evidence/wave9/
+            temp/audit-shots/mobile-fix/measurements.json
       - name: API log
         if: failure()
         run: cat /tmp/laundry-api.log

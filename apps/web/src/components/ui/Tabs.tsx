@@ -1,4 +1,4 @@
-import { useId, useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { cx } from "./cx";
 
 export type TabItem = {
@@ -31,6 +31,24 @@ export function Tabs({
   const listRef = useRef<HTMLDivElement>(null);
   const generatedId = useId();
   const prefix = idPrefix ?? generatedId;
+
+  // The strip scrolls sideways on narrow screens, so the active tab has to be
+  // brought back into view when it changes (MA-02).
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const tab = list.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(value)}"]`);
+    if (!tab) return;
+    const listRect = list.getBoundingClientRect();
+    const tabRect = tab.getBoundingClientRect();
+    if (tabRect.left >= listRect.left && tabRect.right <= listRect.right) return;
+    const delta = (tabRect.left + tabRect.right) / 2 - (listRect.left + listRect.right) / 2;
+    const reduced =
+      typeof window !== "undefined" && typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        : false;
+    list.scrollTo({ left: list.scrollLeft + delta, behavior: reduced ? "auto" : "smooth" });
+  }, [value]);
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const keys = ["ArrowRight", "ArrowLeft", "Home", "End"];

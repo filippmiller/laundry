@@ -55,6 +55,8 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
+      # The API is the only role in this image that serves HTTP, so it is the only role that
+      # can be probed with a readiness request.
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 15s
       timeout: 5s
@@ -70,12 +72,25 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-laundry}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laundry}
-      WORKER_INTERVAL_MS: 30000
+      WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-30000}
+      # The heartbeat file is the worker's health signal. The worker writes it after every
+      # successful cycle; the healthcheck below refuses a container whose last successful
+      # cycle is older than three intervals. Both sides read the same path.
+      WORKER_HEARTBEAT_FILE: /app/.worker-heartbeat
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      # The worker serves no HTTP endpoint, so "is it alive?" is answered by its own work:
+      # a recent successful cycle. The probe fails as soon as the last successful cycle
+      # ages out, which a crash-looping worker cannot avoid.
+      test: ["CMD", "node", "scripts/worker-health.mjs"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     command: npm run worker
 
   caddy:

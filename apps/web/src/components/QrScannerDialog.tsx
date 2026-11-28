@@ -1,7 +1,53 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { BrowserMultiFormatReader } from "@zxing/browser";
 import { Camera, Keyboard } from "lucide-react";
 import { ModalDialog } from "./ModalDialog";
+
+/**
+ * The scanner library is heavy — roughly 200 KB of the courier workspace chunk — and a courier who
+ * never opens the scanner should never pay for it. It is therefore imported dynamically, at the
+ * moment the camera is actually switched on, and the button stays disabled until the module has
+ * arrived.
+ */
+type ZxingReader = {
+  decodeFromConstraints: (
+    constraints: { video: { facingMode: { ideal: string } } },
+    video: HTMLVideoElement,
+    callback: (result: { getText: () => string } | undefined) => void,
+  ) => Promise<{ stop: () => void }>;
+  decodeFromVideoDevice: (
+    deviceId: string | undefined,
+    video: HTMLVideoElement,
+    callback: (result: { getText: () => string } | undefined) => void,
+  ) => Promise<{ stop: () => void }>;
+};
+
+let zxingModule: Promise<ZxingReader> | null = null;
+
+function loadZxing(): Promise<ZxingReader> {
+  if (!zxingModule) {
+    zxingModule = import("@zxing/browser").then(mod => ({
+      decodeFromConstraints: (
+        constraints: { video: { facingMode: { ideal: string } } },
+        video: HTMLVideoElement,
+        callback: (result: { getText: () => string } | undefined) => void,
+      ) => new mod.BrowserMultiFormatReader().decodeFromConstraints(
+        constraints as never,
+        video,
+        callback as never,
+      ) as Promise<{ stop: () => void }>,
+      decodeFromVideoDevice: (
+        deviceId: string | undefined,
+        video: HTMLVideoElement,
+        callback: (result: { getText: () => string } | undefined) => void,
+      ) => new mod.BrowserMultiFormatReader().decodeFromVideoDevice(
+        deviceId,
+        video,
+        callback as never,
+      ) as Promise<{ stop: () => void }>,
+    }));
+  }
+  return zxingModule;
+}
 
 type QrScannerDialogProps = {
   open: boolean;
@@ -42,7 +88,9 @@ export function QrScannerDialog({
         return;
       }
       try {
-        const reader = new BrowserMultiFormatReader();
+        const zxing = await loadZxing();
+        if (cancelled) return;
+        const reader = zxing;
         const handleResult = (result: { getText: () => string } | undefined) => {
           if (cancelled || !result) return;
           const text = result.getText().trim();
@@ -102,23 +150,23 @@ export function QrScannerDialog({
         onClose();
       }}
     >
-      <p className="muted" style={{ marginBlockEnd: 12 }}>
+      <p className="muted u-mb-12px">
         Наведите камеру на QR-код квитанции, мешка или пломбы либо введите идентификатор вручную.
       </p>
 
-      <div className="button-row" style={{ marginBlockEnd: 14 }}>
+      <div className="button-row u-mb-14px">
         <button
           type="button"
           className="secondary"
           onClick={() => setCameraActive(prev => !prev)}
         >
           <Camera size={18} aria-hidden="true" />
-          <span>{cameraActive ? "Остановить камеру" : "Включить камеру (@zxing)"}</span>
+          <span>{cameraActive ? "Остановить камеру" : "Включить камеру"}</span>
         </button>
       </div>
 
       {cameraActive && (
-        <div style={{ marginBlockEnd: 14 }}>
+        <div className="u-mb-14px">
           <video ref={videoRef} className="video-preview" muted playsInline />
         </div>
       )}
@@ -129,7 +177,7 @@ export function QrScannerDialog({
 
       <div className="field">
         <label htmlFor={inputId}>
-          <Keyboard size={14} aria-hidden="true" style={{ verticalAlign: "text-bottom", marginInlineEnd: 6 }} />
+          <Keyboard size={14} aria-hidden="true" className="u-va-text-bottom u-mie-6px" />
           Ручной ввод кода (пломба, мешок или строка LND1:...)
         </label>
         <input

@@ -88,6 +88,7 @@ export const EVENT_LABELS: Record<string, string> = {
   "shift.completed": "Смена курьера завершена",
   "support.opened": "Обращение в поддержку открыто",
   "support.closed": "Обращение в поддержку закрыто",
+  "support.reopened": "Обращение в поддержку переоткрыто",
   "claim.reopened": "Претензия переоткрыта",
   "claim.compensation_proposed": "Предложена компенсация по претензии",
   "claim.compensation_approved": "Компенсация по претензии одобрена",
@@ -102,6 +103,8 @@ export const EVENT_LABELS: Record<string, string> = {
   "delivery.wrong_recipient": "Доставлено не тому получателю",
   "delivery.refused": "Получатель отказался принять заказ",
   "delivery.damaged": "Заказ повреждён при доставке",
+  "order.escalated": "Заказ взят под эскалацию — назначен ответственный",
+  "order.escalation_resolved": "Эскалация снята, заказ снова в работе",
 };
 
 /**
@@ -202,6 +205,8 @@ export const ADMIN_AUDIT_ACTION_LABELS: Record<string, string> = {
   "admin.session_revoked": "Сессия отозвана",
   "review.hidden": "Отзыв скрыт",
   "auth.preview_unlocked": "Предпросмотр открыт",
+  "privacy.churn_read": "Прочитан список клиентов на грани оттока",
+  "privacy.order_search": "Выполнен поиск по заказам",
 };
 
 /** Domain resources an audit event can point at (the aggregate type). */
@@ -223,6 +228,8 @@ export const RESOURCE_TYPE_LABELS: Record<string, string> = {
   membership: "Участник",
   session: "Сессия",
   review: "Отзыв",
+  churn_signal: "Сигнал оттока",
+  order_search: "Поиск по заказам",
 };
 
 /** Audit resource type, always in Russian — never a raw Latin aggregate type. */
@@ -252,6 +259,8 @@ export const NOTIFICATION_LABELS: Record<string, string> = {
   return_unprocessed: "Вещи готовятся к возврату без обработки",
   qc_passed: "Контроль качества пройден, готовим доставку",
   qc_rewash: "Выявлено замечание на ОТК — отправлено на доработку",
+  support_closed: "Обращение в поддержку закрыто",
+  support_reopened: "Обращение в поддержку переоткрыто — ответьте клиенту",
 };
 
 export const CLAIM_STATE_LABELS: Record<string, string> = {
@@ -263,6 +272,15 @@ export const CLAIM_STATE_LABELS: Record<string, string> = {
   denied_with_reason: "Отклонена (с обоснованием)",
   escalated: "Эскалация",
   reopened: "Переоткрыта",
+};
+
+/**
+ * The states of an escalation of a stuck order. An open escalation is a jam that still has
+ * an owner; a resolved one is a jam that was worked out and closed with a record.
+ */
+export const ESCALATION_STATE_LABELS: Record<string, string> = {
+  open: "Открыта",
+  resolved: "Снята",
 };
 
 export const ADJUSTMENT_STATE_LABELS: Record<string, string> = {
@@ -426,6 +444,48 @@ export const PARTNER_INVOICE_STATE_LABELS: Record<string, string> = {
   disputed: "Оспорен",
 };
 
+/**
+ * The states of the partner money objects. They live here, and not in the workspace that renders
+ * them, because two workspaces show the same money: the partner sees its own accruals and the
+ * finance desk sees the same payouts and credit notes. Two copies of one map drift apart, and
+ * the operator ends up reading "Запланирована" on one screen and "scheduled" on the next.
+ */
+export const PARTNER_PAYOUT_STATE_LABELS: Record<string, string> = {
+  scheduled: "Запланирована",
+  pending: "Ожидает одобрения",
+  approved: "Одобрена",
+  paid: "Выплачена",
+  cancelled: "Отменена",
+};
+
+export const PARTNER_CREDIT_NOTE_STATE_LABELS: Record<string, string> = {
+  draft: "Черновик",
+  pending: "На согласовании",
+  approved: "Одобрена",
+  applied: "Применена",
+  rejected: "Отклонена",
+};
+
+export const PARTNER_DISPUTE_STATE_LABELS: Record<string, string> = {
+  open: "Открыт",
+  investigating: "На проверке",
+  resolved: "Решён",
+};
+
+export const PARTNER_DISPUTE_OUTCOME_LABELS: Record<string, string> = {
+  upheld: "Спор подтверждён",
+  rejected: "Спор отклонён",
+  partial: "Спор решён частично",
+};
+
+/** The state of a billed accrual line — the server keeps it as free text. */
+export const PARTNER_ACCRUAL_LINE_STATE_LABELS: Record<string, string> = {
+  pending: "Начислено",
+  accepted: "Принято",
+  credited: "Сторнировано",
+  disputed: "Оспорено",
+};
+
 export type StatusTone = "neutral" | "ok" | "warn" | "danger" | "info" | "accent" | "dark";
 
 /**
@@ -491,6 +551,21 @@ export function claimStateTone(state: string): StatusTone {
     case "decision_pending":
     case "escalated":
     case "reopened":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
+
+/**
+ * An open escalation is a jam that still needs a person, so it warns; a closed one is a
+ * solved jam and reads as an ordinary fact.
+ */
+export function escalationStateTone(state: string): StatusTone {
+  switch (state) {
+    case "resolved":
+      return "ok";
+    case "open":
       return "warn";
     default:
       return "neutral";

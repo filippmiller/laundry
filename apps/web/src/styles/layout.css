@@ -20,6 +20,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
+    min-block-size: var(--tap-target);
     padding: 10px 18px;
     border-radius: var(--radius-sm);
     background: var(--accent);
@@ -53,6 +54,9 @@
     display: flex;
     flex-direction: column;
     min-block-size: 100dvh;
+    /* The content column owns its own stacking context: the topbar inside it
+       can never reach out and paint over the navigation drawer (MA-01). */
+    isolation: isolate;
   }
 
   /* ------------------------------------------------------------------
@@ -66,7 +70,7 @@
     flex-direction: column;
     gap: var(--space-2);
     block-size: 100dvh;
-    padding: var(--space-5) var(--space-3) var(--space-4);
+    padding: calc(var(--safe-top) + var(--space-5)) var(--space-3) calc(var(--safe-bottom) + var(--space-4));
     background: var(--bg-rail);
     color: var(--ink-inverse);
     overflow-y: auto;
@@ -244,7 +248,8 @@
     justify-content: space-between;
     gap: var(--space-4);
     min-block-size: var(--topbar-height);
-    padding: var(--space-3) clamp(14px, 2.5vw, 28px);
+    padding-block: calc(var(--safe-top) + var(--space-3)) var(--space-3);
+    padding-inline: clamp(14px, 2.5vw, 28px);
     background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
     backdrop-filter: saturate(1.4) blur(12px);
     border-block-end: 1px solid var(--border-hairline);
@@ -255,22 +260,29 @@
     align-items: center;
     gap: var(--space-3);
     min-inline-size: 0;
+    flex: 1 1 auto;
   }
 
   .topbar__titles {
     display: flex;
     flex-direction: column;
     min-inline-size: 0;
+    flex: 1 1 auto;
     line-height: 1.25;
   }
 
+  /* Two lines instead of a hard ellipsis clamp: at 200 % text zoom a single
+     line left only 23 px of the title visible (MA-11). */
   .topbar__title {
     font-size: 1.0625rem;
     font-weight: 650;
     letter-spacing: var(--tracking-snug);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: break-word;
+    white-space: normal;
   }
 
   .topbar__subtitle {
@@ -284,6 +296,7 @@
     gap: var(--space-2);
     flex-wrap: wrap;
     justify-content: flex-end;
+    flex: none;
   }
 
   .topbar__roles {
@@ -322,7 +335,7 @@
     place-items: center;
     align-content: center;
     gap: var(--space-4);
-    min-block-size: 60vh;
+    min-block-size: 60dvh;
     color: var(--ink-tertiary);
   }
 
@@ -445,9 +458,13 @@
   }
 
   /* ------------------------------------------------------------------
-     Responsive — the rail becomes an off-canvas drawer
+     Responsive — the rail becomes an off-canvas drawer.
+
+     The breakpoint follows the design contract (DESIGN.md §5: the mobile
+     layout applies at 768 px and below), so the drawer is used up to
+     768 px and the persistent rail takes over from 769 px (MA-35).
      ------------------------------------------------------------------ */
-  @media (max-width: 900px) {
+  @media (max-width: 768px) {
     .app-frame {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -457,6 +474,9 @@
       inset-block: 0;
       inset-inline-start: 0;
       inline-size: min(var(--rail-width), 84vw);
+      /* The active-item indicator sits 12 px outside the item; the drawer
+         keeps that room inside the viewport so it is not cut off (MA-31). */
+      padding-inline: calc(var(--space-3) + 12px) var(--space-3);
       transform: translateX(-100%);
       visibility: hidden;
       transition:
@@ -477,6 +497,15 @@
       display: inline-flex;
     }
 
+    /* The role badges are dropped on phones so the title of the workspace
+       gets the full width of the bar (MA-11); the role stays visible in the
+       identity block of the drawer. */
+    .topbar__roles {
+      display: none;
+    }
+
+    /* A full-bleed dim layer: it deliberately covers the notch and the
+       home indicator, so the safe-area insets do not apply here. */
     .rail-backdrop {
       display: block;
       position: fixed;
@@ -491,17 +520,32 @@
     .app-shell[data-rail-open="true"] .rail-backdrop {
       opacity: 1;
       pointer-events: auto;
+      /* The backdrop covers the whole viewport while the menu is open, so a
+         gesture that starts on it must not scroll the page behind the menu
+         (MA-08). The freeze itself is done in `scroll-lock.ts` — this rule
+         keeps the touch from reaching the document at all. */
+      touch-action: none;
     }
   }
 
   @media (max-width: 640px) {
     .topbar {
-      min-block-size: 56px;
-      padding-block: var(--space-2);
+      min-block-size: var(--topbar-height-compact);
+      padding-block: calc(var(--safe-top) + var(--space-2)) var(--space-2);
     }
 
     .topbar__subtitle {
       display: none;
+    }
+
+    /* The compact topbar is shorter: the sticky tab strip sits right under it
+       and the scroll padding follows (P2-01 / P2-02). */
+    .tab-bar {
+      inset-block-start: var(--topbar-height-compact);
+    }
+
+    html {
+      scroll-padding-top: var(--topbar-height-compact);
     }
   }
 }

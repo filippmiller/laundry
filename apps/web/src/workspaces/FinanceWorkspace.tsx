@@ -16,6 +16,13 @@ import {
   XCircle,
 } from "lucide-react";
 import { api, ApiError, DemoConfig, dt, money, newKey } from "../api";
+import {
+  createBucketPaginationGuard,
+  EMPTY_BUCKET_BUSY,
+  type BucketBusyMap,
+  type BucketPaginationGuard,
+  type FinanceBucketKey,
+} from "./finance-bucket-pagination";
 import { DocumentKind, DocumentPrintModal } from "../components/DocumentPrintModal";
 import { ModalDialog } from "../components/ModalDialog";
 import { Badge } from "../components/ui/Badge";
@@ -28,7 +35,9 @@ import {
   formatError,
   INVOICE_STATE_LABELS,
   ORDER_STATE_LABELS,
+  PARTNER_CREDIT_NOTE_STATE_LABELS,
   PARTNER_INVOICE_STATE_LABELS,
+  PARTNER_PAYOUT_STATE_LABELS,
   PAYMENT_STATE_LABELS,
   providerLabel,
   stateLabel,
@@ -41,6 +50,14 @@ import {
   getEffectiveChargebackFilter,
 } from "./chargebacks-controller";
 import { FinanceMoneyPanel } from "./analytics-panels";
+import { FinanceDisputesPanel } from "./partner-money-panels";
+import { notifyPartnerMoneyChanged, subscribeToPartnerMoneyRefresh } from "./partner-money-refresh";
+import {
+  createRequestGeneration,
+  type RequestGeneration,
+} from "./request-generation";
+import { escalationCapabilities, FiscalReceiptsPanel, StuckOrdersPanel } from "./ops-panels";
+import { useUrlState } from "../hooks/useUrlState";
 
 type InvoiceItem = {
   id: string;
@@ -163,22 +180,6 @@ type FinanceOverviewResponse = {
   deliveredOrders?: DeliveredOrderItem[];
 };
 
-const PAYOUT_STATE_LABELS: Record<string, string> = {
-  scheduled: "Запланирована",
-  pending: "Ожидает одобрения",
-  approved: "Одобрена",
-  paid: "Выплачена",
-  cancelled: "Отменена",
-};
-
-const CREDIT_NOTE_STATE_LABELS: Record<string, string> = {
-  draft: "Черновик",
-  pending: "На согласовании",
-  approved: "Одобрена",
-  applied: "Применена",
-  rejected: "Отклонена",
-};
-
 type ReconciliationResponse = {
   journals?: unknown[] | number;
   payment_events?: unknown[] | number;
@@ -213,16 +214,30 @@ function defaultPeriodDates(): { start: string; end: string } {
 export function FinanceWorkspace({
   demo,
   notify,
+  roles,
 }: {
   demo: DemoConfig | null;
   notify: (n: { kind: "ok" | "error"; text: string } | null) => void;
+  /** The roles of the session — the panels decide what the operator may do with them. */
+  roles: string[];
 }) {
   const [overview, setOverview] = useState<FinanceOverviewResponse>({});
   const [reconciliation, setReconciliation] = useState<ReconciliationResponse>({});
   const [drift, setDrift] = useState<DriftItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [initialLoaded, setInitialLoaded] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [loadingMoreBuckets, setLoadingMoreBuckets] = useState<BucketBusyMap>(EMPTY_BUCKET_BUSY);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  // The generation of the reloads of the workspace: a late answer of an older reload must not
+  // replace the fresh numbers (see the request generation module).
+  const generationRef = useRef<RequestGeneration | null>(null);
+  if (generationRef.current === null) generationRef.current = createRequestGeneration();
+  const generation = generationRef.current;
+  // Ownership of paginated payout / credit-note bucket appends across full refreshes (RET-01).
+  const bucketGuardRef = useRef<BucketPaginationGuard | null>(null);
+  if (bucketGuardRef.current === null) bucketGuardRef.current = createBucketPaginationGuard();
+  const bucketGuard = bucketGuardRef.current;
   const [pendingRefundKopeks, setPendingRefundKopeks] = useState(0);
 
   const [printDoc, setPrintDoc] = useState<{ kind: DocumentKind; id: string } | null>(null);
@@ -243,7 +258,7 @@ export function FinanceWorkspace({
   const [payoutAmountRub, setPayoutAmountRub] = useState("");
   const [payoutReference, setPayoutReference] = useState("");
 
-  const [payoutTab, setPayoutTab] = useState<"active" | "history">("active");
+  const [payoutTab, setPayoutTab] = useUrlState<"active" | "history">("financePayoutTab", "active");
   const [payoutActiveBucket, setPayoutActiveBucket] = useState<PaginatedBucket<PartnerPayoutItem>>({
     items: [], nextCursor: null, hasMore: false, totalCount: 0,
   });
@@ -251,7 +266,7 @@ export function FinanceWorkspace({
     items: [], nextCursor: null, hasMore: false, totalCount: 0,
   });
 
-  const [creditNoteTab, setCreditNoteTab] = useState<"active" | "history">("active");
+  const [creditNoteTab, setCreditNoteTab] = useUrlState<"active" | "history">("financeCreditNoteTab", "active");
   const [creditNoteActiveBucket, setCreditNoteActiveBucket] = useState<PaginatedBucket<PartnerCreditNoteItem>>({
     items: [], nextCursor: null, hasMore: false, totalCount: 0,
   });
@@ -359,9 +374,22 @@ export function FinanceWorkspace({
     [getChargebacksController],
   );
 
-  const loadFinance = useCallback(async () => {
+  const loadFinance = useCallback(async (mode: "bootstrap" | "refresh" = "refresh") => {
+    // Every reload belongs to a generation: the workspace can be reloaded while a previous reload
+    // is still running (the money bus, the refresh token and the panel of the workspace all ask
+    // for it), and a late answer of an older reload must not replace the fresh numbers.
+    const token = generation.beginFresh();
+    // Invalidate any in-flight paginated bucket appends before starting the full refresh (RET-01).
+    bucketGuard.invalidateAll();
+    setLoadingMoreBuckets(EMPTY_BUCKET_BUSY);
+    // Distinguish bootstrap from mutation/explicit refresh (RET-02): on initial mount the child
+    // panels already fetch with token 0, so bootstrap keeps the token unchanged. Any mutation or
+    // money-bus refresh increments the token immediately regardless of whether the first overview
+    // has finished or failed.
+    if (mode === "refresh") {
+      setRefreshNonce(n => n + 1);
+    }
     setLoading(true);
-    setRefreshNonce(n => n + 1);
     try {
       const [ov, rec, dr] = await Promise.all([
         api<FinanceOverviewResponse>("/finance/overview"),
@@ -369,6 +397,10 @@ export function FinanceWorkspace({
         api<DriftItem[] | { items?: DriftItem[] }>("/finance/payment-drift"),
         refreshChargebacks(),
       ]);
+      if (!generation.isCurrent(token)) return;
+      // Also invalidate any append that started while this full refresh was in flight.
+      bucketGuard.invalidateAll();
+      setLoadingMoreBuckets(EMPTY_BUCKET_BUSY);
       setOverview(ov ?? {});
       if (ov?.partnerPayoutsActive) {
         setPayoutActiveBucket(ov.partnerPayoutsActive);
@@ -403,15 +435,31 @@ export function FinanceWorkspace({
         setDrift([]);
       }
     } catch (err) {
+      if (!generation.isCurrent(token)) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setLoading(false);
+      if (generation.isCurrent(token)) {
+        setLoading(false);
+        setInitialLoaded(true);
+      }
     }
-  }, [refreshChargebacks, notify]);
+  }, [refreshChargebacks, notify, generation, bucketGuard]);
 
   useEffect(() => {
-    void loadFinance();
+    void loadFinance("bootstrap");
   }, [loadFinance]);
+
+  // A dispute that was settled in this workspace changes the money: the sums, the overview and
+  // the credit-note queue have to show the fresh state of the server without a manual refresh.
+  // The workspace reloads itself through the money bus — it never notifies the bus again, or the
+  // panels would reload each other in an endless loop.
+  useEffect(
+    () =>
+      subscribeToPartnerMoneyRefresh(() => {
+        void loadFinance("refresh");
+      }),
+    [loadFinance],
+  );
 
   const openRefundModal = (intent: PaymentIntentItem) => {
     setRefundTarget(intent);
@@ -557,6 +605,9 @@ export function FinanceWorkspace({
 
   const createPartnerInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
+    // The submit button stays focusable while the request is in flight, so the guard has to be
+    // here as well: a second click must not create a second act (P2-05).
+    if (busyAction === "partner-invoice") return;
     const trimmedPartner = partnerId.trim();
     if (!trimmedPartner) {
       notify({ kind: "error", text: "Выберите партнёра или укажите идентификатор партнёра" });
@@ -621,7 +672,9 @@ export function FinanceWorkspace({
       notify({ kind: "ok", text: "Выплата партнёру запланирована (ожидает одобрения второго финансиста)" });
       setPayoutAmountRub("");
       setPayoutReference("");
-      await loadFinance();
+      // The bus reloads the workspace and the partner panel. The workspace must not reload itself
+      // here as well: two requests for the very same numbers, and the second one can arrive first.
+      notifyPartnerMoneyChanged();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -637,7 +690,8 @@ export function FinanceWorkspace({
         body: {},
       });
       notify({ kind: "ok", text: "Выплата партнёру одобрена" });
-      await loadFinance();
+      // The bus reloads the workspace and the partner panel — once, not twice.
+      notifyPartnerMoneyChanged();
     } catch (err) {
       if (
         err instanceof ApiError &&
@@ -663,7 +717,8 @@ export function FinanceWorkspace({
         body: {},
       });
       notify({ kind: "ok", text: "Кредит-нота одобрена" });
-      await loadFinance();
+      // The bus reloads the workspace and the partner panel — once, not twice.
+      notifyPartnerMoneyChanged();
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -690,11 +745,14 @@ export function FinanceWorkspace({
   const loadMorePayouts = async (bucket: "active" | "history") => {
     const current = bucket === "active" ? payoutActiveBucket : payoutHistoryBucket;
     if (!current.nextCursor) return;
-    setBusyAction(`payouts-more-${bucket}`);
+    const bucketKey: FinanceBucketKey = bucket === "active" ? "payouts:active" : "payouts:history";
+    const token = bucketGuard.beginAppend(bucketKey);
+    setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: true }));
     try {
       const page = await api<PaginatedBucket<PartnerPayoutItem>>(
         `/finance/partner-payouts?bucket=${bucket}&limit=50&cursor=${encodeURIComponent(current.nextCursor)}`,
       );
+      if (!bucketGuard.isCurrent(token)) return;
       const merge = (prev: PaginatedBucket<PartnerPayoutItem>): PaginatedBucket<PartnerPayoutItem> => {
         const seen = new Set(prev.items.map(i => i.id));
         const nextItems = [...prev.items, ...page.items.filter(i => !seen.has(i.id))];
@@ -709,20 +767,26 @@ export function FinanceWorkspace({
       if (bucket === "active") setPayoutActiveBucket(merge);
       else setPayoutHistoryBucket(merge);
     } catch (err) {
+      if (!bucketGuard.isCurrent(token)) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusyAction(null);
+      if (bucketGuard.isCurrent(token)) {
+        setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: false }));
+      }
     }
   };
 
   const loadMoreCreditNotes = async (bucket: "active" | "history") => {
     const current = bucket === "active" ? creditNoteActiveBucket : creditNoteHistoryBucket;
     if (!current.nextCursor) return;
-    setBusyAction(`credit-notes-more-${bucket}`);
+    const bucketKey: FinanceBucketKey = bucket === "active" ? "creditNotes:active" : "creditNotes:history";
+    const token = bucketGuard.beginAppend(bucketKey);
+    setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: true }));
     try {
       const page = await api<PaginatedBucket<PartnerCreditNoteItem>>(
         `/finance/partner-credit-notes?bucket=${bucket}&limit=50&cursor=${encodeURIComponent(current.nextCursor)}`,
       );
+      if (!bucketGuard.isCurrent(token)) return;
       const merge = (prev: PaginatedBucket<PartnerCreditNoteItem>): PaginatedBucket<PartnerCreditNoteItem> => {
         const seen = new Set(prev.items.map(i => i.id));
         const nextItems = [...prev.items, ...page.items.filter(i => !seen.has(i.id))];
@@ -737,9 +801,12 @@ export function FinanceWorkspace({
       if (bucket === "active") setCreditNoteActiveBucket(merge);
       else setCreditNoteHistoryBucket(merge);
     } catch (err) {
+      if (!bucketGuard.isCurrent(token)) return;
       notify({ kind: "error", text: formatError(err) });
     } finally {
-      setBusyAction(null);
+      if (bucketGuard.isCurrent(token)) {
+        setLoadingMoreBuckets(prev => ({ ...prev, [bucketKey]: false }));
+      }
     }
   };
 
@@ -762,8 +829,8 @@ export function FinanceWorkspace({
   const driftCount = drift.length;
 
   return (
-    <div className="workspace-grid">
-      <div className="alert-banner" role="status">
+    <div className="workspace-grid" data-layout-pending={!initialLoaded || chargebacksLoading ? "true" : undefined}>
+      <div className="alert-banner">
         <AlertTriangle size={18} aria-hidden="true" />
         <span>Платёжный и фискальный шлюзы работают в демонстрационном режиме (54-ФЗ не подключён)</span>
       </div>
@@ -776,7 +843,13 @@ export function FinanceWorkspace({
           <Button
             variant="ghost"
             leadingIcon={<RefreshCw size={16} aria-hidden="true" />}
-            onClick={() => void loadFinance()}
+            onClick={() => {
+              // The workspace reloads itself through the money bus, so the button only notifies
+              // the bus: calling loadFinance() here as well would ask the server twice for the
+              // same numbers. The panels that show the partner's money live outside this
+              // workspace and reload from the same notification.
+              notifyPartnerMoneyChanged();
+            }}
             disabled={loading}
           >
             {loading ? "Обновление…" : "Обновить данные"}
@@ -786,17 +859,30 @@ export function FinanceWorkspace({
 
       {/* 0. Денежный контур: дебиторка, кредиторка, вклад */}
       <FinanceMoneyPanel
-        key={refreshNonce}
+        refreshToken={refreshNonce}
         notify={notify}
         onPendingRefundsChange={setPendingRefundKopeks}
       />
 
+      {/* 0a. Споры по начислениям партнёров: оспоренная сумма не выплачивается, пока спор открыт */}
+      <FinanceDisputesPanel notify={notify} />
+
+      {/* 0b. Фискальная регистрация счетов в демо-адаптере */}
+      <FiscalReceiptsPanel notify={notify} refreshToken={refreshNonce} />
+
+      {/* 0c. Застрявшие заказы: у заказа в простое должен быть ответственный и причина */}
+      <StuckOrdersPanel
+        notify={notify}
+        refreshToken={refreshNonce}
+        capabilities={escalationCapabilities(roles)}
+      />
+
       {/* 1. Финансовая сверка и дрифт */}
       <section className="panel" aria-labelledby="finance-reconciliation-heading">
-        <h3 id="finance-reconciliation-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-reconciliation-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <Scale size={18} aria-hidden="true" />
           <span>Финансовая сверка и дрифт</span>
-        </h3>
+        </h2>
 
         <StatGrid>
           <StatTile label="Проводок в журнале" value={journalsCount} />
@@ -811,14 +897,14 @@ export function FinanceWorkspace({
 
         {driftCount > 0 && (
           <div className="notice error" role="alert">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, marginBlockEnd: 6 }}>
+            <div className="u-flex u-ai-center u-gap-8px u-fwt-700 u-mb-6px">
               <AlertTriangle size={16} aria-hidden="true" />
               <span>Обнаружено расхождение сверки платежей</span>
             </div>
-            <div className="muted" style={{ marginBlockEnd: 6 }}>
+            <div className="muted u-mb-6px">
               Затронутые платёжные операции:
             </div>
-            <ul style={{ margin: 0, paddingInlineStart: 18 }}>
+            <ul className="u-m-0px u-pis-18px">
               {drift.map((item, idx) => {
                 const intentId = item.paymentIntentId ?? item.id ?? `drift-${idx + 1}`;
                 const details: string[] = [];
@@ -841,10 +927,10 @@ export function FinanceWorkspace({
       {/* 2. Счета клиентов, оплаты, возвраты и чарджбэки */}
       <section className="panel" aria-labelledby="finance-invoices-intents-heading">
         <div className="panel-head">
-          <h3 id="finance-invoices-intents-heading" className="panel-title" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+          <h2 id="finance-invoices-intents-heading" className="panel-title u-m-0px u-flex u-ai-center u-gap-8px">
             <Receipt size={18} aria-hidden="true" />
             <span>Счета клиентов, оплаты, возвраты и чарджбэки</span>
-          </h3>
+        </h2>
           <Button
             variant={hasPendingRefunds ? "primary" : "ghost"}
             size="sm"
@@ -860,11 +946,11 @@ export function FinanceWorkspace({
           </Button>
         </div>
 
-        <h4 style={{ marginBlock: "8px 10px" }}>Счета клиентов</h4>
+        <h3 className="u-mbl-8px-10px">Счета клиентов</h3>
         {invoices.length === 0 ? (
           <p className="muted">Счета клиентов отсутствуют.</p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -885,7 +971,7 @@ export function FinanceWorkspace({
                       </Badge>
                     </td>
                     <td>
-                      <div className="button-row" style={{ marginBlock: 0 }}>
+                      <div className="button-row u-mbl-0px">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -911,32 +997,33 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h4 style={{ marginBlock: "8px 10px" }}>
+        <h3 className="u-mbl-8px-10px">
           Оспариваемые платежи и чарджбэки ({chargebacksBucket.totalCount})
-        </h4>
-        <form
+        </h3>
+        <form className="u-flex u-fw-wrap u-gap-8px u-ai-end u-mb-12px"
           onSubmit={e => {
             e.preventDefault();
             const nextQ = chargebackQuery.trim();
             const currentState = getEffectiveChargebackFilter(getChargebacksController().getSnapshot()).state;
             void loadChargebacks(nextQ, currentState);
           }}
-          style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "end", marginBlockEnd: 12 }}
         >
-          <div style={{ flex: "1 1 240px" }}>
+          <div className="field u-flex-1-1-240px">
             <label htmlFor={chargebackSearchId}>Поиск чарджбэков</label>
             <input
               id={chargebackSearchId}
+              className="input"
               type="search"
               value={chargebackQuery}
               onChange={e => setChargebackQuery(e.target.value)}
               placeholder="ID платежа, номер заказа или провайдер…"
             />
           </div>
-          <div style={{ minWidth: 200 }}>
+          <div className="field u-flex-0-1-200px">
             <label htmlFor={chargebackStateId}>Статус</label>
             <select
               id={chargebackStateId}
+              className="select"
               value={chargebackState}
               onChange={e => {
                 const nextState = e.target.value as ChargebackFilterState;
@@ -949,7 +1036,7 @@ export function FinanceWorkspace({
               <option value="chargeback_lost">Чарджбэк проигран</option>
             </select>
           </div>
-          <div className="button-row" style={{ marginBlock: 0 }}>
+          <div className="button-row u-mbl-0px">
             <Button
               type="submit"
               variant="ghost"
@@ -976,22 +1063,11 @@ export function FinanceWorkspace({
           </div>
         </form>
         {chargebacksError && (
-          <div
+          <div className="u-flex u-fw-wrap u-ai-center u-jc-space-between u-gap-8px u-p-8px-12px u-mb-12px u-brr-8px u-bd-1px-solid-var-status-danger-border"
             role="alert"
             data-testid="chargebacks-error-banner"
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-              padding: "8px 12px",
-              marginBlockEnd: 12,
-              borderRadius: 8,
-              border: "1px solid var(--danger, #c62828)",
-            }}
           >
-            <span className="muted" style={{ color: "var(--danger, #c62828)" }}>
+            <span className="muted u-c-var-status-danger-ink">
               Не удалось загрузить чарджбэки: {chargebacksError}
             </span>
             <Button
@@ -1006,7 +1082,7 @@ export function FinanceWorkspace({
           </div>
         )}
         {chargebacks.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>
+          <p className="muted u-mb-18px">
             {chargebacksLoading
               ? "Загрузка чарджбэков…"
               : chargebacksError
@@ -1016,7 +1092,7 @@ export function FinanceWorkspace({
                   : "Активных чарджбэков нет."}
           </p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1044,7 +1120,7 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {chargebacksBucket.hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 10 }}>
+              <div className="button-row u-mt-10px">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1060,7 +1136,7 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h4 style={{ marginBlock: "8px 10px" }}>Платёжные операции</h4>
+        <h3 className="u-mbl-8px-10px">Платёжные операции</h3>
         {intents.length === 0 ? (
           <p className="muted">Платёжные операции отсутствуют.</p>
         ) : (
@@ -1083,7 +1159,7 @@ export function FinanceWorkspace({
                     <td>{stateLabel(PAYMENT_STATE_LABELS, intent.state)}</td>
                     <td>{providerLabel(intent.provider)}</td>
                     <td>
-                      <div className="button-row" style={{ marginBlock: 0 }}>
+                      <div className="button-row u-mbl-0px">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -1109,7 +1185,7 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {intentsMeta?.hasMore && (
-              <p className="muted" style={{ marginBlockStart: 8 }}>
+              <p className="muted u-mt-8px">
                 Показаны последние {intents.length} из {intentsMeta.total}.
               </p>
             )}
@@ -1119,10 +1195,10 @@ export function FinanceWorkspace({
 
       {/* 3. Компенсации по претензиям */}
       <section className="panel" aria-labelledby="finance-compensations-heading">
-        <h3 id="finance-compensations-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-compensations-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <Scale size={18} aria-hidden="true" />
           <span>Компенсации по претензиям</span>
-        </h3>
+        </h2>
 
         {pendingCompensations.length === 0 ? (
           <p className="muted">Ожидающих решения компенсаций нет.</p>
@@ -1158,7 +1234,7 @@ export function FinanceWorkspace({
                         </Badge>
                       </td>
                       <td>
-                        <div className="button-row" style={{ marginBlock: 0 }}>
+                        <div className="button-row u-mbl-0px">
                           {comp.state === "proposed" && (
                             <>
                               <Button
@@ -1205,19 +1281,20 @@ export function FinanceWorkspace({
 
       {/* 4. Партнёрские расчёты и фискальный реестр */}
       <section className="panel" aria-labelledby="finance-partners-fiscal-heading">
-        <h3 id="finance-partners-fiscal-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-partners-fiscal-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <Building2 size={18} aria-hidden="true" />
           <span>Партнёрские расчёты и фискальный реестр</span>
-        </h3>
+        </h2>
 
-        <form onSubmit={e => void createPartnerInvoice(e)} style={{ display: "grid", gap: 12, marginBlockEnd: 18 }}>
-          <div className="grid-two" style={{ alignItems: "end" }}>
-            <div>
+        <form className="u-grid u-gap-12px u-mb-18px" onSubmit={e => void createPartnerInvoice(e)}>
+          <div className="grid-two u-ai-end">
+            <div className="field">
               {partners.length > 0 ? (
                 <>
                   <label htmlFor={partnerSelectId}>Партнёр (фабрика)</label>
                   <select
                     id={partnerSelectId}
+                    className="select"
                     value={partnerId}
                     onChange={e => setPartnerId(e.target.value)}
                   >
@@ -1233,6 +1310,7 @@ export function FinanceWorkspace({
                   <label htmlFor={partnerInputId}>Идентификатор партнёра</label>
                   <input
                     id={partnerInputId}
+                    className="input"
                     type="text"
                     value={partnerId}
                     onChange={e => setPartnerId(e.target.value)}
@@ -1242,20 +1320,22 @@ export function FinanceWorkspace({
               )}
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div>
+            <div className="u-grid u-gtc-1fr-1fr u-gap-10px">
+              <div className="field">
                 <label htmlFor={periodStartId}>Начало периода</label>
                 <input
                   id={periodStartId}
+                  className="input"
                   type="date"
                   value={periodStart}
                   onChange={e => setPeriodStart(e.target.value)}
                 />
               </div>
-              <div>
+              <div className="field">
                 <label htmlFor={periodEndId}>Конец периода</label>
                 <input
                   id={periodEndId}
+                  className="input"
                   type="date"
                   value={periodEnd}
                   onChange={e => setPeriodEnd(e.target.value)}
@@ -1264,26 +1344,31 @@ export function FinanceWorkspace({
             </div>
           </div>
 
-          <div className="button-row" style={{ marginBlock: 0 }}>
+          <div className="button-row u-mbl-0px">
             <Button
               type="submit"
               variant="primary"
-              disabled={
+              // The button is not `disabled` while the request is in flight: a disabled button
+              // drops the focus to `<body>`, and the operator was left with no focus context and
+              // no focus ring after the act was created (P2-05). `aria-busy`/`aria-disabled`
+              // keep the state visible without taking the focus away.
+              aria-busy={busyAction === "partner-invoice"}
+              aria-disabled={
                 busyAction === "partner-invoice" ||
                 (partners.length > 0 && !partners.some(p => p.id === partnerId))
               }
               leadingIcon={<FileText size={16} aria-hidden="true" />}
             >
-              Сформировать акт партнёру
+              {busyAction === "partner-invoice" ? "Формируем акт…" : "Сформировать акт партнёру"}
             </Button>
           </div>
         </form>
 
-        <h4 style={{ marginBlock: "8px 10px" }}>Акты и счета партнёров</h4>
+        <h3 className="u-mbl-8px-10px">Акты и счета партнёров</h3>
         {partnerInvoices.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>Акты партнёров отсутствуют.</p>
+          <p className="muted u-mb-18px">Акты партнёров отсутствуют.</p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1320,15 +1405,16 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h4 style={{ marginBlock: "8px 10px" }}>Выплаты партнёрам</h4>
-        <form onSubmit={e => void createPartnerPayout(e)} style={{ display: "grid", gap: 12, marginBlockEnd: 18 }}>
-          <div className="grid-three" style={{ alignItems: "end" }}>
-            <div>
+        <h3 className="u-mbl-8px-10px">Выплаты партнёрам</h3>
+        <form className="u-grid u-gap-12px u-mb-18px" onSubmit={e => void createPartnerPayout(e)}>
+          <div className="grid-three u-ai-end">
+            <div className="field">
               {partners.length > 0 ? (
                 <>
                   <label htmlFor={payoutPartnerSelectId}>Партнёр (фабрика)</label>
                   <select
                     id={payoutPartnerSelectId}
+                    className="select"
                     value={payoutPartnerId}
                     onChange={e => setPayoutPartnerId(e.target.value)}
                   >
@@ -1344,6 +1430,7 @@ export function FinanceWorkspace({
                   <label htmlFor={payoutPartnerInputId}>Идентификатор партнёра</label>
                   <input
                     id={payoutPartnerInputId}
+                    className="input"
                     type="text"
                     value={payoutPartnerId}
                     onChange={e => setPayoutPartnerId(e.target.value)}
@@ -1352,23 +1439,26 @@ export function FinanceWorkspace({
                 </>
               )}
             </div>
-            <div>
+            <div className="field">
               <label htmlFor={payoutAmountId}>Сумма выплаты (руб.)</label>
               <input
                 id={payoutAmountId}
+                className="input"
                 type="number"
                 step="0.01"
                 min="0.01"
+                inputMode="decimal"
                 required
                 value={payoutAmountRub}
                 onChange={e => setPayoutAmountRub(e.target.value)}
                 placeholder="0.00"
               />
             </div>
-            <div>
+            <div className="field">
               <label htmlFor={payoutRefId}>Назначение / референс</label>
               <input
                 id={payoutRefId}
+                className="input"
                 type="text"
                 maxLength={120}
                 value={payoutReference}
@@ -1377,7 +1467,7 @@ export function FinanceWorkspace({
               />
             </div>
           </div>
-          <div className="button-row" style={{ marginBlock: 0 }}>
+          <div className="button-row u-mbl-0px">
             <Button
               type="submit"
               variant="primary"
@@ -1392,7 +1482,7 @@ export function FinanceWorkspace({
           </div>
         </form>
 
-        <div className="button-row" style={{ marginBlock: "0 10px" }}>
+        <div className="button-row u-mbl-0-10px">
           <Button
             variant={payoutTab === "active" ? "primary" : "ghost"}
             size="sm"
@@ -1410,11 +1500,11 @@ export function FinanceWorkspace({
         </div>
 
         {visiblePayoutBucket.items.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>
+          <p className="muted u-mb-18px">
             {payoutTab === "active" ? "Запланированных выплат в очереди нет." : "Завершённых выплат пока нет."}
           </p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1437,7 +1527,7 @@ export function FinanceWorkspace({
                       <td className="muted">{p.reference ?? "—"}</td>
                       <td>
                         <Badge tone={p.state === "approved" || p.state === "paid" ? "ok" : p.state === "cancelled" ? "danger" : "warn"}>
-                          {stateLabel(PAYOUT_STATE_LABELS, p.state)}
+                          {stateLabel(PARTNER_PAYOUT_STATE_LABELS, p.state)}
                         </Badge>
                       </td>
                       <td className="mono">{dt(p.createdAt)}</td>
@@ -1462,11 +1552,11 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {visiblePayoutBucket.hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 10 }}>
+              <div className="button-row u-mt-10px">
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={busyAction === `payouts-more-${payoutTab}`}
+                  disabled={loadingMoreBuckets[payoutTab === "active" ? "payouts:active" : "payouts:history"]}
                   onClick={() => void loadMorePayouts(payoutTab)}
                 >
                   Загрузить ещё ({visiblePayoutBucket.items.length} из {visiblePayoutBucket.totalCount})
@@ -1476,8 +1566,8 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h4 style={{ marginBlock: "8px 10px" }}>Кредит-ноты партнёров</h4>
-        <div className="button-row" style={{ marginBlock: "0 10px" }}>
+        <h3 className="u-mbl-8px-10px">Кредит-ноты партнёров</h3>
+        <div className="button-row u-mbl-0-10px">
           <Button
             variant={creditNoteTab === "active" ? "primary" : "ghost"}
             size="sm"
@@ -1494,11 +1584,11 @@ export function FinanceWorkspace({
           </Button>
         </div>
         {visibleCreditNoteBucket.items.length === 0 ? (
-          <p className="muted" style={{ marginBlockEnd: 18 }}>
+          <p className="muted u-mb-18px">
             {creditNoteTab === "active" ? "Черновиков кредит-нот в очереди нет." : "Завершённых кредит-нот пока нет."}
           </p>
         ) : (
-          <div className="table-wrap" style={{ marginBlockEnd: 18 }}>
+          <div className="table-wrap u-mb-18px">
             <table className="clean-table">
               <thead>
                 <tr>
@@ -1521,7 +1611,7 @@ export function FinanceWorkspace({
                       <td className="mono">{money(cn.amountKopeks)}</td>
                       <td>
                         <Badge tone={cn.state === "approved" || cn.state === "applied" ? "ok" : cn.state === "rejected" ? "danger" : "warn"}>
-                          {stateLabel(CREDIT_NOTE_STATE_LABELS, cn.state)}
+                          {stateLabel(PARTNER_CREDIT_NOTE_STATE_LABELS, cn.state)}
                         </Badge>
                       </td>
                       <td className="mono">{dt(cn.createdAt)}</td>
@@ -1546,11 +1636,11 @@ export function FinanceWorkspace({
               </tbody>
             </table>
             {visibleCreditNoteBucket.hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 10 }}>
+              <div className="button-row u-mt-10px">
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={busyAction === `credit-notes-more-${creditNoteTab}`}
+                  disabled={loadingMoreBuckets[creditNoteTab === "active" ? "creditNotes:active" : "creditNotes:history"]}
                   onClick={() => void loadMoreCreditNotes(creditNoteTab)}
                 >
                   Загрузить ещё ({visibleCreditNoteBucket.items.length} из {visibleCreditNoteBucket.totalCount})
@@ -1560,7 +1650,7 @@ export function FinanceWorkspace({
           </div>
         )}
 
-        <h4 style={{ marginBlock: "8px 10px" }}>Фискальный реестр (чеки)</h4>
+        <h3 className="u-mbl-8px-10px">Фискальный реестр (чеки)</h3>
         {fiscalReceipts.length === 0 ? (
           <p className="muted">Фискальные чеки отсутствуют.</p>
         ) : (
@@ -1591,10 +1681,10 @@ export function FinanceWorkspace({
 
       {/* 5. Закрытие доставленных заказов */}
       <section className="panel" aria-labelledby="finance-close-orders-heading">
-        <h3 id="finance-close-orders-heading" className="panel-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 id="finance-close-orders-heading" className="panel-title u-flex u-ai-center u-gap-8px">
           <PackageCheck size={18} aria-hidden="true" />
           <span>Закрытие доставленных заказов</span>
-        </h3>
+        </h2>
 
         {deliveredOrders.length === 0 ? (
           <p className="muted">Доставленных заказов, ожидающих закрытия, нет.</p>
@@ -1646,18 +1736,20 @@ export function FinanceWorkspace({
         onClose={() => setRefundTarget(null)}
       >
         {refundTarget && (
-          <form onSubmit={e => void submitRefund(e)} style={{ display: "grid", gap: 12 }}>
+          <form className="u-grid u-gap-12px" onSubmit={e => void submitRefund(e)}>
             <div className="muted">
               Платёж: <span className="mono">{refundTarget.id}</span> (доступно{" "}
               <span className="mono">{money(refundTarget.amountKopeks)}</span>)
             </div>
-            <div>
+            <div className="field">
               <label htmlFor={refundAmountId}>Сумма возврата (руб.)</label>
               <input
                 id={refundAmountId}
+                className="input"
                 type="number"
                 step="0.01"
                 min="0.01"
+                inputMode="decimal"
                 required
                 value={refundAmountRub}
                 onChange={e => setRefundAmountRub(e.target.value)}
@@ -1675,7 +1767,7 @@ export function FinanceWorkspace({
                 placeholder="Укажите основание для возврата средств"
               />
             </div>
-            <div className="button-row" style={{ marginBlock: 0 }}>
+            <div className="button-row u-mbl-0px">
               <Button
                 type="submit"
                 variant="primary"
@@ -1699,7 +1791,7 @@ export function FinanceWorkspace({
         onClose={() => setChargebackTarget(null)}
       >
         {chargebackTarget && (
-          <form onSubmit={e => void submitChargeback(e)} style={{ display: "grid", gap: 12 }}>
+          <form className="u-grid u-gap-12px" onSubmit={e => void submitChargeback(e)}>
             <div className="muted">
               Платёж: <span className="mono">{chargebackTarget.id}</span> ({" "}
               <span className="mono">{money(chargebackTarget.amountKopeks)}</span>)
@@ -1716,7 +1808,7 @@ export function FinanceWorkspace({
                 placeholder="Опишите основание диспута или чарджбэка"
               />
             </div>
-            <div className="button-row" style={{ marginBlock: 0 }}>
+            <div className="button-row u-mbl-0px">
               <Button
                 type="submit"
                 variant="primary"

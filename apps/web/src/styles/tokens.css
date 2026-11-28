@@ -6,6 +6,9 @@
 
 @layer tokens {
   :root {
+    /* The palette is designed for a light canvas only (DESIGN.md §2). A full
+       dark theme is out of scope, so the light scheme is pinned deliberately:
+       the browser must not auto-invert form controls on a dark OS theme. */
     color-scheme: light;
 
     /* ------------------------------------------------------------------
@@ -66,6 +69,11 @@
     --status-danger-ink: #9e1c18;
     --status-danger-bg: #fde8e6;
     --status-danger-border: rgba(158, 28, 24, 0.2);
+
+    /* Alias for call sites that reference the danger ink by its short name.
+       Without it they fall back to an arbitrary red that is not part of the
+       palette (MA-19). */
+    --danger: var(--status-danger-ink);
 
     --status-info-ink: #154b7e;
     --status-info-bg: #e7f1fc;
@@ -156,16 +164,43 @@
     --rail-width: 264px;
     --rail-width-collapsed: 72px;
     --topbar-height: 64px;
+    /* The topbar drops to 56 px on narrow screens; anything anchored below it
+       (the toast region) has to follow, otherwise it overlaps the header. */
+    --topbar-height-compact: 56px;
     --content-max: 1240px;
     --tap-target: 44px;
+
+    /* The sticky tab strip paints over the content that scrolls under it: on
+       the canvas it takes the canvas colour, inside a card the card colour
+       (the card overrides it). */
+    --tab-bar-surface: var(--bg-canvas);
+
+    /* ------------------------------------------------------------------
+       Safe area — notch and home-indicator insets.
+       They stay 0 until `viewport-fit=cover` is set in the viewport meta.
+       ------------------------------------------------------------------ */
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+
+    /* ------------------------------------------------------------------
+       Long panels — placeholder size for content that is skipped until it
+       scrolls into view (`content-visibility: auto`).
+       ------------------------------------------------------------------ */
+    --content-auto-size: 600px;
 
     /* ------------------------------------------------------------------
        Z-index scale
        ------------------------------------------------------------------ */
     --z-base: 0;
     --z-sticky: 10;
-    --z-rail: 20;
     --z-topbar: 30;
+    /* The mobile drawer must always paint above the topbar: the topbar is a
+       sticky bar that would otherwise cover the brand and the first items of
+       the menu (MA-01). The rail's own layer is isolated from the content
+       column, so nothing inside the workspace can leak over the drawer. */
+    --z-rail: 35;
     --z-dropdown: 40;
     --z-overlay: 50;
     --z-toast: 60;

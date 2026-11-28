@@ -9,6 +9,7 @@ import {
   CreditCard,
   Download,
   FileText,
+  History,
   Info,
   ListOrdered,
   MapPin,
@@ -25,6 +26,8 @@ import {
 import { ApiError, api, dt, money, newKey } from "../api";
 import { DocumentPrintModal, type DocumentKind } from "../components/DocumentPrintModal";
 import { EvidenceUploader } from "../components/EvidenceUploader";
+import { useUrlState } from "../hooks/useUrlState";
+import { revealRegion } from "../hooks/useScrollIntoView";
 import {
   evidenceOwnerKey,
   getOwnerUploadSnapshot,
@@ -38,6 +41,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { CardHeader } from "../components/ui/Card";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Input } from "../components/ui/Field";
 import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { CustomerMoneyPanel } from "./analytics-panels";
 import {
@@ -107,7 +111,19 @@ type QuoteDto = {
   addressId?: string;
   termsVersion?: string;
   lines: QuoteLineDto[];
+  /** The declaration the customer made, with the value they stated for each piece. */
+  declaredItems?: DeclaredItemDto[];
   replayed?: boolean;
+};
+
+/** One declared piece: what it is, how many, and what the customer said it is worth. */
+type DeclaredItemDto = {
+  subtypeId: string;
+  category: string;
+  label: string;
+  quantity: number;
+  /** The customer's declaration in kopeks. `null` means "the customer stated no value". */
+  declaredValueKopeks?: number | null;
 };
 
 type HoldDto = {
@@ -150,7 +166,11 @@ type OrderDetailDto = {
     declaredValueKopeks: number;
     status: string;
     createdAt: string;
+    /** Free-form condition record; it carries how the courier settled the declared value. */
+    conditionJson?: Record<string, unknown> | null;
   }>;
+  /** What the customer declared at order time — straight out of the immutable quote. */
+  declaredItems?: DeclaredItemDto[];
   containers: Array<{ id: string; code: string; kind: string; sealSerial: string | null; weightGrams: number }>;
   adjustments: Array<{
     id: string;
@@ -182,7 +202,7 @@ type RepeatDto = {
   originalAddressId?: string | null;
   addressAvailable?: boolean;
   lines: Array<{ serviceId: string; tier: "economy" | "protected"; quantity: number; unit: string }>;
-  declaredItems: Array<{ subtypeId: string; category: string; label: string; quantity: number }>;
+  declaredItems: Array<{ subtypeId: string; category: string; label: string; quantity: number; declaredValueKopeks?: number | null }>;
   note: string;
 };
 
@@ -281,15 +301,97 @@ function errorText(err: unknown): string {
   return formatError(err);
 }
 
+/**
+ * A short option label: the native `<select>` clips a long option without an ellipsis, so the
+ * option carries only the day and the time range, and the rest of the window is explained in the
+ * hint under the field (MA-14).
+ */
 function windowLabel(window: WindowDto): string {
-  return `${dt(window.startsAt)} — ${dt(window.endsAt)} · ${
-    window.isShared ? "общий слот" : "внеплановый слот"
-  } · свободно ${Math.max(window.capacityOrders - window.reservedOrders, 0)} из ${window.capacityOrders}`;
+  const starts = new Date(window.startsAt);
+  const ends = new Date(window.endsAt);
+  const day = starts.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  const time = (value: Date) => value.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  return `${day} · ${time(starts)}–${time(ends)}`;
+}
+
+/** What the shortened option label cannot carry: the slot kind and how much room is left. */
+function windowHint(window: WindowDto): string {
+  const kind = window.isShared ? "общий слот" : "внеплановый слот";
+  const free = Math.max(window.capacityOrders - window.reservedOrders, 0);
+  return `${kind} · свободно ${free} из ${window.capacityOrders}`;
 }
 
 /** A window whose end time has passed can no longer hold capacity — the server rejects such a hold. */
 function isWindowClosed(window: WindowDto, now: number): boolean {
   return new Date(window.endsAt).getTime() <= now;
+}
+
+/**
+ * The last quote is remembered by id only. The quote itself is an immutable server-side snapshot,
+ * so the customer can come back to the very same calculation and support can open it by id.
+ */
+const LAST_QUOTE_KEY = "laundry.lastQuoteId";
+
+function readLastQuoteId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_QUOTE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberQuoteId(id: string): void {
+  try {
+    window.localStorage.setItem(LAST_QUOTE_KEY, id);
+  } catch {
+    // A browser that refuses local storage still works — the quote is simply not offered again.
+  }
+}
+
+function forgetQuoteId(): void {
+  try {
+    window.localStorage.removeItem(LAST_QUOTE_KEY);
+  } catch {
+    // Same as above: nothing to clean up.
+  }
+}
+
+/**
+ * The customer types rubles, the API stores kopeks.
+ *
+ * The declared value is optional — a customer may hand things over without saying what
+ * they are worth — but a typed value has to be a sane number of rubles: the API accepts
+ * whole kopeks only and rejects anything else, so the form refuses it before the request.
+ */
+function parseDeclaredValueRub(raw: string): { kopeks: number | null; error: string | null } {
+  const trimmed = raw.trim().replace(",", ".");
+  if (!trimmed) return { kopeks: null, error: null };
+  const value = Number(trimmed);
+  if (!Number.isFinite(value)) {
+    return { kopeks: null, error: "Ценность должна быть числом" };
+  }
+  if (value < 0) {
+    return { kopeks: null, error: "Ценность не может быть отрицательной" };
+  }
+  return { kopeks: Math.round(value * 100), error: null };
+}
+
+/** Kopeks back to the rubles the customer typed, so a repeated order keeps the value. */
+function kopeksToRubInput(kopeks: number | null | undefined): string {
+  if (kopeks === null || kopeks === undefined) return "";
+  return String(kopeks / 100);
+}
+
+/**
+ * How the courier settled the value the customer declared for a piece: confirmed, or a
+ * discrepancy when the courier recorded a different value. The intake keeps the answer in
+ * the free-form condition record of the accepted garment.
+ */
+function declaredValueSettlement(
+  condition: Record<string, unknown> | null | undefined,
+): "confirmed" | "discrepancy" | null {
+  const value = condition?.declaredValueSettlement;
+  return value === "confirmed" || value === "discrepancy" ? value : null;
 }
 
 const NOTIFICATIONS_PAGE_SIZE = 100;
@@ -324,7 +426,9 @@ async function fetchNotificationsPage(
 
 export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; notify: NotifyFn }) {
   const tabsId = useId();
-  const [activeTab, setActiveTab] = useState("new");
+  // The open section is part of the URL: a reload keeps it, a colleague can open the same view,
+  // and the Back button returns to the previous section instead of leaving the application.
+  const [activeTab, setActiveTab] = useUrlState<string>("tab", "new");
   const [repeat, setRepeat] = useState<RepeatDto | null>(null);
   const [notifications, setNotifications] = useState<NotificationDto[] | null>(null);
   const [totalUnread, setTotalUnread] = useState<number | null>(null);
@@ -407,6 +511,10 @@ export function CustomerWorkspace({ demo, notify }: { demo: DemoConfig | null; n
 
   return (
     <div className="workspace-grid">
+      {/* Every other workspace starts with a visible H1; the customer workspace began with a tab
+          strip, so its heading hierarchy started at H2. The title is for the screen reader and
+          for the page outline — the topbar already shows the same name to everybody else. */}
+      <h1 className="visually-hidden">Личный кабинет</h1>
       <Tabs
         idPrefix={tabsId}
         items={tabs.map(tab => ({
@@ -475,6 +583,10 @@ function NewOrderTab({
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [addresses, setAddresses] = useState<AddressDto[]>([]);
 
+  // The last quote is kept by id only. A quote is an immutable server-side snapshot, so the
+  // customer can come back to it — and a support agent can open the very same snapshot by id.
+  const [lastQuote, setLastQuote] = useState<QuoteDto | null>(null);
+
   const buildings = useMemo(() => {
     if (demo?.buildings && demo.buildings.length > 0) return demo.buildings;
     const seen = new Set<string>();
@@ -488,6 +600,8 @@ function NewOrderTab({
   }, [demo?.buildings, addresses]);
   const [buildingId, setBuildingId] = useState<string>(demo?.buildings?.[0]?.id ?? "");
   const [addressId, setAddressId] = useState<string>("");
+  // The service area of the chosen building: address, city and the timezone the windows use.
+  const [resolvedZone, setResolvedZone] = useState<{ address: string; city: string; timezone: string } | null>(null);
 
   const [pickupWindows, setPickupWindows] = useState<WindowDto[]>([]);
   const [deliveryWindows, setDeliveryWindows] = useState<WindowDto[]>([]);
@@ -502,6 +616,15 @@ function NewOrderTab({
   const [tier, setTier] = useState<"economy" | "protected">("economy");
   const [quantity, setQuantity] = useState("1000");
   const [declared, setDeclared] = useState<PickedGarment[]>([]);
+  // The value the customer states for each piece, in rubles as typed. It is kept next to
+  // the picked rows rather than inside them, because the picker itself knows nothing about
+  // money — it only picks icons and counts.
+  const [declaredValues, setDeclaredValues] = useState<Record<string, string>>({});
+  // The landing page offers an individual visit outside the house schedule for an extra fee.
+  // The API has always priced it; without this switch the customer could not buy what was
+  // advertised, so the offer and the product have to meet.
+  const [offSchedulePickup, setOffSchedulePickup] = useState(false);
+  const [offScheduleDelivery, setOffScheduleDelivery] = useState(false);
 
   const [quote, setQuote] = useState<QuoteDto | null>(null);
   const [quoteFingerprint, setQuoteFingerprint] = useState<string | null>(null);
@@ -538,12 +661,19 @@ function NewOrderTab({
       serviceId,
       tier,
       quantity,
-      declared: tier === "protected" ? declared.map((d) => [d.subtypeId, d.quantity]) : [],
+      offSchedulePickup,
+      offScheduleDelivery,
+      declared: tier === "protected"
+        ? declared.map((d) => [d.subtypeId, d.quantity, declaredValues[d.subtypeId] ?? ""])
+        : [],
     }),
-    [buildingId, addressId, pickupWindowId, deliveryWindowId, serviceId, tier, quantity, declared],
+    [buildingId, addressId, pickupWindowId, deliveryWindowId, serviceId, tier, quantity, offSchedulePickup, offScheduleDelivery, declared, declaredValues],
   );
   const quoteStale = Boolean(quote && quoteFingerprint !== formFingerprint);
   const quoteExpired = quote ? new Date(quote.expiresAt).getTime() <= now : false;
+  // The quote needs a building, a service and both windows. The windows arrive after the first
+  // render, so until they are here the calculation cannot be requested at all.
+  const quoteReady = Boolean(buildingId && serviceId && pickupWindowId && deliveryWindowId) && !windowsLoading;
   const holdExpired = [pickupHold, deliveryHold].some((hold) => hold && new Date(hold.expiresAt).getTime() <= now);
   const invoice = finance?.invoice ?? null;
   const hasPayableInvoice = Boolean(invoice && invoice.state === "open" && invoice.totalKopeks > 0);
@@ -552,6 +682,27 @@ function NewOrderTab({
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Offer the previous calculation back to the customer instead of making them start over.
+  useEffect(() => {
+    let cancelled = false;
+    const storedId = readLastQuoteId();
+    if (!storedId) return;
+    api<QuoteDto>(`/quotes/${encodeURIComponent(storedId)}`)
+      .then(stored => {
+        if (!cancelled) setLastQuote(stored);
+      })
+      .catch(() => {
+        // The quote expired or was never created on this account: forget it quietly.
+        if (!cancelled) {
+          setLastQuote(null);
+          forgetQuoteId();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const loadCatalog = useCallback(async () => {
@@ -658,6 +809,28 @@ function NewOrderTab({
     void loadWindows(buildingId);
   }, [buildingId, loadWindows]);
 
+  // The zone of service is resolved by the server: the customer sees the address, the city and
+  // the timezone of the windows before choosing a slot.
+  useEffect(() => {
+    if (!buildingId) {
+      setResolvedZone(null);
+      return;
+    }
+    let cancelled = false;
+    void api<{ address: string; city: string; timezone: string }>(
+      `/service-areas/resolve?buildingId=${encodeURIComponent(buildingId)}`,
+    )
+      .then(zone => {
+        if (!cancelled) setResolvedZone(zone);
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedZone(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [buildingId]);
+
   // The server still lists windows whose time has passed; such a slot can no longer be held.
   const openPickupWindows = useMemo(
     () => pickupWindows.filter((window) => !isWindowClosed(window, now)),
@@ -703,6 +876,20 @@ function NewOrderTab({
       notify({ kind: "error", text: "Выберите дом, окна забора и доставки и услугу" });
       return;
     }
+    // The declared value is the customer's own statement about a piece. It is optional, but a
+    // typed value has to be a sane number — the API accepts whole kopeks only, so the form
+    // refuses a broken number instead of letting the request fail.
+    const declaredRows = declared.map((item) => ({
+      subtypeId: item.subtypeId,
+      label: item.label,
+      quantity: item.quantity,
+      parsed: parseDeclaredValueRub(declaredValues[item.subtypeId] ?? ""),
+    }));
+    const brokenValue = declaredRows.find(row => row.parsed.error);
+    if (brokenValue) {
+      notify({ kind: "error", text: `${brokenValue.label}: ${brokenValue.parsed.error}` });
+      return;
+    }
     const reqId = ++quoteReqRef.current;
     const requestFingerprint = formFingerprint;
     const priorReservationIds = [pickupHold?.reservationId, deliveryHold?.reservationId].filter(
@@ -719,11 +906,20 @@ function NewOrderTab({
           ...(demo?.tariffVersionId ? { tariffVersionId: demo.tariffVersionId } : {}),
           pickupWindowId,
           deliveryWindowId,
+          // An individual visit outside the house schedule is priced as such by the tariff.
+          ...(offSchedulePickup ? { offSchedulePickup: true } : {}),
+          ...(offScheduleDelivery ? { offScheduleDelivery: true } : {}),
           lines: [{ serviceId, tier, quantity: parsedQuantity, unit }],
           // The declaration travels inside the immutable quote, so the courier's
           // acceptance can be reconciled against exactly what the customer saw.
-          ...(tier === "protected" && declared.length > 0
-            ? { declaredItems: declared.map((item) => ({ subtypeId: item.subtypeId, quantity: item.quantity })) }
+          ...(tier === "protected" && declaredRows.length > 0
+            ? {
+              declaredItems: declaredRows.map(row => ({
+                subtypeId: row.subtypeId,
+                quantity: row.quantity,
+                ...(row.parsed.kopeks !== null ? { declaredValueKopeks: row.parsed.kopeks } : {}),
+              })),
+            }
             : {}),
           ...(priorReservationIds.length > 0 ? { releaseReservationIds: priorReservationIds } : {}),
         },
@@ -731,6 +927,9 @@ function NewOrderTab({
       if (quoteReqRef.current !== reqId) return;
       setQuote(created);
       setQuoteFingerprint(requestFingerprint);
+      // Remember the id so the customer can come back to this exact calculation.
+      rememberQuoteId(created.id);
+      setLastQuote(created);
       setPickupHold(null);
       setDeliveryHold(null);
       holdAttemptKeyRef.current = null;
@@ -780,6 +979,11 @@ function NewOrderTab({
         icon: subtype?.icon ?? "tshirt",
       };
     }));
+    // The value the customer stated last time travels with the repeated order: the repeat is
+    // a new quote with a new price, but the customer does not have to declare the value again.
+    setDeclaredValues(Object.fromEntries(
+      repeat.declaredItems.map(item => [item.subtypeId, kopeksToRubInput(item.declaredValueKopeks)]),
+    ));
     quoteReqRef.current += 1;
     setQuote(null);
     setQuoteFingerprint(null);
@@ -966,7 +1170,7 @@ function NewOrderTab({
   const isBusy = busy !== null;
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
+    <div className="u-grid u-gap-16px">
       <section className="panel">
         <CardHeader
           title="Новый заказ"
@@ -994,6 +1198,15 @@ function NewOrderTab({
                 <option key={item.id} value={item.id}>{item.address}</option>
               ))}
             </select>
+            {/* The zone of service is resolved on the server: the customer sees the address, the
+                city and the timezone their windows are given in, instead of guessing. */}
+            <p className="field__hint">
+              {resolvedZone
+                ? `${resolvedZone.address} · ${resolvedZone.city} · часовой пояс ${resolvedZone.timezone}`
+                : buildingId
+                  ? "Уточняем адрес и часовой пояс…"
+                  : "Выберите дом — покажем адрес, город и часовой пояс окна."}
+            </p>
           </div>
 
           {buildingAddresses.length > 0 && (
@@ -1053,6 +1266,11 @@ function NewOrderTab({
                 <option key={window.id} value={window.id}>{windowLabel(window)}</option>
               ))}
             </select>
+            <p className="field__hint">
+              {openPickupWindows.find((window) => window.id === pickupWindowId)
+                ? windowHint(openPickupWindows.find((window) => window.id === pickupWindowId) as WindowDto)
+                : "Выберите окно забора"}
+            </p>
           </div>
 
           <div className="field">
@@ -1070,6 +1288,11 @@ function NewOrderTab({
                 <option key={window.id} value={window.id}>{windowLabel(window)}</option>
               ))}
             </select>
+            <p className="field__hint">
+              {openDeliveryWindows.find((window) => window.id === deliveryWindowId)
+                ? windowHint(openDeliveryWindows.find((window) => window.id === deliveryWindowId) as WindowDto)
+                : "Выберите окно доставки"}
+            </p>
           </div>
 
           <div className="field">
@@ -1081,15 +1304,45 @@ function NewOrderTab({
             </select>
           </div>
 
+          <fieldset className="fieldset">
+            <legend>Индивидуальный визит вне графика дома</legend>
+            <p className="muted">
+              Общий рейс по дому бесплатный. Индивидуальный забор или доставка в удобное время
+              оплачиваются отдельно — стоимость появится в расчёте до подтверждения.
+            </p>
+            <div className="stack">
+              <label className="check-row" htmlFor={`${uid}-off-pickup`}>
+                <input
+                  id={`${uid}-off-pickup`}
+                  type="checkbox"
+                  checked={offSchedulePickup}
+                  onChange={(event) => setOffSchedulePickup(event.target.checked)}
+                />
+                <span>Забрать в индивидуальное время</span>
+              </label>
+              <label className="check-row" htmlFor={`${uid}-off-delivery`}>
+                <input
+                  id={`${uid}-off-delivery`}
+                  type="checkbox"
+                  checked={offScheduleDelivery}
+                  onChange={(event) => setOffScheduleDelivery(event.target.checked)}
+                />
+                <span>Доставить в индивидуальное время</span>
+              </label>
+            </div>
+          </fieldset>
+
           <div className="field">
             <label htmlFor={`${uid}-quantity`}>
               Количество ({selectedService ? stateLabel(UNIT_LABELS, selectedService.unit) : "—"})
             </label>
             <input
               id={`${uid}-quantity`}
+              className="input"
               type="number"
               min={1}
               step={1}
+              inputMode="numeric"
               value={quantity}
               onChange={(event) => setQuantity(event.target.value)}
             />
@@ -1098,16 +1351,34 @@ function NewOrderTab({
         </div>
 
         {tier === "protected" ? (
-          <div style={{ marginBlockStart: 16 }}>
+          <div className="u-mt-16px">
             <GarmentPicker
               value={declared}
               onChange={setDeclared}
               title="Что сдаёте"
-              hint="Тариф «Защищённый» ведёт поштучную опись. Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Курьер увидит ваш список и сверит его с тем, что принял."
+              hint="Тариф «Защищённый» ведёт поштучную опись. Нажмите иконку, выберите вид и количество — вручную ничего вводить не нужно. Укажите ценность вещи, если хотите заявить её: курьер увидит ваш список, сверит его с тем, что принял, и подтвердит ценность или запишет расхождение."
+              renderExtra={item => (
+                <span className="garment-row-fields">
+                  <Input
+                    type="number"
+                    min={0}
+                    // Rubles, and kopecks are allowed: the API stores whole kopeks, so the
+                    // form rounds what the customer typed.
+                    step="any"
+                    placeholder="ценность не заявлена"
+                    value={declaredValues[item.subtypeId] ?? ""}
+                    onChange={event => setDeclaredValues(prev => ({
+                      ...prev,
+                      [item.subtypeId]: event.target.value,
+                    }))}
+                    aria-label={`Заявленная ценность: ${item.label}`}
+                  />
+                </span>
+              )}
             />
           </div>
         ) : (
-          <div className="notice info" style={{ marginBlockStart: 16 }}>
+          <div className="notice info u-mt-16px">
             <span className="notice__body">
               <Info size={16} aria-hidden="true" />
               <span>
@@ -1119,7 +1390,7 @@ function NewOrderTab({
         )}
 
         {windowsError && (
-          <div className="notice error" style={{ marginBlockStart: 12 }}>
+          <div className="notice error u-mt-12px">
             <span>Не удалось загрузить окна забора и доставки: {windowsError}</span>
           </div>
         )}
@@ -1158,9 +1429,15 @@ function NewOrderTab({
         )}
 
         <div className="button-row">
+          {/* The quote needs a building, a service and both windows. The windows arrive after
+              the first render, so the button used to be clickable while the form was still
+              incomplete: the click produced "Выберите дом, окна забора и доставки и услугу"
+              instead of a price. The button now waits for the form and the hint says what is
+              missing. */}
           <Button
             variant="primary"
-            disabled={isBusy}
+            disabled={isBusy || !quoteReady}
+            aria-describedby={`${uid}-order-step-hint`}
             leadingIcon={<Banknote size={16} aria-hidden="true" />}
             onClick={() => void handleQuote()}
           >
@@ -1169,6 +1446,7 @@ function NewOrderTab({
           <Button
             variant="secondary"
             disabled={isBusy || !quote || quoteStale}
+            aria-describedby={`${uid}-order-step-hint`}
             leadingIcon={<Calendar size={16} aria-hidden="true" />}
             onClick={() => void handleHold()}
           >
@@ -1177,21 +1455,57 @@ function NewOrderTab({
           <Button
             variant="primary"
             disabled={isBusy || !quote || quoteStale || !pickupHold || !deliveryHold}
+            aria-describedby={`${uid}-order-step-hint`}
             leadingIcon={<Check size={16} aria-hidden="true" />}
             onClick={() => void handleBook()}
           >
             Подтвердить заказ
           </Button>
         </div>
+        {/* A disabled button that explains nothing is a dead end: the customer has to be told
+            which step is missing (MA-28). The hint is linked to the two disabled controls. */}
+        <p className="muted u-mt-8px" id={`${uid}-order-step-hint`}>
+          {!quoteReady
+            ? windowsLoading
+              ? "Загружаем окна забора и доставки — расчёт станет доступен, когда они появятся."
+              : "Выберите дом, услугу и окна забора с доставкой — после этого появится расчёт."
+            : !quote
+              ? "Сначала рассчитайте стоимость — без расчёта забронировать слоты нельзя."
+              : quoteStale
+                ? "Расчёт устарел: параметры заказа изменились — рассчитайте стоимость заново."
+                : !pickupHold || !deliveryHold
+                  ? "Забронируйте слоты забора и доставки — после этого заказ можно подтвердить."
+                  : "Всё готово: заказ можно подтвердить."}
+        </p>
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Расчёт</h3>
+        <h3 className="panel-title u-mb-10px">Расчёт</h3>
         {!quote && (          <EmptyState
             icon={<Banknote size={20} aria-hidden="true" />}
             title="Расчёта пока нет"
             text="Стоимость считает сервер по действующему тарифу. Выберите дом, услугу и окна забора с доставкой, затем нажмите «Рассчитать стоимость»."
           />
+        )}
+        {lastQuote && !quote && (
+          <div className="alert-banner" role="status">
+            <History size={16} aria-hidden="true" />
+            <span>
+              <strong>Ваш прошлый расчёт: {money(lastQuote.totalKopeks)}</strong> — действует до{" "}
+              {dt(lastQuote.expiresAt)}. Параметры заказа могли измениться, поэтому для оформления
+              заказа расчёт нужно подтвердить заново.
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setQuote(lastQuote);
+                setQuoteFingerprint("");
+              }}
+            >
+              Показать расчёт
+            </Button>
+          </div>
         )}
         {quote && (
           <>
@@ -1229,7 +1543,27 @@ function NewOrderTab({
               <span>Итого по расчёту</span>
               <strong className="mono">{money(quote.totalKopeks)}</strong>
             </div>
-            <p className="muted" style={{ marginBlockStart: 8 }}>
+            {quote.declaredItems && quote.declaredItems.length > 0 && (
+              <>
+                <h4 className="section-title">Заявленная ценность</h4>
+                <div className="data-list">
+                  {quote.declaredItems.map(item => (
+                    <div className="data-row" key={item.subtypeId}>
+                      <span>{item.label} × {item.quantity}</span>
+                      <span className="mono">
+                        {item.declaredValueKopeks === null || item.declaredValueKopeks === undefined
+                          ? "не заявлена"
+                          : money(item.declaredValueKopeks)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="muted u-mt-8px">
+                  Ценность входит в неизменяемый расчёт: курьер подтвердит её при приёме вещей или запишет расхождение.
+                </p>
+              </>
+            )}
+            <p className="muted u-mt-8px">
               Тариф версии <span className="mono">{quote.tariffVersionId}</span> · расчёт действителен до{" "}
               <span className="mono">{dt(quote.expiresAt)}</span>
               {quoteExpired ? " · срок действия истёк, запросите новый расчёт" : ""}
@@ -1264,7 +1598,7 @@ function NewOrderTab({
       {order && (
         <section className="panel">
           <div className="panel-head">
-            <h3 className="panel-title" style={{ margin: 0 }}>
+            <h3 className="panel-title u-m-0px">
               Заказ <span className="mono">{order.publicNumber}</span>
             </h3>
             <Badge tone={orderStateTone(order.lifecycleState)}>
@@ -1292,7 +1626,7 @@ function NewOrderTab({
             </button>
           </div>
 
-          <p className="muted" style={{ marginBlockStart: 8 }}>
+          <p className="muted u-mt-8px">
             Платёж выполняет демо-провайдер «fake»: реальных списаний не происходит, фискальный чек не выдаётся.
           </p>
 
@@ -1323,7 +1657,7 @@ function NewOrderTab({
                 </div>
               )}
               {finance.refunds.length > 0 && (
-                <div className="data-list" style={{ marginBlockStart: 8 }}>
+                <div className="data-list u-mt-8px">
                   {finance.refunds.map((refund) => (
                     <div className="data-row" key={refund.id}>
                       <span>Возврат · {stateLabel(REFUND_STATE_LABELS, refund.state)} · {refund.reason}</span>
@@ -1333,7 +1667,7 @@ function NewOrderTab({
                 </div>
               )}
               {finance.fiscalReceipts.length > 0 && (
-                <p className="muted" style={{ marginBlockStart: 8 }}>
+                <p className="muted u-mt-8px">
                   Состояние фискальной регистрации:{" "}
                   {finance.fiscalReceipts.map((receipt) => stateLabel(FISCAL_STATE_LABELS, receipt.state)).join(", ")}. {FISCAL_ADAPTER_NOTE}
                 </p>
@@ -1355,6 +1689,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<OrderDetailDto | null>(null);
+  const detailPanelRef = useRef<HTMLElement | null>(null);
   const [finance, setFinance] = useState<FinanceDto | null>(null);
   const [timeline, setTimeline] = useState<TimelineEventDto[]>([]);
   const [claims, setClaims] = useState<ClaimDto[]>([]);
@@ -1498,6 +1833,13 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
+  // The detail of a picked order lives under the list. Without this the screen looks unchanged:
+  // nothing scrolls, nothing takes focus, and the user is left guessing whether the click worked.
+  useEffect(() => {
+    if (!detail) return;
+    revealRegion(detailPanelRef.current);
+  }, [detail]);
+
   const runAction = async (key: string, fn: () => Promise<void>, okMessage: string) => {
     setBusy(key);
     notify(null);
@@ -1532,7 +1874,14 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
   };
 
   const handleAdjustmentDecision = async (adjustmentId: string, accept: boolean) => {
-    if (!detail?.acceptedQuoteHash) return;
+    if (!detail?.acceptedQuoteHash) {
+      // A silent return left the customer staring at a dead button with no explanation.
+      notify({
+        kind: "error",
+        text: "Решение по доплате недоступно: у заказа нет принятой котировки. Обратитесь в поддержку.",
+      });
+      return;
+    }
     await runAction(
       `adjustment-${adjustmentId}`,
       async () => {
@@ -1760,14 +2109,13 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
         )}
 
         {orders && orders.length > 0 && (
-          <div style={{ display: "grid", gap: 10 }}>
+          <div className="u-grid u-gap-10px">
             {orders.map((order) => (
               <button
                 key={order.id}
                 type="button"
-                className={order.id === selectedId ? "data-row selected" : "data-row"}
+                className={`${order.id === selectedId ? "data-row selected" : "data-row"} u-ta-left u-cur-pointer`}
                 onClick={() => setSelectedId(order.id)}
-                style={{ textAlign: "left", cursor: "pointer" }}
               >
                 <span>
                   <span className="mono">{order.publicNumber}</span>
@@ -1789,9 +2137,9 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
 
       {detail && (
         <>
-          <section className="panel">
+          <section className="panel" ref={detailPanelRef}>
             <div className="panel-head">
-              <h3 className="panel-title" style={{ margin: 0 }}>
+              <h3 className="panel-title u-m-0px" tabIndex={-1}>
                 Заказ <span className="mono">{detail.publicNumber}</span>
               </h3>
               <Badge tone={orderStateTone(detail.lifecycleState)}>
@@ -1875,7 +2223,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
               </button>
             </div>
 
-            <div className="field" style={{ marginBlockStart: 14 }}>
+            <div className="field u-mt-14px">
               <label htmlFor={`${uid}-cancel-reason`}>Причина отмены заказа</label>
               <input
                 id={`${uid}-cancel-reason`}
@@ -1905,7 +2253,24 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           </section>
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Состав заказа</h3>
+            <h3 className="panel-title u-mb-10px">Состав заказа</h3>
+            {detail.declaredItems && detail.declaredItems.length > 0 && (
+              <>
+                <h4 className="section-title">Вы заявили</h4>
+                <div className="data-list">
+                  {detail.declaredItems.map(item => (
+                    <div className="data-row" key={item.subtypeId}>
+                      <span>{item.label} × {item.quantity}</span>
+                      <span className="mono">
+                        {item.declaredValueKopeks === null || item.declaredValueKopeks === undefined
+                          ? "ценность не заявлена"
+                          : money(item.declaredValueKopeks)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             {detail.garments.length === 0 ? (
               <p className="muted">Поштучный учёт вещей по этому заказу не ведётся (эконом-тариф).</p>
             ) : (
@@ -1916,18 +2281,32 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                       <th>Код</th>
                       <th>Категория</th>
                       <th>Описание</th>
+                      <th>Ценность</th>
                       <th>Статус</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {detail.garments.map((garment) => (
-                      <tr key={garment.id}>
-                        <td className="mono">{garment.itemCode}</td>
-                        <td>{garment.category}</td>
-                        <td>{garment.description}</td>
-                        <td>{stateLabel(GARMENT_STATUS_LABELS, garment.status)}</td>
-                      </tr>
-                    ))}
+                    {detail.garments.map((garment) => {
+                      const settlement = declaredValueSettlement(garment.conditionJson);
+                      return (
+                        <tr key={garment.id}>
+                          <td className="mono">{garment.itemCode}</td>
+                          <td>{garment.category}</td>
+                          <td>{garment.description}</td>
+                          <td>
+                            <span className="mono">
+                              {garment.declaredValueKopeks === null || garment.declaredValueKopeks === undefined
+                                ? "—"
+                                : money(garment.declaredValueKopeks)}
+                            </span>
+                            {settlement === "discrepancy" ? (
+                              <Badge tone="warn">расхождение с заявленным</Badge>
+                            ) : null}
+                          </td>
+                          <td>{stateLabel(GARMENT_STATUS_LABELS, garment.status)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1974,6 +2353,11 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                         <Button
                           variant="primary"
                           disabled={busy !== null || !detail.acceptedQuoteHash}
+                          title={
+                            detail.acceptedQuoteHash
+                              ? undefined
+                              : "Решение недоступно: у заказа нет принятой котировки. Обратитесь в поддержку."
+                          }
                           leadingIcon={<Check size={16} aria-hidden="true" />}
                           onClick={() => void handleAdjustmentDecision(adjustment.id, true)}
                         >
@@ -1982,6 +2366,11 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                         <Button
                           variant="danger"
                           disabled={busy !== null || !detail.acceptedQuoteHash}
+                          title={
+                            detail.acceptedQuoteHash
+                              ? undefined
+                              : "Решение недоступно: у заказа нет принятой котировки. Обратитесь в поддержку."
+                          }
                           onClick={() => void handleAdjustmentDecision(adjustment.id, false)}
                         >
                           Отказаться от доплаты
@@ -1995,7 +2384,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           </section>
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Финансы заказа</h3>
+            <h3 className="panel-title u-mb-10px">Финансы заказа</h3>
             {!finance && <p className="muted">Финансовые данные по заказу недоступны.</p>}
             {finance && (
               <>
@@ -2036,7 +2425,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 ) : (
                   <p className="muted">Возвратов по заказу не зафиксировано.</p>
                 )}
-                <p className="muted" style={{ marginBlockStart: 8 }}>
+                <p className="muted u-mt-8px">
                   Провайдер: {providerLabel(finance.providerMode)}. {FISCAL_ADAPTER_NOTE}
                 </p>
               </>
@@ -2044,7 +2433,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           </section>
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Претензии</h3>
+            <h3 className="panel-title u-mb-10px">Претензии</h3>
             {orderClaims.length === 0 ? (
               <p className="muted">Претензий по этому заказу пока нет.</p>
             ) : (
@@ -2061,12 +2450,12 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
                 ))}
               </div>
             )}
-            <p className="muted" style={{ marginBlockStart: 8 }}>
+            <p className="muted u-mt-8px">
               Согласование компенсации по претензии не означает фактический возврат средств: возвраты
               показываются отдельными операциями в разделе «Финансы заказа».
             </p>
 
-            <div className="grid-two" style={{ marginBlockStart: 12 }}>
+            <div className="grid-two u-mt-12px">
               <div className="field">
                 <label htmlFor={`${uid}-claim-type`}>Тип претензии</label>
                 <select id={`${uid}-claim-type`} value={claimType} onChange={(event) => setClaimType(event.target.value)}>
@@ -2086,7 +2475,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             </div>
 
             {detail.garments.length > 0 && (
-              <fieldset style={{ border: "1px solid var(--border-hairline)", borderRadius: 10, padding: 12 }}>
+              <fieldset className="fieldset">
                 <legend className="muted">Вещи по претензии (необязательно)</legend>
                 {detail.garments.map((garment) => (
                   <label className="check-row" key={garment.id}>
@@ -2109,7 +2498,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
               </fieldset>
             )}
 
-            <div style={{ marginBlockStart: 12 }}>
+            <div className="u-mt-12px">
               <EvidenceUploader
                 ownerType="order"
                 ownerId={detail.id}
@@ -2132,7 +2521,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
             </div>
 
             {currentClaimEvidence.uploadingCount > 0 && (
-              <p className="muted" role="status" style={{ marginBlockStart: 8 }}>
+              <p className="muted u-mt-8px" role="status">
                 Дождитесь завершения загрузки файлов…
               </p>
             )}
@@ -2152,7 +2541,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
 
           {canReview && (
             <section className="panel">
-              <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Отзыв</h3>
+              <h3 className="panel-title u-mb-10px">Отзыв</h3>
               <div className="grid-two">
                 <div className="field">
                   <label htmlFor={`${uid}-rating`}>Оценка</label>
@@ -2181,7 +2570,7 @@ function MyOrdersTab({ demo, notify, onRepeat }: { demo: DemoConfig | null; noti
           )}
 
           <section className="panel">
-            <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>История заказа</h3>
+            <h3 className="panel-title u-mb-10px">История заказа</h3>
             {timeline.length === 0 ? (
               <p className="muted">Событий по заказу пока нет.</p>
             ) : (
@@ -2426,7 +2815,7 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Добавить адрес</h3>
+        <h3 className="panel-title u-mb-10px">Добавить адрес</h3>
         <div className="grid-two">
           <div className="field">
             <label htmlFor={`${uid}-address-building`}>Дом</label>
@@ -2471,8 +2860,8 @@ function AddressesTab({ demo, notify }: { demo: DemoConfig | null; notify: Notif
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 8 }}>Мои персональные данные (152-ФЗ)</h3>
-        <p className="muted" style={{ marginBlockEnd: 12 }}>
+        <h3 className="panel-title u-mb-8px">Мои персональные данные (152-ФЗ)</h3>
+        <p className="muted u-mb-12px">
           Выгрузка ваших персональных данных (профиль, адреса, заказы, претензии, уведомления) в формате JSON.
         </p>
         <div className="button-row">
@@ -2650,7 +3039,7 @@ function NotificationsTab({
               })}
             </div>
             {hasMore && (
-              <div className="button-row" style={{ marginBlockStart: 12 }}>
+              <div className="button-row u-mt-12px">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -2686,6 +3075,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [threadDetail, setThreadDetail] = useState<ThreadDetailDto | null>(null);
+  const threadDetailPanelRef = useRef<HTMLElement | null>(null);
   const threadReqRef = useRef(0);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
@@ -2845,6 +3235,14 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
     void loadThread(activeThreadId);
   }, [activeThreadId, loadThread]);
 
+  // The opened thread is rendered under the list. Without this the screen looks unchanged: nothing
+  // scrolls, nothing takes focus, and the customer is left guessing whether the click worked
+  // (P1-06).
+  useEffect(() => {
+    if (!threadDetail) return;
+    revealRegion(threadDetailPanelRef.current);
+  }, [threadDetail]);
+
   const handleOpenThread = async () => {
     if (!orderId) {
       notify({ kind: "error", text: "Выберите заказ, к которому относится обращение" });
@@ -2935,8 +3333,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
               <button
                 key={thread.id}
                 type="button"
-                className={thread.id === activeThreadId ? "data-row selected" : "data-row"}
-                style={{ textAlign: "left", cursor: "pointer" }}
+                className={`${thread.id === activeThreadId ? "data-row selected" : "data-row"} u-ta-left u-cur-pointer`}
                 onClick={() => setActiveThreadId(thread.id)}
               >
                 <span>
@@ -2952,7 +3349,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
           </div>
         )}
         {threads && threadsHasMore && threadsNextCursor && (
-          <div className="button-row" style={{ marginBlockStart: 10 }}>
+          <div className="button-row u-mt-10px">
             <Button
               variant="ghost"
               size="sm"
@@ -2970,15 +3367,15 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       </section>
 
       {threadDetail && (
-        <section className="panel">
+        <section className="panel" ref={threadDetailPanelRef}>
           <div className="panel-head">
-            <h3 className="panel-title" style={{ margin: 0 }}>{threadDetail.thread.subject}</h3>
+            <h3 className="panel-title u-m-0px" tabIndex={-1}>{threadDetail.thread.subject}</h3>
             <Badge tone={threadDetail.thread.state === "open" ? "warn" : "ok"}>
               {threadDetail.thread.state === "open" ? "Открыто" : "Закрыто"}
             </Badge>
           </div>
           {threadDetail.hasEarlier && threadDetail.earlierCursor && (
-            <div className="button-row" style={{ marginBlockEnd: 10 }}>
+            <div className="button-row u-mb-10px">
               <Button
                 variant="secondary"
                 size="sm"
@@ -3007,7 +3404,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
           )}
           {threadDetail.thread.state === "open" && (
             <>
-              <div className="field" style={{ marginBlockStart: 12 }}>
+              <div className="field u-mt-12px">
                 <label htmlFor={`${uid}-reply`}>Ваш ответ</label>
                 <textarea id={`${uid}-reply`} value={reply} onChange={(event) => setReply(event.target.value)} />
               </div>
@@ -3023,7 +3420,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       )}
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Новое обращение</h3>
+        <h3 className="panel-title u-mb-10px">Новое обращение</h3>
         <div className="field">
           <label htmlFor={`${uid}-thread-order`}>Заказ</label>
           <select id={`${uid}-thread-order`} value={orderId} onChange={(event) => setOrderId(event.target.value)}>
@@ -3059,7 +3456,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
       </section>
 
       <section className="panel">
-        <h3 className="panel-title" style={{ marginBlockEnd: 10 }}>Отзывы о сервисе</h3>
+        <h3 className="panel-title u-mb-10px">Отзывы о сервисе</h3>
         {reviews.length === 0 ? (
           <EmptyState
           icon={<MessageSquare size={20} aria-hidden="true" />}
@@ -3092,7 +3489,7 @@ function SupportTab({ notify }: { notify: NotifyFn }) {
             ))}
           </div>
         )}
-        <p className="muted" style={{ marginBlockStart: 8 }}>
+        <p className="muted u-mt-8px">
           Свой отзыв о заказе можно оставить во вкладке «Мои заказы» — после доставки или закрытия заказа.
         </p>
       </section>

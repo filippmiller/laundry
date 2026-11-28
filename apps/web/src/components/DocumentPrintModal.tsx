@@ -50,14 +50,14 @@ export function DocumentPrintModal({ open, kind, id, onClose }: Props) {
       {!doc && !error && <p className="muted">Формирование документа...</p>}
       {doc && (
         <div>
-          <div className="alert-banner" style={{ marginBlockStart: 0 }}>
+          <div className="alert-banner u-mt-0px">
             <strong>Важно:</strong> {doc.disclaimer}
           </div>
-          <div style={{ border: "1px solid var(--border-strong)", borderRadius: 10, padding: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBlockEnd: 12 }}>
+          <div className="u-bd-1px-solid-var-border-strong u-brr-10px u-p-16px">
+            <div className="u-flex u-jc-space-between u-fw-wrap u-gap-10px u-mb-12px">
               <div>
-                <div style={{ fontWeight: 700, fontSize: "1.05rem" }}>
-                  <FileText size={16} aria-hidden="true" style={{ verticalAlign: "text-bottom", marginInlineEnd: 6 }} />
+                <div className="u-fwt-700 u-fsz-1-05rem">
+                  <FileText size={16} aria-hidden="true" className="u-va-text-bottom u-mie-6px" />
                   {doc.title.includes(doc.number) ? doc.title : <>{doc.title} № <span className="mono">{doc.number}</span></>}
                 </div>
                 {doc.orderPublicNumber && (
@@ -66,7 +66,7 @@ export function DocumentPrintModal({ open, kind, id, onClose }: Props) {
               </div>
               <div className="muted mono">Дата: {dt(doc.issuedAt)}</div>
             </div>
-            <div className="grid-two" style={{ marginBlockEnd: 14 }}>
+            <div className="grid-two u-mb-14px">
               <div>
                 <div className="muted">Исполнитель / Поставщик</div>
                 <strong>{doc.legalSeller}</strong>

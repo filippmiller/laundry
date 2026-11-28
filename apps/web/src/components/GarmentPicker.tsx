@@ -160,7 +160,7 @@ export function GarmentPicker({
       </div>
 
       {atRowLimit ? (
-        <p className="muted" role="status" style={{ marginBlockStart: 8 }}>
+        <p className="muted u-mt-8px" role="status">
           Достигнут лимит позиций ({MAX_DECLARED_ROWS}). Удалите или измените существующую позицию.
         </p>
       ) : null}
@@ -278,7 +278,7 @@ export function GarmentPicker({
               ))}
             </div>
 
-            <div className="button-row" style={{ marginBlockStart: 4 }}>
+            <div className="button-row u-mt-4px">
               <button type="button" className="secondary" onClick={() => setSubtype(null)}>
                 <ArrowLeft size={18} aria-hidden="true" />
                 <span>Назад</span>
@@ -292,7 +292,7 @@ export function GarmentPicker({
         ) : (
           <div className="garment-subtypes">
             {atRowLimit ? (
-              <p className="muted" role="status" style={{ gridColumn: "1 / -1", margin: 0 }}>
+              <p className="muted u-gc-1-1 u-m-0px" role="status">
                 Достигнут лимит позиций ({MAX_DECLARED_ROWS}). Можно изменить только уже добавленные виды.
               </p>
             ) : null}

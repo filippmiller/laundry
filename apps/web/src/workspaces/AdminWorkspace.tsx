@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import {
   Activity,
   AlertTriangle,
+  Bell,
   ClipboardList,
   KeyRound,
   RefreshCw,
   Search,
   Shield,
+  TimerReset,
   UserCog,
   UserMinus,
   UserPlus,
@@ -53,6 +55,9 @@ type OpsMetrics = {
   orders?: { active?: number; inProgress?: number };
   claims?: { open?: number };
   payments?: { capturedKopeks?: number };
+  pendingOutbox?: number;
+  openThreads?: number;
+  activeShifts?: number;
 };
 
 type FraudSignal = {
@@ -473,6 +478,36 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
   };
 
   const TERMINAL_ORDER_STATES = new Set(["delivered", "closed", "cancelled"]);
+
+  /**
+   * Runs one of the manual operations that the background worker normally performs: delivering
+   * the notification outbox and releasing slot holds whose TTL has expired. Without the worker
+   * these two jobs never happen, so the operator needs a way to run them on demand.
+   */
+  const runOpsAction = async (
+    key: string,
+    path: string,
+    successText: string,
+  ) => {
+    setBusy(true);
+    try {
+      const result = await api<Record<string, unknown>>(path, {
+        method: "POST",
+        body: {},
+      });
+      const processed = Number(result?.processed ?? result?.expired ?? 0);
+      notify({
+        kind: "ok",
+        text: processed > 0 ? `${successText}: ${processed}` : `Готово: ${successText} — 0`,
+      });
+      await loadAll();
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const activeOrdersCount =
     metrics?.activeOrders ??
     metrics?.ordersInProgress ??
@@ -620,7 +655,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
       {canViewFinance && <FinanceMoneyPanel notify={notify} />}
 
       {/* 1. Сводка и метрики платформы */}
-      <Card as="section">
+      <Card as="section" className="content-auto">
         <CardHeader
           title={
             <span className="row row--tight">
@@ -646,11 +681,38 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
           <StatTile label="Открытые претензии" value={openClaimsCount} />
           <StatTile label="Принято (демо)" value={money(capturedKopeks)} />
           <StatTile label="События аудита" value={auditEvents.length} />
+          <StatTile
+            label="Недоставленные уведомления"
+            value={metrics?.pendingOutbox ?? 0}
+            tone={metrics?.pendingOutbox ? "warn" : "default"}
+          />
         </StatGrid>
+        <p className="muted">
+          Фоновый воркер разворачивает уведомления и освобождает просроченные брони слотов. Если он
+          не запущен, операции ниже выполняются вручную — они доступны только администратору.
+        </p>
+        <div className="button-row">
+          <Button
+            variant="secondary"
+            disabled={busy}
+            leadingIcon={<Bell size={16} aria-hidden="true" />}
+            onClick={() => void runOpsAction("outbox", "/ops/outbox/drain", "уведомлений доставлено")}
+          >
+            Доставить уведомления
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            leadingIcon={<TimerReset size={16} aria-hidden="true" />}
+            onClick={() => void runOpsAction("holds", "/ops/expire-holds", "просроченных броней освобождено")}
+          >
+            Освободить просроченные брони
+          </Button>
+        </div>
       </Card>
 
       {/* 2. Управление участниками и RBAC */}
-      <Card as="section">
+      <Card as="section" className="content-auto">
         <CardHeader
           title={
             <span className="row row--tight">
@@ -665,7 +727,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
           }
         />
 
-        <form className="row row--tight" style={{ marginBlockEnd: 12 }} onSubmit={(e) => void handleMembersSearchSubmit(e)}>
+        <form className="row row--tight u-mb-12px" onSubmit={(e) => void handleMembersSearchSubmit(e)}>
           <Input
             aria-label="Поиск участников по телефону, имени или партнёру"
             type="text"
@@ -699,7 +761,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
         </form>
 
         {membersLoadError && (
-          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+          <div className="alert-banner u-mb-12px" role="alert">
             <AlertTriangle size={16} aria-hidden="true" />
             <span>Не удалось загрузить список участников: {membersLoadError}</span>
           </div>
@@ -723,7 +785,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
               caption="Участники платформы, их роли и статус доступа"
             />
             {membersHasMore && (
-              <div className="button-row" style={{ marginBlockStart: 12 }}>
+              <div className="button-row u-mt-12px">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -739,7 +801,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
       </Card>
 
       {/* 3. Отзыв сессии */}
-      <Card as="section">
+      <Card as="section" className="content-auto">
         <CardHeader
           title={
             <span className="row row--tight">
@@ -834,7 +896,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
       </Card>
 
       {/* 4. Очередь сигналов антифрода */}
-      <Card as="section">
+      <Card as="section" className="content-auto">
         <CardHeader
           title={
             <span className="row row--tight">
@@ -845,7 +907,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
         />
 
         {signalsLoadError && (
-          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+          <div className="alert-banner u-mb-12px" role="alert">
             <AlertTriangle size={16} aria-hidden="true" />
             <span>Не удалось загрузить сигналы антифрода: {signalsLoadError}</span>
           </div>
@@ -871,7 +933,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
       </Card>
 
       {/* 5. Журнал аудита */}
-      <Card as="section">
+      <Card as="section" className="content-auto">
         <CardHeader
           title={
             <span className="row row--tight">
@@ -882,7 +944,7 @@ export function AdminWorkspace({ notify, roles = [] }: { notify: NotifyFn; roles
         />
 
         {auditLoadError && (
-          <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+          <div className="alert-banner u-mb-12px" role="alert">
             <AlertTriangle size={16} aria-hidden="true" />
             <span>Не удалось загрузить журнал аудита: {auditLoadError}</span>
           </div>

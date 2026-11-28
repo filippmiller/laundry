@@ -29,6 +29,8 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Reveal, Stagger } from "../components/ui/Reveal";
 import { StatGrid, StatTile } from "../components/ui/StatTile";
 import { TabPanel, Tabs } from "../components/ui/Tabs";
+import { useUrlState } from "../hooks/useUrlState";
+import { revealRegion } from "../hooks/useScrollIntoView";
 import {
   CLAIM_STATE_LABELS,
   CLAIM_TYPE_LABELS,
@@ -39,6 +41,12 @@ import {
   orderStateTone,
   stateLabel,
 } from "../labels";
+import {
+  createSupportDraftController,
+  type SupportDraftController,
+  type SupportDraftSnapshot,
+  type SupportDraftStatus,
+} from "./support-draft-autosave";
 
 type NotifyFn = (n: { kind: "ok" | "error"; text: string } | null) => void;
 
@@ -281,9 +289,33 @@ function threadStatusTone(status: string): BadgeTone {
   return THREAD_STATUS_TONES[status] ?? "neutral";
 }
 
+/**
+ * The state of the reply draft in the reply box.
+ *
+ * The draft is saved on the server, so the operator has to see whether the text really is there —
+ * a draft that only looks saved is worse than no draft at all.
+ */
+const DRAFT_STATUS_LABELS: Record<SupportDraftStatus, string> = {
+  loading: "Загрузка черновика…",
+  clean: "",
+  dirty: "Не сохранено",
+  saving: "Сохранение…",
+  saved: "Черновик сохранён",
+  error: "Не сохранено",
+};
+
+const DRAFT_STATUS_TONES: Record<SupportDraftStatus, BadgeTone> = {
+  loading: "neutral",
+  clean: "neutral",
+  dirty: "warn",
+  saving: "neutral",
+  saved: "ok",
+  error: "danger",
+};
+
 export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; roles: string[] }) {
   const tabsId = useId();
-  const [activeSection, setActiveSection] = useState("search");
+  const [activeSection, setActiveSection] = useUrlState<string>("section", "search");
 
   // 1. Order search & quick ticket modal
   const [orderQuery, setOrderQuery] = useState("");
@@ -307,14 +339,15 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const [threadsSearch, setThreadsSearch] = useState("");
   const [appliedThreadsSearch, setAppliedThreadsSearch] = useState("");
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const threadDetailHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null);
   const [loadingThreadDetail, setLoadingThreadDetail] = useState(false);
   const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false);
   // Isolate drafts per threadId so switching threads never leaks replyText or closeReason.
-  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [closeReasonDrafts, setCloseReasonDrafts] = useState<Record<string, string>>({});
   const [sendingReply, setSendingReply] = useState(false);
   const [closingThread, setClosingThread] = useState(false);
+  const [reopeningThread, setReopeningThread] = useState(false);
 
   // 3. Claims & legal hold evidence
   const [claims, setClaims] = useState<ClaimSummary[]>([]);
@@ -357,14 +390,61 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
   const claimReqRef = useRef(0);
   const threadsListReqRef = useRef(0);
   const claimsListReqRef = useRef(0);
+  // The thread the operator looks at right now. The refresh that follows a sent message must not
+  // pull the selection back to that thread when another one was opened in the meantime.
+  const selectedThreadIdRef = useRef<string | null>(null);
+
+  /**
+   * The reply draft is saved on the server by a plain state machine
+   * (see ./support-draft-autosave.ts). The component only renders the state of the machine and
+   * forwards the input of the operator: the machine decides when a draft is written, when it is
+   * removed and when the operator has to be warned about a failure.
+   */
+  const notifyRef = useRef(notify);
+  notifyRef.current = notify;
+  const draftControllerRef = useRef<SupportDraftController | null>(null);
+  const getDraftController = useCallback(() => {
+    if (!draftControllerRef.current) {
+      draftControllerRef.current = createSupportDraftController({
+        api,
+        formatError,
+        onError: message => notifyRef.current({ kind: "error", text: message }),
+      });
+    }
+    return draftControllerRef.current;
+  }, []);
+  const [draftSnap, setDraftSnap] = useState<SupportDraftSnapshot>({
+    threadId: null,
+    status: "clean",
+    body: "",
+    savedBody: "",
+    error: null,
+    errorScope: null,
+    revision: 0,
+  });
+
+  useEffect(() => {
+    const controller = getDraftController();
+    setDraftSnap(controller.getSnapshot());
+    const unsubscribe = controller.subscribe(setDraftSnap);
+    return () => {
+      unsubscribe();
+      controller.dispose();
+      if (draftControllerRef.current === controller) {
+        draftControllerRef.current = null;
+      }
+    };
+  }, [getDraftController]);
 
   const activeThreadId = threadDetail && threadDetail.thread.id === selectedThreadId ? selectedThreadId : null;
-  const replyText = activeThreadId ? (replyDrafts[activeThreadId] ?? "") : "";
+  const draftIsActive = Boolean(activeThreadId) && draftSnap.threadId === activeThreadId;
+  const replyText = draftIsActive ? draftSnap.body : "";
+  const draftStatus: SupportDraftStatus = draftIsActive ? draftSnap.status : "clean";
   const closeReason = activeThreadId ? (closeReasonDrafts[activeThreadId] ?? "") : "";
 
   const setActiveReplyText = (value: string) => {
     if (!activeThreadId) return;
-    setReplyDrafts((prev) => ({ ...prev, [activeThreadId]: value }));
+    getDraftController().setBody(value);
   };
 
   const setActiveCloseReason = (value: string) => {
@@ -485,8 +565,13 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     async (threadId: string) => {
       const reqId = ++threadReqRef.current;
       setSelectedThreadId(threadId);
+      selectedThreadIdRef.current = threadId;
       setThreadDetail(null);
       setLoadingThreadDetail(true);
+      // The draft of the thread is loaded next to the thread itself: the reply box shows it as
+      // soon as it arrives, and until then the autosave stays idle instead of deleting a draft
+      // that the operator never saw.
+      void getDraftController().openThread(threadId);
       try {
         const res = await api<Record<string, unknown>>(`/support/threads/${threadId}`);
         if (threadReqRef.current !== reqId) return;
@@ -508,8 +593,16 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         }
       }
     },
-    [notify],
+    [getDraftController, notify],
   );
+
+  // The thread that was picked is rendered under the list on a narrow screen. Without this the
+  // screen looks unchanged: nothing scrolls, nothing takes focus, and the operator is left
+  // guessing whether the click worked (P1-06).
+  useEffect(() => {
+    if (!threadDetail) return;
+    revealRegion(threadDetailHeadingRef.current);
+  }, [threadDetail]);
 
   const loadEarlierThreadMessages = useCallback(async () => {
     if (!threadDetail?.earlierCursor || !selectedThreadId || threadDetail.thread.id !== selectedThreadId) return;
@@ -733,24 +826,35 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
     e.preventDefault();
     if (!threadDetail || threadDetail.thread.id !== selectedThreadId) return;
     const targetThreadId = threadDetail.thread.id;
-    const trimmed = replyText.trim();
+    const draftController = getDraftController();
+    // The reply box stays editable while the message is on its way. The revision pins the exact
+    // text that is sent, so the confirmation of the message cannot clear a text that was typed
+    // in the meantime.
+    const draftSnapshot = draftController.getSnapshot();
+    const sourceText =
+      draftSnapshot.threadId === targetThreadId ? draftSnapshot.body : replyText;
+    const trimmed = sourceText.trim();
     if (!trimmed) {
       notify({ kind: "error", text: "Введите текст ответа" });
       return;
     }
+    const capturedRevision = draftSnapshot.revision;
     setSendingReply(true);
     try {
       await api(`/support/threads/${targetThreadId}/messages`, {
         method: "POST",
         body: { body: trimmed },
       });
-      setReplyDrafts((prev) => {
-        const next = { ...prev };
-        delete next[targetThreadId];
-        return next;
-      });
+      // The sent answer is no longer a draft: the controller drops it on the server, but only
+      // the revision that was really sent — a newer text stays in the box and is saved.
+      draftController.markSent(targetThreadId, capturedRevision);
       notify({ kind: "ok", text: "Сообщение отправлено клиенту" });
-      await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
+      await loadThreads();
+      // The operator may have opened another thread while the message was on its way: the
+      // refresh must not take the selection away from it.
+      if (selectedThreadIdRef.current === targetThreadId) {
+        await loadThreadDetail(targetThreadId);
+      }
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
@@ -780,11 +884,37 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         delete next[targetThreadId];
         return next;
       });
-      await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
+      // A closed thread has no answer left to write: the draft goes with it.
+      getDraftController().discardDraft(targetThreadId);
+      await loadThreads();
+      if (selectedThreadIdRef.current === targetThreadId) {
+        await loadThreadDetail(targetThreadId);
+      }
     } catch (err) {
       notify({ kind: "error", text: formatError(err) });
     } finally {
       setClosingThread(false);
+    }
+  }
+
+  /**
+   * Reopens a closed thread so the conversation continues in one place.
+   *
+   * Without this the customer had to open a second thread, and the history of the first one was
+   * left behind a closed door.
+   */
+  async function handleReopenThread() {
+    if (!threadDetail || threadDetail.thread.id !== selectedThreadId) return;
+    const targetThreadId = threadDetail.thread.id;
+    setReopeningThread(true);
+    try {
+      await api(`/support/threads/${targetThreadId}/reopen`, { method: "POST", body: {} });
+      notify({ kind: "ok", text: "Обращение переоткрыто" });
+      await Promise.all([loadThreadDetail(targetThreadId), loadThreads()]);
+    } catch (err) {
+      notify({ kind: "error", text: formatError(err) });
+    } finally {
+      setReopeningThread(false);
     }
   }
 
@@ -1077,8 +1207,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
             />
             <CardBody>
               <form
-                className="row row--tight"
-                style={{ marginBlockEnd: 12 }}
+                className="row row--tight u-mb-12px"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const next = threadsSearch.trim();
@@ -1114,7 +1243,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
               </form>
 
               {threadsLoadError && (
-                <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+                <div className="alert-banner u-mb-12px" role="alert">
                   <AlertTriangle size={16} aria-hidden="true" />
                   <span>Не удалось загрузить обращения: {threadsLoadError}</span>
                 </div>
@@ -1166,7 +1295,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                     })}
                   </div>
                   {threadsHasMore && (
-                    <div className="button-row" style={{ marginBlockStart: 12 }}>
+                    <div className="button-row u-mt-12px">
                       <Button
                         variant="secondary"
                         size="sm"
@@ -1194,7 +1323,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
             ) : (
               <>
                 <div className="stack stack--tight">
-                  <h3 className="section-title">
+                  <h3 className="section-title" ref={threadDetailHeadingRef} tabIndex={-1}>
                     {threadDetail.thread.subject || `Обращение #${threadDetail.thread.id.slice(0, 8)}`}
                   </h3>
                   <span className="muted row row--tight">
@@ -1207,7 +1336,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                   </span>
                 </div>
 
-                {(threadDetail.thread.state ?? threadDetail.thread.status ?? "open") !== "closed" && (
+                {(threadDetail.thread.state ?? threadDetail.thread.status ?? "open") !== "closed" ? (
                   <div className="row row--tight">
                     <Input
                       aria-label="Причина закрытия обращения"
@@ -1222,6 +1351,17 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                       leadingIcon={<CheckCircle2 size={16} aria-hidden="true" />}
                     >
                       {closingThread ? "Закрытие..." : "Закрыть обращение"}
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="row row--tight">
+                    <Button
+                      variant="secondary"
+                      onClick={() => void handleReopenThread()}
+                      disabled={reopeningThread}
+                      leadingIcon={<RotateCcw size={16} aria-hidden="true" />}
+                    >
+                      {reopeningThread ? "Переоткрытие..." : "Переоткрыть обращение"}
                     </Button>
                   </div>
                 )}
@@ -1289,6 +1429,24 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                       onChange={(e) => setActiveReplyText(e.target.value)}
                       placeholder="Введите сообщение для клиента..."
                     />
+                    {DRAFT_STATUS_LABELS[draftStatus] ? (
+                      <div className="row row--tight">
+                        <Badge tone={DRAFT_STATUS_TONES[draftStatus]}>
+                          {DRAFT_STATUS_LABELS[draftStatus]}
+                        </Badge>
+                        {draftStatus === "error" ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => void getDraftController().retry()}
+                          >
+                            {draftSnap.errorScope === "load"
+                              ? "Повторить загрузку черновика"
+                              : "Повторить сохранение"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div className="row row--end">
                       <Button
                         type="submit"
@@ -1340,8 +1498,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
             />
             <CardBody>
               <form
-                className="row row--tight"
-                style={{ marginBlockEnd: 12 }}
+                className="row row--tight u-mb-12px"
                 onSubmit={(e) => {
                   e.preventDefault();
                   const next = claimsSearch.trim();
@@ -1377,7 +1534,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
               </form>
 
               {claimsLoadError && (
-                <div className="alert-banner" role="alert" style={{ marginBlockEnd: 12 }}>
+                <div className="alert-banner u-mb-12px" role="alert">
                   <AlertTriangle size={16} aria-hidden="true" />
                   <span>Не удалось загрузить претензии: {claimsLoadError}</span>
                 </div>
@@ -1425,7 +1582,7 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
                     })}
                   </Stagger>
                   {claimsHasMore && (
-                    <div className="button-row" style={{ marginBlockStart: 12 }}>
+                    <div className="button-row u-mt-12px">
                       <Button
                         variant="secondary"
                         size="sm"
@@ -1924,16 +2081,14 @@ export function SupportClaimsWorkspace({ notify, roles }: { notify: NotifyFn; ro
         {evidencePreview && (
           <div className="stack">
             {evidencePreview.mimeType.startsWith("image/") ? (
-              <img
+              <img className="u-mw-100 u-mh-65vh u-of-contain u-brr-8px"
                 src={evidencePreview.blobUrl}
                 alt={evidencePreview.label}
-                style={{ maxWidth: "100%", maxHeight: "65vh", objectFit: "contain", borderRadius: 8 }}
               />
             ) : evidencePreview.mimeType === "application/pdf" ? (
-              <iframe
+              <iframe className="u-w-100 u-h-65vh u-bd-1px-solid-var-border-hairline u-brr-8px"
                 src={evidencePreview.blobUrl}
                 title={evidencePreview.label}
-                style={{ width: "100%", height: "65vh", border: "1px solid var(--border-hairline)", borderRadius: 8 }}
               />
             ) : (
               <p className="muted">

@@ -5,8 +5,8 @@ import { and, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-or
 import type { Db, Tx } from "../db/client.js";
 import {
   buildings, claims, compensations, courierShifts, custodyEvents, customerAddresses,
-  evidenceAssets, evidenceAccessEvents, evidenceLegalHolds,
-  garmentEvidence, garments, notifications, orders, outboxEvents, reviews, sessions, supportThreads, users,
+  evidenceAssets, evidenceAccessEvents, evidenceLegalHolds, auditEvents,
+  garmentEvidence, garments, notifications, orders, outboxEvents, reviews, sessions, supportMessages, supportThreads, users,
 } from "../db/schema.js";
 import { assertRole, authorize, hasRole, type Principal, ROLE_GROUPS } from "../core/context.js";
 import { pgCursorTimestampSql } from "../core/cursor.js";
@@ -14,6 +14,7 @@ import { AppError, errors } from "../core/errors.js";
 import { appendEvent } from "../core/events.js";
 import { hashRequest, withIdempotencyFlat } from "../core/idempotency.js";
 import { hasActiveCourierOrderEntitlement } from "./courier-entitlement.js";
+import { maskPhone } from "./churn.js";
 
 const SUPPORT_ROLES = [...ROLE_GROUPS.support, ...ROLE_GROUPS.admin] as const;
 const STAFF = ["dispatcher", "platform_finance", "claims_approver", "customer_support", "platform_admin"] as const;
@@ -21,9 +22,17 @@ const ACTIVE_CLAIM_STATES = new Set([
   "opened", "triage", "investigating", "decision_pending", "escalated", "reopened",
 ]);
 
-/** Active sessions of the signed-in principal; the current one is flagged, not hidden. */
-export async function listMySessions(db: Db, principal: Principal) {
-  return db.select({
+/**
+ * Active sessions of the signed-in principal for the settings UI; the current one is flagged,
+ * not hidden.
+ *
+ * WHY this list is capped at 50 and limited to the active state: it is a screen list, not a data
+ * export. The privacy export therefore does NOT reuse it — it has its own complete selection
+ * (`selectOwnSessionsForExport`) that covers every own session and never truncates.
+ */
+export async function listMySessions(db: Db | Tx, principal: Principal) {
+  const handle = db as Db;
+  return handle.select({
     id: sessions.id,
     createdAt: sessions.createdAt,
     expiresAt: sessions.expiresAt,
@@ -38,6 +47,79 @@ export async function listMySessions(db: Db, principal: Principal) {
     .orderBy(desc(sessions.createdAt))
     .limit(50)
     .then(rows => rows.map(row => ({ ...row, current: row.id === principal.sessionId })));
+}
+
+/**
+ * Historical coverage registry of the privacy export's sessions section.
+ *
+ * WHY an explicit registry: the export answers with `complete: true`, and that flag is only
+ * truthful if the set of covered session states is stated, not implied by whatever list happens
+ * to be handy. Every session the caller owns inside their own tenant is exported — active,
+ * expired and revoked alike — and every row carries its own `state` marker.
+ *
+ * The three states are mutually exclusive and cover every exported row, so
+ * `total === active + expired + revoked` always holds:
+ *   - `revoked` — `revoked_at IS NOT NULL`; revocation wins over expiry, a session that was
+ *     revoked after it had already expired is still reported as revoked;
+ *   - `expired`  — not revoked and `expires_at <= now()`;
+ *   - `active`   — not revoked and `expires_at > now()`.
+ *
+ * `now()` is the snapshot transaction's timestamp, the same clock the counts are derived from,
+ * so the classification of a row and the count of its state can never disagree.
+ */
+export const PRIVACY_EXPORT_SESSION_COVERAGE = {
+  policy: "all_own_sessions" as const,
+  states: ["active", "expired", "revoked"] as const,
+  /**
+   * The internal credential column of the session store and every session of somebody else are
+   * left out. The column is named in prose only — a payload that carried the column name would
+   * look like a leak to anyone who scans an exported file.
+   */
+  excludes: ["credentials", "foreign_sessions"] as const,
+};
+
+/** State marker of one exported session row. */
+export type PrivacyExportSessionState = (typeof PRIVACY_EXPORT_SESSION_COVERAGE.states)[number];
+
+/**
+ * Complete export-only selection of the caller's own sessions.
+ *
+ * WHY this is not `listMySessions`: that list is the UI list — active sessions only, capped at
+ * 50 — and reusing it made the export silently truncate the caller's own session history while
+ * still claiming `complete: true`. The export needs the whole set, so it pages through it with
+ * a keyset cursor on `(created_at, id)` and reads it inside the export's snapshot transaction.
+ *
+ * The projection is deliberately minimal and contains no internal field: `token_hash` is never
+ * selected, so it cannot leak into the payload. Only the caller's own sessions inside the
+ * caller's own tenant are selected — another user's sessions and the same user's sessions in
+ * another tenant are excluded by the two ownership predicates.
+ */
+async function selectOwnSessionsForExport(tx: Tx, principal: Principal) {
+  const rows = await paginateKeysetAll(
+    (limit, cursor) =>
+      tx.select({
+        id: sessions.id,
+        createdAt: sessions.createdAt,
+        expiresAt: sessions.expiresAt,
+        revokedAt: sessions.revokedAt,
+        state: sql<PrivacyExportSessionState>`CASE
+          WHEN ${sessions.revokedAt} IS NOT NULL THEN 'revoked'
+          WHEN ${sessions.expiresAt} <= now() THEN 'expired'
+          ELSE 'active'
+        END`.as("state"),
+        cursorTs: pgCursorTimestampSql(sessions.createdAt),
+      }).from(sessions).where(and(
+        eq(sessions.organizationId, principal.organizationId),
+        eq(sessions.userId, principal.userId),
+        cursor
+          ? sql`(${sessions.createdAt}, ${sessions.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+          : undefined,
+      ))
+        .orderBy(desc(sessions.createdAt), desc(sessions.id))
+        .limit(limit),
+  );
+  // The current session is flagged, not hidden — even when it is expired or revoked.
+  return rows.map(row => ({ ...row, current: row.id === principal.sessionId }));
 }
 
 /** A user may revoke their own sessions only; admins keep the cross-member route. */
@@ -759,6 +841,17 @@ async function paginateKeysetAll<T extends { id: string; cursorTs: string }>(
  * READ ONLY transaction so concurrent inserts/updates/deletes never produce duplicates,
  * skips, or cross-collection skew. Never exposes internal hashes, door codes, storage keys,
  * or other users' data.
+ *
+ * The export covers the data the caller created themselves in every role, not only the
+ * customer's data: their own courier shifts, the support threads they wrote into, the support
+ * messages they authored and the devices/sessions they signed in from. Role-dependent
+ * collections are empty for a user who has no such records — that is the correct answer, not
+ * a missing section.
+ *
+ * The sessions section follows an explicit coverage registry
+ * (`PRIVACY_EXPORT_SESSION_COVERAGE`): every own session — active, expired and revoked — is
+ * exported with keyset pagination and per-state counts, so `complete: true` means "the export
+ * contains everything it claims" and never "we stopped at the first 50 rows".
  */
 export async function exportMyPrivacyData(db: Db, principal: Principal) {
   return db.transaction(async tx => {
@@ -893,6 +986,109 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           .limit(limit),
     );
 
+    // The caller's own shifts: a shift belongs to the courier who opened it, so the owner filter
+    // is the courier id. A role that never opened a shift simply gets an empty list.
+    const shiftRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: courierShifts.id,
+          state: courierShifts.state,
+          startsAt: courierShifts.startsAt,
+          endsAt: courierShifts.endsAt,
+          completedAt: courierShifts.completedAt,
+          createdAt: courierShifts.createdAt,
+          cursorTs: pgCursorTimestampSql(courierShifts.createdAt),
+        }).from(courierShifts).where(and(
+          eq(courierShifts.organizationId, principal.organizationId),
+          eq(courierShifts.courierId, principal.userId),
+          cursor
+            ? sql`(${courierShifts.createdAt}, ${courierShifts.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+            : undefined,
+        ))
+          .orderBy(desc(courierShifts.createdAt), desc(courierShifts.id))
+          .limit(limit),
+    );
+
+    // The caller's own support messages: the author id is the caller, the tenant comes from the
+    // thread the message lives in (support_messages itself carries no organization column).
+    const supportMessageRows = await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: supportMessages.id,
+          threadId: supportMessages.threadId,
+          body: supportMessages.body,
+          createdAt: supportMessages.createdAt,
+          cursorTs: pgCursorTimestampSql(supportMessages.createdAt),
+        }).from(supportMessages)
+          .innerJoin(supportThreads, eq(supportThreads.id, supportMessages.threadId))
+          .where(and(
+            eq(supportThreads.organizationId, principal.organizationId),
+            eq(supportMessages.authorId, principal.userId),
+            cursor
+              ? sql`(${supportMessages.createdAt}, ${supportMessages.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+              : undefined,
+          ))
+            .orderBy(desc(supportMessages.createdAt), desc(supportMessages.id))
+            .limit(limit),
+    );
+
+    // The caller's own support threads: a thread belongs to the caller when they wrote a message
+    // in it. The wording of the opening message and the order the thread hangs on belong to
+    // whoever opened it, so both are exported only when that author/owner is the caller — a
+    // support agent's export carries the thread ids they wrote into, never the customer's
+    // subject line or order pointer.
+    const supportThreadRows = (await paginateKeysetAll(
+      (limit, cursor) =>
+        tx.select({
+          id: supportThreads.id,
+          orderId: supportThreads.orderId,
+          state: supportThreads.state,
+          subject: supportThreads.subject,
+          createdAt: supportThreads.createdAt,
+          // The columns of the outer table are written out qualified on purpose: an unqualified
+          // `id` inside the subquery resolves to the inner table's own `id` and the correlation
+          // silently breaks.
+          openingAuthorId: sql<string | null>`(
+            SELECT m.author_id FROM support_messages m
+            WHERE m.thread_id = support_threads.id
+            ORDER BY m.created_at ASC, m.id ASC
+            LIMIT 1
+          )`.as("openingAuthorId"),
+          orderCustomerId: sql<string | null>`(
+            SELECT o.customer_id FROM orders o
+            WHERE o.id = support_threads.order_id
+              AND o.organization_id = ${principal.organizationId}
+          )`.as("orderCustomerId"),
+          cursorTs: pgCursorTimestampSql(supportThreads.createdAt),
+        }).from(supportThreads).where(and(
+          eq(supportThreads.organizationId, principal.organizationId),
+          sql`EXISTS (
+            SELECT 1 FROM support_messages m
+            WHERE m.thread_id = ${supportThreads.id} AND m.author_id = ${principal.userId}
+          )`,
+          cursor
+            ? sql`(${supportThreads.createdAt}, ${supportThreads.id}) < (${cursor.ts}::timestamptz, ${cursor.id})`
+            : undefined,
+        ))
+          .orderBy(desc(supportThreads.createdAt), desc(supportThreads.id))
+          .limit(limit),
+    )).map(({ openingAuthorId, orderCustomerId, ...row }) => ({
+      ...row,
+      subject: openingAuthorId === principal.userId ? row.subject : null,
+      orderId: orderCustomerId === principal.userId ? row.orderId : null,
+    }));
+
+    // The devices/sessions the caller signed in from. This is NOT the UI session list: the export
+    // carries every own session (active, expired and revoked — see the coverage registry) and
+    // pages through them with a keyset cursor, so `complete: true` never hides a truncation.
+    const sessionRows = await selectOwnSessionsForExport(tx, principal);
+    const sessionCounts = {
+      total: sessionRows.length,
+      active: sessionRows.filter(row => row.state === "active").length,
+      expired: sessionRows.filter(row => row.state === "expired").length,
+      revoked: sessionRows.filter(row => row.state === "revoked").length,
+    };
+
     return {
       exportedAt: exportedAsOf,
       exportedAsOf,
@@ -907,6 +1103,10 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
           claims: claimRows.length,
           notifications: notificationRows.length,
           reviews: reviewRows.length,
+          sessions: sessionCounts.total,
+          shifts: shiftRows.length,
+          supportThreads: supportThreadRows.length,
+          supportMessages: supportMessageRows.length,
         },
       },
       profile: user ?? { id: principal.userId, phone: null, displayName: null, createdAt: null },
@@ -915,6 +1115,17 @@ export async function exportMyPrivacyData(db: Db, principal: Principal) {
       claims: claimRows,
       notifications: notificationRows,
       reviews: reviewRows,
+      sessions: {
+        coverage: PRIVACY_EXPORT_SESSION_COVERAGE,
+        total: sessionCounts.total,
+        active: sessionCounts.active,
+        expired: sessionCounts.expired,
+        revoked: sessionCounts.revoked,
+        items: sessionRows,
+      },
+      shifts: shiftRows,
+      supportThreads: supportThreadRows,
+      supportMessages: supportMessageRows,
     };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
@@ -1016,5 +1227,20 @@ export async function searchOrders(db: Db, principal: Principal, query: string) 
       sql`customer_id IN (SELECT id FROM users WHERE phone = ${trimmed})`,
     ),
   )).orderBy(desc(orders.createdAt)).limit(20);
+  // Searching by somebody's phone number is a lookup in another person's personal data: the
+  // access is written down, and a phone number is never written down in full.
+  const looksLikePhone = trimmed.startsWith("+") || /^\d+$/.test(trimmed);
+  await db.insert(auditEvents).values({
+    organizationId: principal.organizationId,
+    actorId: principal.userId,
+    action: "privacy.order_search",
+    resourceType: "order_search",
+    resourceId: null,
+    scopeJson: {
+      query: looksLikePhone ? maskPhone(trimmed) : trimmed,
+      resultCount: rows.length,
+    },
+    requestId: principal.requestId,
+  });
   return rows;
 }

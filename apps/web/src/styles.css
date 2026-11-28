@@ -8,5 +8,8 @@
 @import "./styles/base.css";
 @import "./styles/layout.css";
 @import "./styles/components.css";
+/* The utility layer comes after the components: it carries the declarations
+   that used to be inline styles, and those always won over a component class. */
+@import "./styles/utilities.css";
 @import "./styles/garment.css";
 @import "./styles/print.css";

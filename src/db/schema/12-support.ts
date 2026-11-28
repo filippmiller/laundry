@@ -61,6 +61,25 @@ export const supportMessages = pgTable("support_messages", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * A support reply that has not been sent yet.
+ *
+ * The draft belongs to its author: one draft per (thread, author), visible only to that author,
+ * and it survives the closing of the thread so a half-written answer is not lost.
+ */
+export const supportMessageDrafts = pgTable("support_message_drafts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id),
+  threadId: uuid("thread_id").notNull().references(() => supportThreads.id, { onDelete: "cascade" }),
+  authorId: uuid("author_id").notNull().references(() => users.id),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [
+  uniqueIndex("support_message_drafts_thread_author_unique").on(t.threadId, t.authorId),
+  index("support_message_drafts_thread_idx").on(t.threadId),
+]);
+
 export const notifications = pgTable("notifications", {
   id: uuid("id").primaryKey().defaultRandom(),
   organizationId: uuid("organization_id").notNull().references(() => organizations.id),

@@ -1,6 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { claims, notifications, orders, outboxEvents, paymentIntents, refunds } from "../db/schema.js";
+import { assertRole, type Principal, ROLE_GROUPS } from "../core/context.js";
+import { supportTransitionDedupeKey } from "../core/events.js";
+import { claims, notifications, orders, outboxEvents, paymentIntents, refunds, supportThreads } from "../db/schema.js";
 
 export const OUTBOX_MAX_ATTEMPTS = 5;
 export const OUTBOX_BACKOFF_BASE_MS = 5_000;
@@ -65,6 +67,23 @@ const EVENT_TEMPLATES: Record<string, string> = {
   "claim.decided": "claim_decided",
   "delivery.failed": "delivery_failed",
   "delivery.partial": "delivery_partial",
+  "support.closed": "support_closed",
+  "support.reopened": "support_reopened",
+};
+
+/**
+ * Events whose notification is written by the service that produced them (the support service
+ * notifies the customer the moment a thread is closed or reopened) and therefore has to share the
+ * dedupe key with the outbox copy of the same event: one customer, one notification.
+ *
+ * The key names the transition and not the thread, because a thread can be closed and reopened
+ * many times and every one of those transitions deserves its own notice. The outbox row id is
+ * the id of the event, so the same event always produces the same key - a redelivery collapses
+ * into the first delivery - while a later transition of the same thread gets a key of its own.
+ */
+const EVENT_DEDUPE_KEYS: Record<string, (aggregateId: string, eventId: string) => string> = {
+  "support.closed": (aggregateId, eventId) => supportTransitionDedupeKey(aggregateId, "closed", eventId),
+  "support.reopened": (aggregateId, eventId) => supportTransitionDedupeKey(aggregateId, "reopened", eventId),
 };
 
 type ClaimedOutboxRow = {
@@ -106,6 +125,19 @@ async function resolveOutboxOrderId(db: Db, row: ClaimedOutboxRow): Promise<stri
     return claimRow?.orderId ?? null;
   }
   return null;
+}
+
+/**
+ * A support thread hangs off an order, and the customer of that order is the one who has to be
+ * told that the thread was closed or reopened. The thread aggregate carries no order id of its
+ * own, so the outbox resolves it through the thread.
+ */
+async function resolveSupportThreadOrderId(db: Db, row: ClaimedOutboxRow): Promise<string | null> {
+  const [thread] = await db.select({ orderId: supportThreads.orderId }).from(supportThreads).where(and(
+    eq(supportThreads.id, row.aggregateId),
+    eq(supportThreads.organizationId, row.organizationId),
+  )).limit(1);
+  return thread?.orderId ?? null;
 }
 
 /**
@@ -191,57 +223,68 @@ export async function processOutbox(
     try {
       const template = EVENT_TEMPLATES[row.eventType];
       if (template) {
-        const orderId = await resolveOutboxOrderId(db, row);
-        if (!orderId) throw new Error("ORDER_UNRESOLVABLE");
-        const [order] = await db.select({ customerId: orders.customerId }).from(orders).where(and(
-          eq(orders.id, orderId),
-          eq(orders.organizationId, row.organizationId),
-        )).limit(1);
-        if (!order) throw new Error("ORDER_NOT_FOUND");
-        const dedupeKey = `outbox:${row.id}`;
-
-        // Idempotent provider receipt recording: if already delivered with a receipt, do not re-send.
-        let receiptId = row.providerReceipt;
-        let deliveredAt = new Date();
-        if (!receiptId) {
-          const delivery = await deliver({
-            eventId: row.id,
-            organizationId: row.organizationId,
-            recipientId: order.customerId,
-            orderId,
-            channel: "push",
-            template,
-            dedupeKey,
-            payload: { eventId: row.id, ...row.payload },
-          });
-          if (!delivery.receiptId || !delivery.receiptId.trim()) {
-            throw new Error("PROVIDER_RECEIPT_MISSING");
-          }
-          receiptId = delivery.receiptId.trim();
-          deliveredAt = delivery.deliveredAt ?? new Date();
-        }
-
-        await db.transaction(async tx => {
-          await tx.insert(notifications).values({
-            organizationId: row.organizationId,
-            recipientId: order.customerId,
-            orderId,
-            channel: "push",
-            template,
-            payloadJson: { eventId: row.id, ...row.payload },
-            dedupeKey,
-            state: "sent",
-          }).onConflictDoNothing();
-          await tx.update(outboxEvents)
-            .set({
-              state: "processed",
-              deliveryStatus: "delivered",
-              providerReceipt: receiptId,
-              deliveredAt,
-              error: null,
-            })
+        const isSupportEvent = row.eventType.startsWith("support.");
+        const orderId = isSupportEvent
+          ? await resolveSupportThreadOrderId(db, row)
+          : await resolveOutboxOrderId(db, row);
+        if (!orderId && isSupportEvent) {
+          // A thread without an order has no customer to notify: the event stays informational
+          // instead of failing over and over until it dies in the dead-letter queue.
+          await db.update(outboxEvents)
+            .set({ state: "processed", deliveryStatus: "skipped", error: null })
             .where(eq(outboxEvents.id, row.id));
-        });
+        } else {
+          if (!orderId) throw new Error("ORDER_UNRESOLVABLE");
+          const [order] = await db.select({ customerId: orders.customerId }).from(orders).where(and(
+            eq(orders.id, orderId),
+            eq(orders.organizationId, row.organizationId),
+          )).limit(1);
+          if (!order) throw new Error("ORDER_NOT_FOUND");
+          const dedupeKey = EVENT_DEDUPE_KEYS[row.eventType]?.(row.aggregateId, row.id) ?? `outbox:${row.id}`;
+
+          // Idempotent provider receipt recording: if already delivered with a receipt, do not re-send.
+          let receiptId = row.providerReceipt;
+          let deliveredAt = new Date();
+          if (!receiptId) {
+            const delivery = await deliver({
+              eventId: row.id,
+              organizationId: row.organizationId,
+              recipientId: order.customerId,
+              orderId,
+              channel: "push",
+              template,
+              dedupeKey,
+              payload: { eventId: row.id, ...row.payload },
+            });
+            if (!delivery.receiptId || !delivery.receiptId.trim()) {
+              throw new Error("PROVIDER_RECEIPT_MISSING");
+            }
+            receiptId = delivery.receiptId.trim();
+            deliveredAt = delivery.deliveredAt ?? new Date();
+          }
+
+          await db.transaction(async tx => {
+            await tx.insert(notifications).values({
+              organizationId: row.organizationId,
+              recipientId: order.customerId,
+              orderId,
+              channel: "push",
+              template,
+              payloadJson: { eventId: row.id, ...row.payload },
+              dedupeKey,
+              state: "sent",
+            }).onConflictDoNothing();
+            await tx.update(outboxEvents)
+              .set({
+                state: "processed",
+                deliveryStatus: "delivered",
+                providerReceipt: receiptId,
+                deliveredAt,
+                error: null,
+              })
+              .where(eq(outboxEvents.id, row.id));
+          });
+        }
       } else {
         await db.update(outboxEvents)
           .set({
@@ -280,6 +323,26 @@ export async function processOutbox(
     }
   }
   return { claimed: rows.length, processed, failed, deadLettered, paused: false as const };
+}
+
+/**
+ * The drain entry point for the operations surface (`POST /ops/outbox/drain`).
+ *
+ * The worker keeps calling `processOutbox` directly; this wrapper is the same drain behind a
+ * role check and a tenant scope, so a stand without a worker process can still deliver the
+ * notifications that are piling up in the outbox.
+ */
+export async function processOutboxBatch(
+  db: Db,
+  principal: Principal,
+  input: { limit?: number } = {},
+) {
+  assertRole(principal, ...ROLE_GROUPS.worker);
+  const result = await processOutbox(db, {
+    limit: input.limit,
+    organizationId: principal.organizationId,
+  });
+  return { processed: result.processed, failed: result.failed };
 }
 
 /**

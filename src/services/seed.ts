@@ -1,12 +1,14 @@
 import { and, asc, eq, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import type { Db, DbLike } from "../db/client.js";
 import {
   buildings, cities, courierShifts, customerAddresses, documentVersions, membershipRoles, memberships,
   organizations, partnerContracts, partnerPriceVersions, partners, priceRules, seals, serviceWindows, services,
   tariffPlans, tariffVersions, users,
 } from "../db/schema.js";
 import { AppError } from "../core/errors.js";
-import { seedDemoTenantBook, DEMO_PERSONAS } from "./demo-book.js";
+import { isUniqueViolation } from "../core/idempotency.js";
+import { withAdvisoryLock } from "../db/client.js";
+import { seedDemoTenantBook, DEMO_PERSONAS, isDemoPartnerRole } from "./demo-book.js";
 const DEMO_NAME = "Демо-прачечная";
 const TERMS = "offer-demo-2026-11";
 
@@ -46,7 +48,7 @@ const DEMO_WHOLESALE = {
  * seed was about 1 ₽ per kilogram, making every financial figure in the product nonsense. This
  * touches only the demo tenant.
  */
-async function ensureDemoEconomics(db: Db, organizationId: string): Promise<void> {
+async function ensureDemoEconomics(db: DbLike, organizationId: string): Promise<void> {
   const serviceRows = await db.select({ id: services.id, code: services.code }).from(services)
     .where(eq(services.organizationId, organizationId));
   const byCode = new Map(serviceRows.map(row => [row.code, row.id]));
@@ -104,6 +106,30 @@ async function ensureDemoEconomics(db: Db, organizationId: string): Promise<void
   }).where(eq(serviceWindows.organizationId, organizationId));
 }
 
+/**
+ * A conflict that means "the effect is already recorded".
+ *
+ * The demo stand is not a private room: the seed runs against a tenant that other flows have
+ * already touched, and the book writes its rows with stable idempotency keys. A row that is
+ * already there, or an idempotency record that already carries the effect, is not something
+ * the caller has to correct — the demo is populated either way. Such a conflict is therefore
+ * a successful re-run, and the seed says so in the log instead of answering 409.
+ */
+function isAlreadyRecorded(error: unknown): boolean {
+  if (isUniqueViolation(error)) return true;
+  const code = (error as { code?: unknown }).code;
+  return code === "IDEMPOTENCY_PAYLOAD_CONFLICT"
+    || code === "IDEMPOTENCY_OWNER_MISMATCH"
+    || code === "IDEMPOTENCY_IN_PROGRESS";
+}
+
+/** What the book reports when it found everything already in place. */
+const EMPTY_BOOK = {
+  orders: 0, customers: 0, protectedOrders: 0, garments: 0, invoices: 0,
+  captures: 0, refunds: 0, claims: 0, partnerInvoices: 0, partnerDisputes: 0,
+  partnerCreditNotes: 0, partnerPayouts: 0,
+};
+
 export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }) {
   if (
     process.env.NODE_ENV === "production"
@@ -111,6 +137,34 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
   ) {
     throw new AppError("UNAUTHORIZED", "DEMO_SEED_DISABLED");
   }
+  // The demo tenant is created on demand, and in the preview profile the endpoint is public:
+  // two visitors (or two tabs of the same visitor) can ask for it at the same moment. Without a
+  // lock the second call collides with the first one on the unique indexes and the caller gets a
+  // 409 instead of the demo book. The advisory lock makes the second caller wait for the first
+  // one and then find the tenant that is already there.
+  return withAdvisoryLock(db, "laundry:seed-demo", scoped => seedDemoTenant(scoped));
+}
+
+async function seedDemoTenant(db: Db) {
+  try {
+    return await seedDemoTenantRows(db);
+  } catch (error) {
+    // A seed that fails leaves a half-built demo behind, and the next call fails the same way.
+    // The constraint is the only clue to what collided, so it goes to the log.
+    const record = error as { code?: string; constraint?: string; detail?: string; message?: string };
+    if (!isAlreadyRecorded(error)) throw error;
+    console.error(
+      "[seed] the demo is already there:",
+      record.code ?? "UNIQUE_VIOLATION", record.constraint ?? "-", record.detail ?? record.message ?? "-",
+    );
+    const [existing] = await db.select().from(organizations).where(eq(organizations.name, DEMO_NAME)).limit(1);
+    if (!existing) throw error;
+    const summary = await demoSummary(db, existing.id);
+    return { ...summary, demoBook: EMPTY_BOOK };
+  }
+}
+
+async function seedDemoTenantRows(db: Db) {
   const [existing] = await db.select().from(organizations).where(eq(organizations.name, DEMO_NAME)).limit(1);
   if (existing) return seedBookForExistingTenant(db, existing.id);
 
@@ -160,7 +214,7 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
     }
     const [membership] = await db.insert(memberships).values({
       organizationId: org.id, userId: user.id,
-      partnerId: demo.role === "laundry_operator" ? partner.id : null,
+      partnerId: isDemoPartnerRole(demo.role) ? partner.id : null,
     }).returning();
     await db.insert(membershipRoles).values({ membershipId: membership.id, role: demo.role });
   }
@@ -248,9 +302,9 @@ export async function seedDemo(db: Db, options?: { previewAuthorized?: boolean }
  * produces are indistinguishable in shape from real rows — and every scenario reuses a stable
  * idempotency key, so a second run replays instead of duplicating.
  */
-async function seedBookForTenant(db: Db, summary: Awaited<ReturnType<typeof demoSummary>>) {
+async function seedBookForTenant(db: DbLike, summary: Awaited<ReturnType<typeof demoSummary>>) {
   const partnerId = summary.partners[0]?.id;
-  if (!partnerId) return { orders: 0, customers: 0, protectedOrders: 0, garments: 0, invoices: 0, captures: 0, refunds: 0, claims: 0 };
+  if (!partnerId) return { orders: 0, customers: 0, protectedOrders: 0, garments: 0, invoices: 0, captures: 0, refunds: 0, claims: 0, partnerInvoices: 0, partnerDisputes: 0, partnerCreditNotes: 0, partnerPayouts: 0 };
   return seedDemoTenantBook(db, {
     organizationId: summary.organizationId,
     buildings: summary.buildings,
@@ -262,7 +316,7 @@ async function seedBookForTenant(db: Db, summary: Awaited<ReturnType<typeof demo
   });
 }
 
-async function seedBookForExistingTenant(db: Db, organizationId: string) {
+async function seedBookForExistingTenant(db: DbLike, organizationId: string) {
   await ensureDemoEconomics(db, organizationId);
   const minEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   await db.update(courierShifts).set({
@@ -272,25 +326,35 @@ async function seedBookForExistingTenant(db: Db, organizationId: string) {
     eq(courierShifts.state, "active"),
   ));
   const summary = await demoSummary(db, organizationId);
+  // The book runs again on every visit to the stand. A row that another flow has already
+  // created (a resolved dispute, a delivered order, a bag that is already on an assignment)
+  // collides with the second run — and such a collision means "this row is there", which is
+  // what the demo shows anyway. The caller of the seed handles that case, so the book is
+  // allowed to fail here and is not silently swallowed.
   const book = await seedBookForTenant(db, summary);
   return { ...summary, demoBook: book };
 }
 
 async function demoSummary(
-  db: Db,
+  db: DbLike,
   organizationId: string,
   extra: Record<string, string> = {},
 ) {
   const [buildingRows, windowRows, serviceRows, partnerRows, [version], [shift]] = await Promise.all([
     db.select().from(buildings).where(eq(buildings.organizationId, organizationId)).orderBy(asc(buildings.address)),
-    db.select().from(serviceWindows).where(eq(serviceWindows.organizationId, organizationId)),
-    db.select().from(services).where(eq(services.organizationId, organizationId)),
-    db.select().from(partners).where(eq(partners.organizationId, organizationId)),
+    // The windows and the shift are picked in a fixed order. The demo book names them in its
+    // idempotency keys, so an unordered pick would hand the book a different row from one run
+    // to the next and the seed would stop being idempotent.
+    db.select().from(serviceWindows).where(eq(serviceWindows.organizationId, organizationId))
+      .orderBy(asc(serviceWindows.startsAt), asc(serviceWindows.id)),
+    db.select().from(services).where(eq(services.organizationId, organizationId)).orderBy(asc(services.code)),
+    db.select().from(partners).where(eq(partners.organizationId, organizationId)).orderBy(asc(partners.name)),
     db.select({ id: tariffVersions.id, termsVersion: tariffVersions.termsVersion })
       .from(tariffVersions)
       .innerJoin(tariffPlans, eq(tariffVersions.planId, tariffPlans.id))
       .where(eq(tariffPlans.organizationId, organizationId)).limit(1),
-    db.select().from(courierShifts).where(eq(courierShifts.organizationId, organizationId)).limit(1),
+    db.select().from(courierShifts).where(eq(courierShifts.organizationId, organizationId))
+      .orderBy(asc(courierShifts.startsAt), asc(courierShifts.id)).limit(1),
   ]);
 
   const primaryBuilding = buildingRows.find(b => b.address === "ул. Примерная, 12") ?? buildingRows[0];

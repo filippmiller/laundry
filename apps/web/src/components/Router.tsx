@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useLayoutEffect, type ReactNode } from "react";
 import { AnimatePresence } from "motion/react";
 import { Notice, DemoConfig } from "../types";
 import { WorkspaceTransition } from "./ui/Reveal";
@@ -41,6 +41,27 @@ function WorkspaceSkeleton() {
   );
 }
 
+function WorkspaceMountGate({
+  workspace,
+  navGen,
+  onMounted,
+  children,
+}: {
+  workspace: WorkspaceKey;
+  navGen: number;
+  onMounted?: (key: WorkspaceKey | null, navGen: number) => void;
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => {
+    onMounted?.(workspace, navGen);
+    return () => {
+      onMounted?.(null, navGen);
+    };
+  }, [workspace, navGen, onMounted]);
+
+  return <div data-mounted-workspace={workspace}>{children}</div>;
+}
+
 /**
  * Renders exactly one role workspace at a time. An operator who holds three
  * roles used to see all three workspaces stacked on one page; the rail now
@@ -51,11 +72,15 @@ export function Router({
   demo,
   setNotice,
   activeWorkspace,
+  navGen = 0,
+  onWorkspaceMounted,
 }: {
   me: { roles: string[] };
   demo: DemoConfig | null;
   setNotice: (notice: Notice) => void;
   activeWorkspace: WorkspaceKey | null;
+  navGen?: number;
+  onWorkspaceMounted?: (key: WorkspaceKey | null, navGen: number) => void;
 }) {
   function workspaceFor(key: WorkspaceKey) {
     switch (key) {
@@ -66,11 +91,11 @@ export function Router({
       case "partner":
         return <PartnerWorkspace notify={setNotice} roles={me.roles} />;
       case "dispatcher":
-        return <DispatcherWorkspace notify={setNotice} />;
+        return <DispatcherWorkspace notify={setNotice} roles={me.roles} />;
       case "admin":
         return <AdminWorkspace notify={setNotice} roles={me.roles} />;
       case "finance":
-        return <FinanceWorkspace demo={demo} notify={setNotice} />;
+        return <FinanceWorkspace demo={demo} notify={setNotice} roles={me.roles} />;
       case "support":
         return <SupportClaimsWorkspace notify={setNotice} roles={me.roles} />;
       default:
@@ -81,9 +106,15 @@ export function Router({
   return (
     <AnimatePresence mode="wait" initial={false}>
       {activeWorkspace ? (
-        <WorkspaceTransition key={activeWorkspace}>
+        <WorkspaceTransition key={`${activeWorkspace}:${navGen}`}>
           <Suspense fallback={<WorkspaceSkeleton />}>
-            {workspaceFor(activeWorkspace)}
+            <WorkspaceMountGate
+              workspace={activeWorkspace}
+              navGen={navGen}
+              onMounted={onWorkspaceMounted}
+            >
+              {workspaceFor(activeWorkspace)}
+            </WorkspaceMountGate>
           </Suspense>
         </WorkspaceTransition>
       ) : null}

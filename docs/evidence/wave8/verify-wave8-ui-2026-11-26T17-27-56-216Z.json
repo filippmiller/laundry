@@ -1,0 +1,119 @@
+{
+  "generatedAt": "2026-11-26T17:27:56.216Z",
+  "appUrl": "http://127.0.0.1:3127",
+  "kind": "browser acceptance in Chromium against the running web app",
+  "code": {
+    "codeSha": "b1e3932aa5b71354a0ee7f77e6e9a019fa1df69f",
+    "codeTree": "2eabb13df39ee2a6aef3ab862127c1b5a8df8e4e",
+    "branch": "feat/audit-remediation-wave6",
+    "dirty": true,
+    "changedFiles": [
+      "M beads/issues.jsonl",
+      "M apps/web/src/components/Shell.tsx",
+      "M apps/web/src/styles/base.css",
+      "M apps/web/src/styles/layout.css",
+      "M scripts/verify-mobile-layout.mjs",
+      "?? apps/web/src/scroll-lock.ts",
+      "?? docs/evidence/wave7/verify-wave7-2026-11-26T17-27-45-210Z.json",
+      "?? docs/evidence/wave7/verify-wave7-2026-11-26T17-27-45-210Z.md",
+      "?? docs/evidence/wave8/verify-wave8-2026-11-26T17-27-51-069Z.json",
+      "?? docs/evidence/wave8/verify-wave8-2026-11-26T17-27-51-069Z.md",
+      "?? docs/reports/PR4_FINAL_VERDICT_2026-11-27.md",
+      "?? test/web/scroll-lock.test.ts"
+    ],
+    "diffSha256": "3ecdb14ddd251befbecfc62b2ab6facc4a3b43a042fb56ba5c3d43c68c0307b5",
+    "evidenceCommit": null,
+    "evidenceCommitNote": "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA"
+  },
+  "stand": {
+    "mode": "spawned-by-this-script",
+    "appUrl": "http://127.0.0.1:3127",
+    "kind": "built-app-from-dist/web",
+    "detectedBy": "the served HTML loads the built asset(s) /assets/index-B4F2OiUv.js, /assets/index-B0-_DSb5.css",
+    "httpStatus": 200,
+    "servedAssets": [
+      "/assets/index-B4F2OiUv.js",
+      "/assets/index-B0-_DSb5.css"
+    ],
+    "pid": 18964,
+    "port": 3127,
+    "requestedPort": 3127,
+    "baseUrl": "http://127.0.0.1:3127",
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "node_modules/tsx/dist/cli.mjs",
+      "src/api/server.ts"
+    ],
+    "cwd": "C:\\dev\\laundry",
+    "startedAt": "2026-11-26T17:27:56.588Z",
+    "readyAt": "2026-11-26T17:27:59.272Z",
+    "code": {
+      "codeSha": "b1e3932aa5b71354a0ee7f77e6e9a019fa1df69f",
+      "codeTree": "2eabb13df39ee2a6aef3ab862127c1b5a8df8e4e",
+      "branch": "feat/audit-remediation-wave6",
+      "dirty": true,
+      "diffSha256": "3ecdb14ddd251befbecfc62b2ab6facc4a3b43a042fb56ba5c3d43c68c0307b5"
+    },
+    "build": {
+      "dir": "dist/web",
+      "indexHtmlMtime": "2026-11-26T17:22:15.138Z"
+    },
+    "log": ""
+  },
+  "summary": {
+    "total": 8,
+    "passed": 7,
+    "skipped": 1,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "id": "LND-R5-UI-0",
+      "name": "the fixture thread exists",
+      "status": "PASS",
+      "detail": "thread b95aa08f of the support operator"
+    },
+    {
+      "id": "LND-R5-UI-1",
+      "name": "a newer answer survives the acknowledgement of the previous one",
+      "status": "PASS",
+      "detail": "the POST was held, \"Ответ B, набранный во время отправки 202…\" was typed during the wait; after the answer the box still holds it and the server draft holds the same text"
+    },
+    {
+      "id": "LND-R5-UI-2",
+      "name": "the newer answer is restored after a reload",
+      "status": "PASS",
+      "detail": "after the reload the reply box of the thread holds \"Ответ B, набранный во время отправки 2026-11-26T17:28:02.409…\""
+    },
+    {
+      "id": "LND-R5-UI-3",
+      "name": "clearing the box during a pending autosave leaves the server empty",
+      "status": "PASS",
+      "detail": "the PUT was held, the box was cleared during the wait; afterwards the server draft is empty and the badge reads \"нет бейджа\""
+    },
+    {
+      "id": "LND-R5-UI-4",
+      "name": "a late answer of the old filter does not replace the new list",
+      "status": "PASS",
+      "detail": "the answer of the \"all\" filter was held and released after the switch to \"open\"; the select reads \"open\", the screen shows \"Показано 0 из 0\" and the server answers 0 for the same filter, 0 row(s), none of them closed"
+    },
+    {
+      "id": "LND-R5-UI-5",
+      "name": "resolving a dispute refreshes the sums of the open workspace",
+      "status": "SKIP",
+      "detail": "the demo book holds no open dispute to resolve in the finance list"
+    },
+    {
+      "id": "LND-R5-UI-6",
+      "name": "a finance-only operator is not offered the escalation actions",
+      "status": "PASS",
+      "detail": "the finance workspace shows the stuck orders panel without any escalate/close button"
+    },
+    {
+      "id": "LND-R5-UI-7",
+      "name": "a dispatcher keeps the escalation actions",
+      "status": "PASS",
+      "detail": "the dispatcher workspace shows 5 escalation button(s)"
+    }
+  ]
+}

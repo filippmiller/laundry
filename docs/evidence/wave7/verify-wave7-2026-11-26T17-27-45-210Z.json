@@ -1,0 +1,126 @@
+{
+  "generatedAt": "2026-11-26T17:27:45.210Z",
+  "baseUrl": "http://127.0.0.1:3107",
+  "organizationId": "26f433d7-24c1-426b-b395-34ceac2fe617",
+  "code": {
+    "codeSha": "b1e3932aa5b71354a0ee7f77e6e9a019fa1df69f",
+    "codeTree": "2eabb13df39ee2a6aef3ab862127c1b5a8df8e4e",
+    "branch": "feat/audit-remediation-wave6",
+    "dirty": true,
+    "changedFiles": [
+      "M beads/issues.jsonl",
+      "M apps/web/src/components/Shell.tsx",
+      "M apps/web/src/styles/base.css",
+      "M apps/web/src/styles/layout.css",
+      "M scripts/verify-mobile-layout.mjs",
+      "?? apps/web/src/scroll-lock.ts",
+      "?? docs/reports/PR4_FINAL_VERDICT_2026-11-27.md",
+      "?? test/web/scroll-lock.test.ts"
+    ],
+    "untrackedFiles": [
+      "apps/web/src/scroll-lock.ts",
+      "docs/reports/PR4_FINAL_VERDICT_2026-11-27.md",
+      "test/web/scroll-lock.test.ts"
+    ],
+    "diffSha256": "3ecdb14ddd251befbecfc62b2ab6facc4a3b43a042fb56ba5c3d43c68c0307b5",
+    "evidenceCommit": null,
+    "evidenceCommitNote": "the commit that carries this receipt is named in the remediation report; a document cannot state its own SHA"
+  },
+  "stand": {
+    "mode": "spawned-by-this-script",
+    "pid": 20580,
+    "port": 3107,
+    "requestedPort": 3107,
+    "baseUrl": "http://127.0.0.1:3107",
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "node_modules/tsx/dist/cli.mjs",
+      "src/api/server.ts"
+    ],
+    "cwd": "C:\\dev\\laundry",
+    "startedAt": "2026-11-26T17:27:45.632Z",
+    "readyAt": "2026-11-26T17:27:48.850Z",
+    "log": ""
+  },
+  "branch": "feat/audit-remediation-wave6",
+  "summary": {
+    "total": 12,
+    "passed": 11,
+    "skipped": 1,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "id": "LND-R4-02-1",
+      "name": "finance open dispute list",
+      "status": "PASS",
+      "detail": "status=200 items=1 totalCount=1 every item is in the open state"
+    },
+    {
+      "id": "LND-R4-02-2",
+      "name": "dispute cursor reaches the second page",
+      "status": "SKIP",
+      "detail": "only 1 open dispute(s) are reachable in the demo book (totalCount=1) and the partner endpoints could not open more — the second page could not be walked, so nothing is claimed here"
+    },
+    {
+      "id": "LND-R4-02-3",
+      "name": "partner dispute list honours the query string",
+      "status": "PASS",
+      "detail": "status=200 ?state=open&limit=1 returned exactly 1 item, totalCount=1 (state=open)"
+    },
+    {
+      "id": "LND-R4-02-4",
+      "name": "resolving a dispute changes the open list",
+      "status": "PASS",
+      "detail": "dispute 29900ac0 resolved (outcome=rejected), it left the open list and totalCount fell 1 → 0"
+    },
+    {
+      "id": "LND-R4-03-1",
+      "name": "partner balance is internally consistent",
+      "status": "PASS",
+      "detail": "accrued=2609900 disputed=0 gross=2609900 paid=0 reserved=2658000 available=-48100 and available === gross - paid - reserved"
+    },
+    {
+      "id": "LND-R4-03-2",
+      "name": "lifetime accrual total matches the balance",
+      "status": "PASS",
+      "detail": "estimatedTotalKopeks=2609900 === balance.accruedKopeks=2609900 (the lifetime total, not a page)"
+    },
+    {
+      "id": "LND-R4-04-1",
+      "name": "two close/reopen cycles on a support thread",
+      "status": "PASS",
+      "detail": "thread 2d8821bd on order 1897a4dd: close → reopen → close → reopen (close=200 reopen=200, close=200 reopen=200), the thread belongs to the signed-in customer"
+    },
+    {
+      "id": "LND-R4-04-2",
+      "name": "customer is notified twice per transition",
+      "status": "PASS",
+      "detail": "thread 2d8821bd: support_closed=2, support_reopened=2 in the customer's own feed (88 notifications read)"
+    },
+    {
+      "id": "LND-R4-04-3",
+      "name": "draining the outbox twice adds no duplicate",
+      "status": "PASS",
+      "detail": "two drains ({\"processed\":6,\"failed\":0}) left the counts at support_closed=2, support_reopened=2"
+    },
+    {
+      "id": "LND-R4-01-1",
+      "name": "the server-side draft survives",
+      "status": "PASS",
+      "detail": "PUT returned 200, GET read the same body back, DELETE returned 200 and the draft is gone afterwards (GET status=200, payload=null — the expected empty state, not merely \"not 200\")"
+    },
+    {
+      "id": "LND-R4-07-1",
+      "name": "worker health probe answers with the heartbeat",
+      "status": "PASS",
+      "detail": "without a heartbeat the probe exited 1 (default path: 1; \"worker-health: no heartbeat: the worker has not completed a cycle yet (heartbeat file missing or unreadable) (heartbeat \"), with a fresh heartbeat it exited 0 (\"worker-health: heartbeat ok: the last successful worker cycle is 0s old (limit 90s)\")"
+    },
+    {
+      "id": "STATIC-ROUTE-PARITY",
+      "name": "route/UI parity scan (STATIC, not proof of UI availability)",
+      "status": "PASS",
+      "detail": "ROUTES: 144 | CALL PATHS: 123 | HELPER PATHS: 2 | routes without a UI caller: 10 (/health/ready, /, /, /, /, /slots/holds, /ops/expire-holds, /ops/outbox/drain, /webhooks/payments/:provider, /finance/partner-disputes) | static scan of the sources, not a proof that a screen reaches the route — the web app reaches some of them through a variable (e.g. /finance/partner-disputes via useDisputeList), which the scan cannot see"
+    }
+  ]
+}

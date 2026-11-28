@@ -40,6 +40,9 @@ GET /partner/invoices; POST /partner/invoice-lines/:id/disputes.
 ## Dispatch/support/finance/admin
 GET /dispatch/dashboard; POST /dispatch/windows; POST /dispatch/routes; POST /dispatch/routes/:id/reassign.
 GET /claims; POST /claims/:id/assign; POST /claims/:id/decisions.
+GET /ops/stuck-orders?minutes=30 — two queues: `items` are the orders without movement, `escalations` are every open escalation of the tenant, reachable and closable even after its order moved on.
+POST /orders/:id/escalations — escalation with a reason; the author is the responsible person unless an assignee is named.
+POST /escalations/:id/resolve — close the escalation with a resolution.
 GET /finance/customer-reconciliation; GET /finance/partner-reconciliation.
 POST /finance/refunds; POST /finance/partner-invoices/:id/reconcile.
 POST /admin/tariff-versions; POST /admin/tariff-versions/:id/publish.
